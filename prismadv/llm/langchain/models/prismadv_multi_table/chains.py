@@ -1,0 +1,39 @@
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+
+from prismadv.llm.langchain.models.prismadv_multi_table.prompts import (
+    TABLE_COLUMN_ACCESS_DETECTION_PROMPT,
+    TABLE_COLUMN_ASSUMPTION_PROMPT,
+    TABLE_COLUMN_CODE_PROMPT,
+    TABLE_COLUMN_DATA_FLOW_PROMPT,
+    TABLE_COLUMN_DIRECT_CODE_PROMPT,
+    TABLE_COLUMN_GROUP_ASSUMPTION_PROMPT,
+    TABLE_COLUMN_GROUP_CODE_PROMPT,
+    TABLE_COLUMN_GROUP_DATA_FLOW_PROMPT,
+    TABLE_COLUMN_GROUP_DIRECT_CODE_PROMPT,
+    TABLE_COLUMN_GROUP_DISCOVERY_PROMPT,
+)
+from prismadv.llm.langchain.models.prismadv_multi_table.tasks import MultiTablePrismaDVTasks
+
+
+PROMPT_MAP = {
+    MultiTablePrismaDVTasks.TABLE_COLUMN_ACCESS_DETECTION: TABLE_COLUMN_ACCESS_DETECTION_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_DATA_FLOW_INSPECTION: TABLE_COLUMN_DATA_FLOW_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_ASSUMPTION_GENERATION: TABLE_COLUMN_ASSUMPTION_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_CODE_GENERATION: TABLE_COLUMN_CODE_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_DIRECT_CODE_GENERATION: TABLE_COLUMN_DIRECT_CODE_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_DISCOVERY: TABLE_COLUMN_GROUP_DISCOVERY_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_DATA_FLOW_INSPECTION: TABLE_COLUMN_GROUP_DATA_FLOW_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_ASSUMPTION_GENERATION: TABLE_COLUMN_GROUP_ASSUMPTION_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_CODE_GENERATION: TABLE_COLUMN_GROUP_CODE_PROMPT,
+    MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_DIRECT_CODE_GENERATION: TABLE_COLUMN_GROUP_DIRECT_CODE_PROMPT,
+}
+
+
+def create_chain(task: MultiTablePrismaDVTasks, model):
+    prompt = ChatPromptTemplate([("human", PROMPT_MAP[task])])
+    return prompt | model | JsonOutputParser()
+
+
+def build_chains(model):
+    return {task: create_chain(task, model) for task in PROMPT_MAP}

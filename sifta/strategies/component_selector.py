@@ -1,0 +1,19 @@
+from sifta.core.adapter import Trajectory
+from sifta.core.state import SIFTAState
+from sifta.proposer.reflective_mutation.base import ReflectionComponentSelector
+
+
+class RoundRobinReflectionComponentSelector(ReflectionComponentSelector):
+    def select_modules(
+            self,
+            state: SIFTAState,
+            trajectories: list[Trajectory],
+            subsample_scores: list[float],
+            candidate_idx: int,
+            candidate: dict[str, str],
+    ) -> list[str]:
+        pid = state.named_predictor_id_to_update_next_for_program_candidate[candidate_idx]
+        state.named_predictor_id_to_update_next_for_program_candidate[candidate_idx] = (pid + 1) % len(
+            state.list_of_named_predictors)
+        name = state.list_of_named_predictors[pid]
+        return [name]

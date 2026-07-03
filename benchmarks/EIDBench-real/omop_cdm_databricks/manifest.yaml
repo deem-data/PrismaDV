@@ -1,0 +1,156 @@
+example_id: omop_cdm_databricks
+display_name: OMOP CDM (Databricks Synthea→OMOP)
+source_repo: https://github.com/databricks-industry-solutions/omop-cdm
+source_commit: null
+source_license: Databricks License
+domain: healthcare
+primary_runtime: pyspark
+primary_language: python
+task_type: etl_pipeline
+clean_should_pass: true
+corruption_mode: generated
+environment:
+  runner: uv
+  project_dir: benchmarks/EIDBench-real/omop_cdm_databricks
+  command_prefix: ["uv", "run", "--project", "benchmarks/EIDBench-real/omop_cdm_databricks"]
+  dependencies_file: pyproject.toml
+notes_on_repairs: |
+  The upstream `databricks-industry-solutions/omop-cdm` is a Databricks-
+  notebook pipeline. The example de-Databricksifies the upstream files
+  in-place under `adapter/source_repo/` (flat layout matching the upstream
+  repo). In short:
+    - SQL files: cell separators (`-- COMMAND ----------`) and markdown cells
+      (`-- MAGIC %md ...`) are stripped; `-- MAGIC %python` cells are
+      replaced with a one-line marker (`-- [python cell handled by Python
+      adapter] ...`) and the Python adapter does that work natively;
+      `CREATE OR REPLACE TABLE T (...)` becomes `DROP TABLE IF EXISTS T;
+      CREATE TABLE T (...)`; `USING DELTA` clauses are dropped.
+    - `1-data-ingest.py` is rewritten as a Python module exposing
+      `register_bronze_views(spark, input_dir)` — reads our 6 Synthea CSVs
+      from `files/clean/tables/` instead of DBFS, stubs `immunizations`
+      empty, and renames `procedures.DATE → START`.
+    - `5-CHF-cohort-building.r` is rewritten to use DBI + RSQLite on a
+      SQLite DB the Python adapter exports from Spark after the ETL.
+      SQL CTEs translate to SQLite syntax (`date_add` → `date(...,'+N days')`,
+      `DATEDIFF` → `julianday` arithmetic, `YEAR(d)` → `strftime`).
+    - `6-drug-analysis.py` exposes `run_drug_analysis(spark)` that runs the
+      four analytical queries from upstream Examples 1, 2, 3, 4.1; plotly
+      rendering and the FP-Growth (Example 4.2) example are not ported.
+    - `adapter/case.py` orchestrates: boots Spark, calls
+      `1-data-ingest.py::register_bronze_views`, executes
+      `2-omop531-cdm-setup.sql`, INSERT OVERWRITEs the vocab tables from
+      the ~1.2 MB filtered Athena subset under `files/clean/tables/vocab/`,
+      executes `3-omop-vocab-setup.sql` for vocab map building, executes
+      `4-omop531-etl-synthea.sql`, and dispatches to `6-drug-analysis.py`
+      or the R script as needed.
+upstream_entrypoints:
+  - 1-data-ingest.py
+  - 2-omop531-cdm-setup.sql
+  - 3-omop-vocab-setup.sql
+  - 4-omop531-etl-synthea.sql
+  - 5-CHF-cohort-building.r
+  - 6-drug-analysis.py
+benchmark_adapter_files:
+  - adapter/case.py
+  - adapter/run_script.py
+  - adapter/source_repo/1-data-ingest.py
+  - adapter/source_repo/2-omop531-cdm-setup.sql
+  - adapter/source_repo/3-omop-vocab-setup.sql
+  - adapter/source_repo/4-omop531-etl-synthea.sql
+  - adapter/source_repo/5-CHF-cohort-building.r
+  - adapter/source_repo/6-drug-analysis.py
+  - pyproject.toml
+  - pixi.toml
+external_dependencies:
+  - pandas
+  - pyspark
+  - r-base
+  - r-dplyr
+  - r-tidyr
+  - r-lubridate
+  - r-readr
+data_provenance: |
+  Reuses the deterministic Synthea CSV subset (6 tables) from the existing
+  omop_cdm_synthea example as the initial input set:
+  patients, encounters, conditions, medications, observations, procedures.
+  An additional `immunizations` table is stubbed empty in the adapter because
+  the ETL has a LEFT JOIN on it; the remaining ~9 Synthea tables defined in
+  the upstream bronze-load loop are never referenced by the ETL we run.
+
+  files/clean/tables/vocab/ contains a filtered subset (~48 KB) of the Athena
+  OMOP vocab dump (CONCEPT, CONCEPT_RELATIONSHIP, VOCABULARY, DOMAIN,
+  CONCEPT_CLASS, RELATIONSHIP). It was produced by
+  scripts/filter_omop_vocab.py from the public S3 bundle at
+  s3://hls-eng-data-public/data/rwe/omop-vocabs/; only the 646 SNOMED/RxNorm/
+  LOINC codes our Synthea sample uses, plus their `Maps to` targets, are
+  retained. This is what lets the ETL produce non-empty
+  condition_occurrence / drug_exposure / measurement / procedure_occurrence
+  tables instead of all-zero rows.
+license_notes: |
+  Upstream is the Databricks Solution Accelerator (Databricks License).
+  Synthea sample data is public synthetic healthcare data.
+input_layout:
+  observed_tables_dir: files/observed/tables
+  clean_input_dir: files/clean/tables
+  clean_tables_dir: files/clean/tables
+  corrupted_root_dir: files/corrupted
+expected_outputs:
+  sql_etl:
+    clean_summary_path: expected/sql_etl/clean_summary.json
+  drug_analysis:
+    clean_summary_path: expected/drug_analysis/clean_summary.json
+  chf_cohort:
+    clean_summary_path: expected/chf_cohort/clean_summary.json
+tables:
+  patients:
+    format: csv
+    observed_path: files/observed/tables/patients.csv
+    clean_path: files/clean/tables/patients.csv
+    primary_key: Id
+  encounters:
+    format: csv
+    observed_path: files/observed/tables/encounters.csv
+    clean_path: files/clean/tables/encounters.csv
+    primary_key: Id
+  conditions:
+    format: csv
+    observed_path: files/observed/tables/conditions.csv
+    clean_path: files/clean/tables/conditions.csv
+    primary_key: null
+  medications:
+    format: csv
+    observed_path: files/observed/tables/medications.csv
+    clean_path: files/clean/tables/medications.csv
+    primary_key: null
+  observations:
+    format: csv
+    observed_path: files/observed/tables/observations.csv
+    clean_path: files/clean/tables/observations.csv
+    primary_key: null
+  procedures:
+    format: csv
+    observed_path: files/observed/tables/procedures.csv
+    clean_path: files/clean/tables/procedures.csv
+    primary_key: null
+scripts:
+  sql_etl:
+    entrypoint: adapter/run_script.py
+    reads: [patients, encounters, conditions, medications, observations, procedures]
+    writes: []
+    depends_on: []
+    timeout_seconds: 600
+    clean_should_pass: true
+  drug_analysis:
+    entrypoint: adapter/run_script.py
+    reads: [patients, encounters, conditions, medications, observations, procedures]
+    writes: []
+    depends_on: [sql_etl]
+    timeout_seconds: 300
+    clean_should_pass: true
+  chf_cohort:
+    entrypoint: adapter/run_script.py
+    reads: [patients, encounters, conditions, medications, observations, procedures]
+    writes: []
+    depends_on: [sql_etl]
+    timeout_seconds: 300
+    clean_should_pass: true
