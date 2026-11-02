@@ -43,7 +43,20 @@ class GaussianNoise(TabularCorruption):
                 return dataframe
 
             noise = np.random.normal(0, scale * stddev, size=len(rows))
-            if dataframe[column].dtype == dtype('int64'):
+            if self._holds_integers(dataframe[column]):
+                # Integer noise on an integer column, including one that a
+                # previous corruption upcast to float by inserting a NaN, so
+                # the untouched values stay integral and the manager can cast
+                # the column back to Int64 for the saved CSV.
                 noise = noise.astype(int)
             dataframe.loc[rows, column] += noise
         return dataframe
+
+    @staticmethod
+    def _holds_integers(series: pd.Series) -> bool:
+        if pd.api.types.is_integer_dtype(series):
+            return True
+        if not pd.api.types.is_float_dtype(series):
+            return False
+        values = series.dropna()
+        return len(values) > 0 and bool((values == values.round()).all())

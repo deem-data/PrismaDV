@@ -47,6 +47,4 @@ class GXFunctionManager:
 
 if __name__ == "__main__":
     gx_function_manager = GXFunctionManager()
-    # print(gx_function_manager.get_all_text_descriptions())
-    # print(gx_function_manager.get_all_signatures())
     print(gx_function_manager.get_expectation("ExpectColumnMaxToBeBetween"))

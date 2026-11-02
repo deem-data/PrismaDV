@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import List
 
+from ..labels import is_label, label_sort_key
+
 
 class DataManager:
     """Manages data path resolution for processed data and test data.
@@ -95,9 +97,11 @@ class DataManager:
             raise ValueError(
                 f"Processed data path <{processed_data_path}> does not exist.\n"
                 f"Please check if the processed data has been generated for subtask <{subtask_name}>.")
-        processed_data_labels = [item.name for item in processed_data_path.iterdir() if item.is_dir()]
-        processed_data_labels = sorted(processed_data_labels)
-        return processed_data_labels
+        # Label folders only (`0` and `<group>-<n>`). The subtask directory also
+        # holds label-independent artifacts -- `constraints/` among them.
+        processed_data_labels = [item.name for item in processed_data_path.iterdir()
+                                 if item.is_dir() and is_label(item.name)]
+        return sorted(processed_data_labels, key=label_sort_key)
 
     def get_new_data_path(self, subtask_name: str, processed_data_label: str, clean: bool = True) -> Path:
         """Get the path to new data (clean or corrupted).

@@ -38,6 +38,9 @@ assert cores < 20, f"CPU count ({cores}) exceeds safety limit of 20. We might se
 # AQE will optimize partition sizes automatically, so this is just a starting point
 shuffle_parts = min(max(8, cores * 2), 32)
 
+# Frames up to this many rows are coalesced to one partition in spark_df_from_pandas_df
+_single_partition_max_rows = 200_000
+
 
 class AbstractDataQualityManager(ABC):
     """
@@ -133,6 +136,13 @@ class AbstractDataQualityManager(ABC):
             spark_df = spark.createDataFrame(pandas_df, schema=schema)
         else:
             spark_df = spark.createDataFrame(pandas_df)
+
+        # createDataFrame splits the frame into spark.default.parallelism (up to 32)
+        # partitions, so every Deequ run schedules that many tasks plus an adaptive
+        # coalesce stage for a few thousand rows. One partition halves the per-run
+        # cost on pandas-sized inputs; large frames keep the default layout.
+        if len(pandas_df) <= _single_partition_max_rows:
+            spark_df = spark_df.coalesce(1)
 
         return spark_df, spark
 

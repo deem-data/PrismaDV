@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -58,10 +59,13 @@ def infer_deequ_constraints(
     *,
     dq_manager: DeequDataQualityManager,
 ) -> tuple[ConstraintsWithSources, list[dict[str, str]]]:
-    """Per table: run Deequ suggestion on the clean data, validate on clean, assemble."""
+    """Per table: run Deequ suggestion on the observed data, validate on it, assemble."""
     ensure_java_security_manager_compat()
+    # Suggestion runs on the observed bundle, never on a bundle this row will be
+    # scored against. `clean` is an evaluation target, and every corrupted bundle
+    # is that same clean data with a corruption applied.
     bundle = MultiTableLoader(project_manager).load_pandas(
-        variant="clean",
+        variant="observed",
         table_names=table_names,
     )
     result = ConstraintsWithSources()
@@ -133,15 +137,19 @@ def generate_deequ_constraints(
     )
     table_names = sorted(prismadv_inputs["table_profiles"])
     dq_manager = dq_manager or DeequDataQualityManager()
+    # Wall clock of the inference: observed bundle load, Spark start, suggestion and its check on observed.
+    started = time.perf_counter()
     constraints, raw_constraints = infer_deequ_constraints(
         project_manager, table_names, dq_manager=dq_manager
     )
+    wall_clock_seconds = round(time.perf_counter() - started, 3)
 
     output_path = output_dir / make_output_filename()
     result = {
         "baseline_method": BASELINE_METHOD,
         "model_name": MODEL_TAG,
         "input_artifact": str(resolved_input_path),
+        "wall_clock_seconds": wall_clock_seconds,
         "raw_constraints": raw_constraints,
         "constraints": constraints.to_dict()["constraints"],
     }

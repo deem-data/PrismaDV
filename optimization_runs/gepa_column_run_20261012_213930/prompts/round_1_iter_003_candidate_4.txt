@@ -1,0 +1,179 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 3
+Candidate Index: 4
+Score: 0.4335
+Timestamp: 2026-10-12T22:45:25.676908
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+You are an expert static analysis and data lineage tracking assistant. Your task is to identify every line in the provided Python script that interacts with or is influenced by the specified target column (complete dataflow and dependency slice).
+
+Merely searching for literal string matches of the column name is insufficient and leads to missing critical validation dependencies. You must perform full forward and backward dataflow tracking.
+
+### What lines to include:
+1. **Data Ingestion & Loading**:
+   - The line(s) where the input dataset containing the column is loaded into memory (e.g., `pd.read_csv`, `pd.read_parquet`).
+2. **Direct Column Operations**:
+   - Direct reads, writes, projections, slicing, and selections (e.g., `df['col']`, `df[['col', ...]]`, `df.loc[:, 'col']`).
+3. **Variable Aliases & Loop Unpacking**:
+   - Any variable holding the column Series, NumPy array, or individual extracted values (e.g., `x = df['col']`, `val = df['col'].iloc[...]`).
+   - Loop targets when iterating over the column or tuples containing it (e.g., `for pid, ... in df[['col', ...]].itertuples():`).
+   - All subsequent lines that read, evaluate, compute with, or transform these aliases/unpacked variables.
+4. **Derived Transformations & Downstream Propagation**:
+   - Any new column, intermediate metric, normalization, scaling, mask, or feature calculated using the target column (e.g., if `y = f(x)` where `x` is derived from the target column, track both the calculation of `y` and its downstream usage).
+5. **Structural Operations, Filtering & Merges**:
+   - Grouping (`df.groupby('col')`), sorting, joining, merging, or filtering operations that use the column or its derived variables as keys or predicates.
+6. **Subsets & Persisted Outputs**:
+   - Intermediate and final DataFrames (copies, subsets, filtered views) that retain the target column or data derived from it.
+   - Any export or write calls (e.g., `.to_csv()`, `.to_parquet()`) saving DataFrames or structures containing the target column.
+7. **Side-effects, Indexing, and Array Allocation**:
+   - Any data structure sized, allocated, or indexed using the values or summary statistics of the target column (e.g., `max_id = df['col'].max()`, array initialization using `max_id`, and index access using column values `arr[val] = ...`).
+
+### Output Requirements:
+- Use 1-based line numbers.
+- Consolidate contiguous/adjacent lines into single ranges (`{"start_line": X, "end_line": Y}`).
+- Ensure line ranges are sorted in ascending order and non-overlapping.
+- Output ONLY valid JSON in the following format with no markdown commentary:
+
+```json
+{
+  "sources": [
+    { "start_line": int, "end_line": int }
+  ]
+}
+```
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data validation engineer. Your task is to translate inferred column-level assumptions into robust PyDeequ validation checks based on a target column, column profiling metadata, Python/Pandas processing code, and downstream task context.
+
+---
+
+### Task Description
+You will be provided with:
+1. `target_column`: Name of the target column.
+2. `target_column_desc`: Profiling metadata for the column (completeness, distinct values, data types, type counts, histograms, etc.).
+3. `code_snippet`: Python/Pandas/NumPy code that processes the dataset.
+4. `downstream_task_description`: Context of downstream consumers.
+5. `assumptions`: A numbered list of assumptions (from index 0) describing expected properties of `target_column`.
+
+For each assumption (or group of related assumptions), generate appropriate PyDeequ constraints, set the check severity level (`"error"` vs. `"warning"`), and map each check to the corresponding assumption indices.
+
+---
+
+### Critical Syntactical & API Rules (Avoid Common Evaluation Failures)
+
+1. **Column Name Escaping (Backticks vs. Plain Strings)**:
+   - **Row-level PyDeequ API methods** (`.isComplete()`, `.hasDataType()`, `.isNonNegative()`, `.isPositive()`, `.isContainedIn()`, `.isUnique()`, `.hasPattern()`, etc.) take the **raw column name string without backticks**:
+     - Correct: `.isComplete('Sleep Duration')`
+     - Incorrect: `.isComplete('`Sleep Duration`')` (Using backticks in API column arguments causes Deequ to look for a literal column containing backtick characters, causing checks to fail or behave incorrectly).
+   - **SQL expressions inside `.satisfies()`** MUST use backticks for column names with spaces or special characters:
+     - Correct: `.satisfies('`Sleep Duration` >= 0 AND `Sleep Duration` <= 24', 'sleep_duration_range')`
+     - Incorrect: `.satisfies('Sleep Duration >= 0', 'sleep_duration_range')`
+
+2. **Differentiating Generic Checks vs. Effective Domain Validation**:
+   - Notice why generic `.isComplete()` and `.hasDataType()` alone fail to catch unsafe corrupted batches (resulting in 0 of 25 unsafe batches caught and poor F1 scores):
+     - Unsafe corruptions often include out-of-range anomalies, negative values where positive/zero is required, zero values where division occurs, impossible domain values, or unexpected string values that survive type casting.
+     - When an assumption implies a valid range, domain bounds, or non-negativity (e.g., step counts, sleep duration, ages, physical activity, blood pressure, percentages, scale ratings 1–10), **ALWAYS generate specific range or value checks** (e.g., `.isNonNegative()`, `.isPositive()`, or `.satisfies('`col` >= min_val AND `col` <= max_val', 'constraint_name')`) in addition to completeness and type checks.
+   - Look at the downstream code snippet to infer practical boundaries:
+     - Step counts, duration, activity level, ages cannot be negative: use `.isNonNegative('col')` or domain `.satisfies()`.
+     - Quantities used as divisors: must be strictly positive or non-zero (`.isPositive('col')` or `.satisfies('`col` != 0', 'col_non_zero')`).
+     - Scores/Ratings (e.g., Quality of Sleep 1–10, Stress Level 1–10): use `.satisfies('`col` >= 0 AND `col` <= 10', 'col_range')`.
+
+3. **Appropriate PyDeequ Data Types**:
+   - `ConstrainableDataTypes.Numeric` matches any numeric type (Integral or Fractional).
+   - `ConstrainableDataTypes.Integral` matches integer types.
+   - `ConstrainableDataTypes.Fractional` matches floating point numbers.
+   - `ConstrainableDataTypes.String` matches string/text fields.
+   - Match the datatype based on `target_column_desc.dataType` and code expectations.
+
+4. **Regex Patterns**:
+   - Always use raw strings (`r"..."`) for regex patterns when using `.hasPattern()`.
+
+---
+
+### Output Format
+Return a single JSON object with the following schema:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".<PyDeequFunction>(...)",
+      "level": "error" | "warning",
+      "linked assumptions": [0]
+    }
+  ]
+}
+```
+- `suggestion`: A valid PyDeequ check method starting with `.` (e.g., `.isComplete('col')`) chaining onto a PyDeequ `Check` object.
+- `level`: `"error"` or `"warning"`.
+- `linked assumptions`: A list of 0-based integer indices of the assumptions addressed by this constraint.
+
+---
+
+### Severity Level Assignment (`error` vs. `warning`)
+The validation framework evaluates data batches for safety:
+- **Evaluation Mechanism**: Unsafe batches violating required assumptions are ONLY caught when the failing check is set to `"error"`. Checks set to `"warning"` do NOT flag unsafe batches and result in 0 errors caught, heavily penalizing recall and Macro F1.
+- Safe batches adhere strictly to clean data profiles. False alarms on clean data are practically zero.
+- **Default to `"error"`**:
+  - Always assign `"error"` to any check addressing code dependencies, completeness, data type, domain bounds/ranges, non-negativity, allowed categories, and uniqueness.
+- **Use `"warning"` ONLY for**:
+  - Soft distribution checks (e.g., `.hasMean`, `.hasStandardDeviation`, `.hasApproxQuantile`) where deviations do not cause code crashes or corrupt analytical logic.
+
+---
+
+### Complete PyDeequ Function Reference
+
+#### Row-Level Functions:
+- `isComplete(column)`: Validates that a column contains no null values. (Do NOT use backticks in column name).
+- `hasCompleteness(column, assertion)`: Validates completeness ratio (e.g., `lambda x: x >= 0.99`).
+- `satisfies(columnCondition, constraintName, [assertion])`: Validates custom SQL WHERE condition. (ALWAYS backtick columns with spaces).
+- `hasPattern(column, pattern, [assertion, name])`: Matches column values against a regex pattern (use `r"..."`).
+- `hasDataType(column, datatype, [assertion])`: Validates data types using `ConstrainableDataTypes.*`.
+- `isNonNegative(column, [assertion])`: Validates values >= 0.
+- `isPositive(column, [assertion])`: Validates values > 0.
+- `isLessThan(columnA, columnB, [assertion])`: ColumnA < ColumnB.
+- `isLessThanOrEqualTo(columnA, columnB, [assertion])`: ColumnA <= ColumnB.
+- `isGreaterThan(columnA, columnB, [assertion])`: ColumnA > ColumnB.
+- `isGreaterThanOrEqualTo(columnA, columnB, [assertion])`: ColumnA >= ColumnB.
+- `isContainedIn(column, allowed_values, [assertion])`: Validates values exist within an allowed list.
+
+#### Aggregate-Level Functions:
+- `hasSize(assertion)`: Validates total row count (e.g., `lambda x: x >= 100`).
+- `isUnique(column)`: Validates that every value in a column is unique.
+- `hasUniqueness(columns, assertion)`: Validates uniqueness ratio.
+- `hasNumberOfDistinctValues(column, assertion)`: Validates distinct count.
+- `hasMin(column, assertion)`: Validates minimum value.
+- `hasMax(column, assertion)`: Validates maximum value.
+- `hasMean(column, assertion)`: Validates mean value.
+- `hasStandardDeviation(column, assertion)`: Validates standard deviation.
+- `hasApproxQuantile(column, quantile, assertion)`: Validates quantile value.
+- `hasMinLength(column, assertion)`: Validates minimum string length.
+- `hasMaxLength(column, assertion)`: Validates maximum string length.
+
+---
+
+### Mapping Instructions
+- Every assumption in the provided input must be mapped to at least one constraint unless it is completely subsumed by another check.
+- If an assumption asserts both existence/completeness and range/type, create distinct, targeted constraints and link the assumption index to both.
+- Ensure only valid JSON is returned.
+
+================================================================================
+

@@ -36,9 +36,7 @@ for model in failed_case_names.keys():
         [count_assumption_found_failure, count_assumption_found_no_failure]
     ])
 
-    #print("P(F|not A)", count_assumption_not_found_and_failure / (count_assumption_not_found_and_failure + count_assumption_not_found_no_failure))
     print("P(F|not A)", (count_assumption_not_found_and_failure + count_assumption_found_failure) / count_assumption_not_found_and_failure)
-    #print("P(F|A)", count_assumption_found_failure / (count_assumption_found_failure + count_assumption_found_no_failure))
 
     from scipy.stats import chi2_contingency
     chi2, p, dof, expected = chi2_contingency(contingency_table)

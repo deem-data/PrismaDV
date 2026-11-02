@@ -34,14 +34,11 @@ class MLInferenceErrorInjectionManager(AbstractErrorInjectionManager):
         return FileLoader.load_csv(self.raw_file_path / f"{self.target_table_name}.csv")
 
     def error_injection(self, corrupts):
-        post_corruption_test_data = self.test_data.copy(deep=True)
-        for corrupt in corrupts:
-            post_corruption_test_data = corrupt.transform(post_corruption_test_data)
-        self.post_corruption_test_data = post_corruption_test_data
+        self.post_corruption_test_data = self.apply_corrupts(self.test_data, corrupts)
         self.corrupts = corrupts
 
-    def save_data(self):
-        processed_data_path = self._create_processed_data_path(self.processed_data_dir)
+    def save_data(self, processed_data_label):
+        processed_data_path = self._create_processed_data_path(self.processed_data_dir, processed_data_label)
         MLInferenceDatasetLoader().save_data(
             processed_data_path,
             self.train_data,
@@ -52,11 +49,7 @@ class MLInferenceErrorInjectionManager(AbstractErrorInjectionManager):
             self.sample_submission
         )
         self.save_error_injection_config(processed_data_path, self.corrupts)
-
-    def save_error_injection_config(self, processed_data_path, corrupts):
-        config_path = processed_data_path / "error_injection_config.yaml"
-        with open(config_path, "w") as f:
-            f.write(self.corrupts_to_yaml(corrupts))
+        return processed_data_path
 
     def _split_dataset(self, full_data):
         full_data.drop(columns=["id"], inplace=True) if "id" in full_data.columns else None

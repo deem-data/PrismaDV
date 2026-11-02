@@ -81,7 +81,7 @@ class SourceLocations:
     @classmethod
     def from_dict(cls, data: List[Dict]):
         sources = []
-        for source in data:
+        for source in data or []:                   # an LLM can answer "sources": null
             # Skip empty dictionaries or non-dict entries
             if not isinstance(source, dict) or not source:
                 continue
@@ -140,7 +140,7 @@ class AssumptionEntry:
 
         # Parse sources with validation
         sources = []
-        for source in data.get("sources", []):
+        for source in data.get("sources") or []:    # an LLM can answer "sources": null
             if not isinstance(source, dict):
                 # Skip invalid source entries
                 continue

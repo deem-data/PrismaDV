@@ -12,6 +12,7 @@ from prismadv.dq_manager import DeequDataQualityManager
 from prismadv.inspector.deequ.deequ_inspector_manager import DeequInspectorManager
 from prismadv.loader import FileLoader
 from prismadv.project_manager.manager.base import ProjectManager
+from workflow_sifta.optimization_fns.optimization_labels import optimization_is_safe
 
 
 def _load_script_level_inputs(
@@ -52,12 +53,14 @@ def prepare_script_level_dataset(
         processed_data_label: Union[str, Dict[str, str]] = "0",
         new_processed_data_label_list: Union[List[str], Dict[str, List[str]], None] = None,
         project_root: Path = None,
+        relabelled: frozenset = frozenset(),
 ) -> List[dspy.Example]:
     """
     Prepare script-level dataset examples.
 
     Each item includes dataset/subtask/script metadata plus the script code and
-    full column descriptions.
+    full column descriptions. relabelled: units (dataset, label, script) the optimization
+    sees as safe (workflow_sifta.optimization_fns.optimization_labels).
     """
 
     dataset = []
@@ -106,7 +109,8 @@ def prepare_script_level_dataset(
                                 with open(exec_path, "r") as f:
                                     exec_results = yaml.load(f, Loader=yaml.FullLoader)
                                 is_safe = exec_results.get("corrupted_data_is_safe", True)
-                                new_data_safety[new_label] = is_safe
+                                new_data_safety[new_label] = optimization_is_safe(
+                                    dataset_name, new_label, script_name, is_safe, relabelled)
                             except (FileNotFoundError, KeyError):
                                 new_data_safety[new_label] = True
 

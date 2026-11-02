@@ -17,13 +17,10 @@ class StringNoise(TabularCorruption):
             random_state=None,
             **kwargs
     ):
-        super().__init__(columns=columns, severity=severity, sampling=sampling, **kwargs)
+        super().__init__(columns=columns, severity=severity, sampling=sampling,
+                         random_state=random_state, **kwargs)
         self.mode = mode
         self.alphabet = list(alphabet)
-        self.random_state = random_state
-        if random_state is not None:
-            random.seed(random_state)
-            np.random.seed(random_state)
 
     def __str__(self):
         return f"{self.__class__.__name__}: {self.__dict__}"
@@ -65,6 +62,8 @@ class StringNoise(TabularCorruption):
             return self._flip_case(s, p)
         elif self.mode == "insert":
             return self._insert_letters(s, p)
+        elif self.mode == "transpose":
+            return self._transpose(x, s)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
@@ -73,13 +72,34 @@ class StringNoise(TabularCorruption):
         out = []
         for ch in s:
             if ch.isalpha() and random.random() < prob:
-                if ch.islower():
-                    out.append(ch.upper())
-                else:
-                    out.append(ch.lower())
+                out.append(ch.swapcase())
             else:
                 out.append(ch)
+        # `prob` is the row-level severity reused per character, so at a few
+        # percent almost every sampled cell used to come back unchanged. A
+        # sampled cell must carry the error: flip at least one letter.
+        alpha_positions = [i for i, ch in enumerate(s) if ch.isalpha()]
+        if alpha_positions and out == list(s):
+            i = random.choice(alpha_positions)
+            out[i] = s[i].swapcase()
         return "".join(out)
+
+    @staticmethod
+    def _transpose(x, s: str):
+        # Swap two adjacent, different characters: letters in a string, digits
+        # in a number (never the sign or the decimal point). A number stays a
+        # number of its own type: 142.5 -> 124.5.
+        is_number = isinstance(x, (int, float, np.number)) and not isinstance(x, (bool, np.bool_))
+        same_kind = str.isdigit if is_number else str.isalpha
+        pairs = [i for i in range(len(s) - 1)
+                 if same_kind(s[i]) and same_kind(s[i + 1]) and s[i] != s[i + 1]]
+        if not pairs:
+            return x
+        i = random.choice(pairs)
+        out = s[:i] + s[i + 1] + s[i] + s[i + 2:]
+        if is_number:
+            return int(out) if isinstance(x, (int, np.integer)) else float(out)
+        return out
 
     def _insert_letters(self, s: str, rate: float):
         if len(s) == 0 or rate <= 0:

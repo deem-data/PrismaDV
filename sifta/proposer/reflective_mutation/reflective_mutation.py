@@ -59,7 +59,56 @@ class ReflectiveMutationProposer(ProposeNewCandidate):
         if self.use_global_proposer:
             return self.propose_new_texts_global(candidate, reflective_dataset)
         else:
-            raise NotImplementedError("Local proposer not implemented in this example.")
+            return self.propose_new_texts_local(candidate, reflective_dataset, components_to_update)
+
+    def propose_new_texts_local(
+            self,
+            candidate: dict[str, str],
+            reflective_dataset: dict[str, list[dict[str, Any]]],
+            components_to_update: list[str],
+    ) -> dict[str, str]:
+        """
+        Per-module proposer: rewrite one component at a time from its own feedback.
+
+        This is the GEPA-style proposal step. It sees a single module's instruction and
+        that module's feedback, with no view of the other modules, so it is the control
+        arm for measuring what the global proposer's cross-module view actually buys.
+        """
+        from sifta.strategies.instruction_proposal import InstructionProposalSignature
+
+        new_texts: dict[str, str] = {}
+        for name in components_to_update:
+            if name not in candidate:
+                print(f"[Local] Warning: Unknown module '{name}', skipping")
+                continue
+
+            feedback = reflective_dataset.get(name, [])
+            if not feedback:
+                print(f"[Local] No feedback for {name}, keeping current instruction")
+                continue
+
+            print(f"[Local] Proposing for {name} | Feedback examples: {len(feedback)} | "
+                  f"Instr len: {len(candidate[name])}")
+
+            result = InstructionProposalSignature.run(
+                lm=self.reflection_lm,
+                input_dict={
+                    "current_instruction_doc": candidate[name],
+                    "dataset_with_feedback": feedback,
+                },
+            )
+            new_instruction = result.get("new_instruction")
+            if not new_instruction:
+                print(f"[Local] WARNING: No instruction returned for {name}, keeping original")
+                continue
+
+            new_texts[name] = new_instruction
+            if new_instruction != candidate[name]:
+                print(f"[Local] Updated: {name}:{len(candidate[name])}->{len(new_instruction)}")
+            else:
+                print(f"[Local] No actual change for {name}")
+
+        return new_texts
 
     def propose_new_texts_global(
             self,

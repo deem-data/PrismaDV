@@ -116,8 +116,11 @@ class ForeignKeyViolation(TabularCorruption):
         if len(invalid_values) == 0:
             return df
         
-        # Replace sampled rows with invalid values
-        invalid_list = list(invalid_values)
+        # Sorted, not just listed: `invalid_values` is a set, so on strings its
+        # iteration order follows PYTHONHASHSEED and differs run to run. The
+        # seeded random.choice below then lands on different values each time,
+        # and the corrupted bundle stops being reproducible.
+        invalid_list = sorted(invalid_values, key=str)
         for idx in rows:
             if idx in df.index:
                 df.at[idx, col] = random.choice(invalid_list)

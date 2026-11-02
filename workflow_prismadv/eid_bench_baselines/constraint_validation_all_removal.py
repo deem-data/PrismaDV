@@ -2,6 +2,7 @@ import warnings
 
 from prismadv.dq_manager import DeequDataQualityManager
 from prismadv.loader import FileLoader
+from prismadv.project_manager import is_clean_label
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
 
@@ -20,22 +21,19 @@ for dataset_name in dataset_name_options:
         script_path_list = project_manager.get_available_script_path_list_for_subtask(subtask_name)
         script_names = [script_path.stem for script_path in script_path_list]
         for processed_data_label in processed_data_labels:
-            if int(processed_data_label) == 0:
+            if is_clean_label(processed_data_label):
                 continue
             for script_name in script_names:
-                constraints_path = project_manager.get_constraints_path(
-                    subtask_name, processed_data_label, script_name
-                )
+                constraints_path = project_manager.get_source_constraints_path(subtask_name, script_name)
                 validation_results_dir = project_manager.get_constraints_validation_path(
                     subtask_name, processed_data_label, script_name
                 )
                 suggestion_file_list = []
                 for prefix in removing_prefix_list:
                     suggestion_file_list.extend(list(constraints_path.glob(f"{prefix}*.yaml")))
-                if int(processed_data_label) == 0:
-                    clean = True
-                else:
-                    clean = False
+                # Label 0 is skipped above, so only the error-injected side is
+                # ever scored.
+                clean = False
                 test_data_path = project_manager.get_new_test_data_path(
                     subtask_name, processed_data_label, clean=clean
                 )
@@ -49,10 +47,7 @@ for dataset_name in dataset_name_options:
                         f"clean: {clean} ,"
                         f"Constraints path: {suggestion_file_path}"
                     )
-                    if clean:
-                        validation_results_path = validation_results_dir / f"validation_results_on_clean_test_data__{suggestion_file_path.stem}.yaml"
-                    else:
-                        validation_results_path = validation_results_dir / f"validation_results_on_corrupted_test_data__{suggestion_file_path.stem}.yaml"
+                    validation_results_path = validation_results_dir / f"validation_results_on_corrupted_test_data__{suggestion_file_path.stem}.yaml"
                     validation_results_path.parent.mkdir(parents=True, exist_ok=True)
                     if validation_results_path.exists():
                         print(f"Removing validation results file {validation_results_path}.")

@@ -100,12 +100,14 @@ class DateFormatCorruption(TabularCorruption):
                     lambda x: self._create_invalid_string(x)
                 )
             elif self.strategy == "future_dates":
+                anchor = self._anchor_date(dataframe[col], latest=True)
                 df.loc[rows, col] = df.loc[rows, col].apply(
-                    lambda x: self._create_future_date(x)
+                    lambda x: self._create_future_date(x, anchor)
                 )
             elif self.strategy == "past_dates":
+                anchor = self._anchor_date(dataframe[col], latest=False)
                 df.loc[rows, col] = df.loc[rows, col].apply(
-                    lambda x: self._create_past_date(x)
+                    lambda x: self._create_past_date(x, anchor)
                 )
         
         return df
@@ -185,25 +187,38 @@ class DateFormatCorruption(TabularCorruption):
         
         return random.choice(invalid_strings)
     
-    def _create_future_date(self, value):
+    @staticmethod
+    def _anchor_date(series: pd.Series, latest: bool) -> datetime:
+        """The column's own latest (or earliest) date.
+
+        Future and past dates are offsets from this date, not from `datetime.now()`, so the same seed gives the
+        same corrupted table on every day and the corruption lies outside the observed range.
+        """
+        parsed = pd.to_datetime(series, errors="coerce")
+        anchor = parsed.max() if latest else parsed.min()
+        if pd.isna(anchor):
+            anchor = pd.Timestamp("2000-01-01")
+        return anchor.to_pydatetime()
+
+    def _create_future_date(self, value, anchor: datetime):
         """Create dates in the far future."""
         if pd.isna(value):
             return value
-        
-        # Create dates 10-50 years in the future
+
+        # Create dates 10-50 years after the latest date in the column
         years_ahead = random.randint(10, 50)
-        future_date = datetime.now() + timedelta(days=365 * years_ahead)
-        
+        future_date = anchor + timedelta(days=365 * years_ahead)
+
         return future_date.strftime("%Y-%m-%d")
-    
-    def _create_past_date(self, value):
+
+    def _create_past_date(self, value, anchor: datetime):
         """Create dates in the far past."""
         if pd.isna(value):
             return value
-        
-        # Create dates 50-200 years in the past
+
+        # Create dates 50-200 years before the earliest date in the column
         years_back = random.randint(50, 200)
-        past_date = datetime.now() - timedelta(days=365 * years_back)
-        
+        past_date = anchor - timedelta(days=365 * years_back)
+
         return past_date.strftime("%Y-%m-%d")
 

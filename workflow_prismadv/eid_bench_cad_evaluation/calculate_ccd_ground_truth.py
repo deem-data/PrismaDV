@@ -2,7 +2,7 @@ import oyaml as yaml
 
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
-from workflow.cad_evaluation.code_execution.run_ccd_detection import \
+from workflow_prismadv.eid_bench_cad_evaluation.code_execution.run_ccd_detection import \
     run_ccd_detection
 
 # test which assertions in the code are valid and which are not.

@@ -12,6 +12,7 @@ from prismadv.loader import FileLoader
 from prismadv.llm.dspy.models.sampler.trajectory_retrieval import aggregate_trajectories
 from prismadv.llm.dspy.models.sampler.types import TrajectoryKey
 from prismadv.project_manager.manager.base import ProjectManager
+from workflow_sifta.optimization_fns.optimization_labels import optimization_is_safe
 
 
 def create_trajectories_from_constraints(
@@ -24,10 +25,12 @@ def create_trajectories_from_constraints(
     constraints_with_sources: ConstraintsWithSources,
     validation_results: ValidationResults,
     clean: bool = False,
+    missing_execution_is_safe: bool = False,
+    relabelled: frozenset = frozenset(),
 ) -> List:
     """
     Create trajectories from constraints and validation results.
-    
+
     Args:
         project_manager: ProjectManager instance
         dataset_name: Name of the dataset
@@ -38,7 +41,13 @@ def create_trajectories_from_constraints(
         constraints_with_sources: ConstraintsWithSources object
         validation_results: ValidationResults object
         clean: Whether using clean test data (default: False)
-        
+        missing_execution_is_safe: Treat a missing execution result as is_safe=True
+            instead of raising. Only set this where "not executed" genuinely means
+            "safe"; otherwise a missing file silently mislabels corrupted data as
+            clean, which turns correct constraint failures into false alarms.
+        relabelled: units (dataset, label, script) the optimization sees as safe
+            (workflow_sifta.optimization_fns.optimization_labels); corrupted data only
+
     Returns:
         List of DVTrajectory objects
     """
@@ -60,9 +69,19 @@ def create_trajectories_from_constraints(
     try:
         with open(exec_path, "r") as f:
             exec_results = yaml.load(f, Loader=yaml.FullLoader)
-        is_safe = exec_results['clean_data_is_safe'] if clean else exec_results['corrupted_data_is_safe']
+        is_safe = exec_results['clean_data_is_safe'] if clean else optimization_is_safe(
+            dataset_name, processed_data_label, script_name, exec_results['corrupted_data_is_safe'], relabelled)
     except FileNotFoundError:
-        # Default to True if execution results not found
+        # is_safe is ground truth. Defaulting it silently labels corrupted data as
+        # clean, so a constraint that correctly catches the error is scored as a
+        # false alarm. Fail loudly unless the caller opted in.
+        if not missing_execution_is_safe:
+            raise FileNotFoundError(
+                f"Missing execution results for {dataset_name}/{subtask_name}/{script_name} "
+                f"at label '{processed_data_label}': {exec_path}\n"
+                f"Ground truth (is_safe) cannot be determined. Generate the execution results, "
+                f"or pass missing_execution_is_safe=True if 'not executed' means 'safe' here."
+            )
         is_safe = True
     
     # Create trajectories using ProjectManager's format_trajectory_for_dspy method

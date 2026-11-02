@@ -52,5 +52,3 @@ def test_gx_init():
     validation_results = batch.validate(suite)
     print(validation_results)
 
-    # validation_results_dict = {}
-    # return ValidationResults.from_dict(validation_results_dict)

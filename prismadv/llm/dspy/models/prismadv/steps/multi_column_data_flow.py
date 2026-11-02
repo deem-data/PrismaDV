@@ -1,6 +1,9 @@
 import asyncio
 from typing import Dict, List, FrozenSet
-from typing import TypedDict
+
+# typing_extensions, not typing: Range is a dspy.Signature field type, so pydantic
+# builds a schema for it, and on Python < 3.12 it rejects typing.TypedDict outright.
+from typing_extensions import TypedDict
 
 import dspy
 

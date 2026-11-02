@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 """Prepare EIDBench-real inputs for PrismaDV generation.
-
-This skeleton intentionally stops before LLM-based PrismaDV generation. It
-materializes the multi-file code context and table-qualified data profiles that
-the next EIDBench-real PrismaDV generation pass will consume.
 """
 
 from __future__ import annotations
@@ -35,8 +31,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--variant",
         choices=sorted(utils.VALID_VARIANTS),
-        default="clean",
-        help="Table bundle variant to profile.",
+        default="observed",
+        help="Table bundle variant to profile. Constraint inference reads "
+             "`observed`; `clean` and `corrupted` are evaluation targets.",
     )
     parser.add_argument(
         "--corruption-label",
@@ -208,6 +205,19 @@ def display_code_context_path(project_manager: MultiTableProjectManager, path: P
     return relative_path
 
 
+def display_table_path(project_manager: MultiTableProjectManager, path: Path) -> str:
+    """Example-relative, e.g. `files/observed/tables/t.csv`.
+
+    The profile is rendered into every prompt, so an absolute path here tells
+    the agent which machine built the artifact and where the benchmark tree
+    is -- which is exactly what the workspace audit then has to forgive.
+    """
+    try:
+        return str(path.resolve().relative_to(project_manager.example_path.resolve()))
+    except ValueError:
+        return str(path)
+
+
 def build_context_artifact(
     project_manager: MultiTableProjectManager,
     script_id: str,
@@ -283,7 +293,7 @@ def build_prismadv_inputs(
     project_manager: MultiTableProjectManager,
     script_id: str,
     *,
-    variant: str = "clean",
+    variant: str = "observed",
     corruption_label: str | None = None,
     sample_value_limit: int = DEFAULT_PROFILE_SAMPLE_VALUES,
 ) -> dict[str, Any]:
@@ -307,7 +317,7 @@ def build_prismadv_inputs(
         table_name: profile_table(
             table_name,
             bundle.tables[table_name],
-            bundle.paths[table_name],
+            Path(display_table_path(project_manager, bundle.paths[table_name])),
             project_manager.get_table_spec(table_name),
             sample_value_limit=sample_value_limit,
         )

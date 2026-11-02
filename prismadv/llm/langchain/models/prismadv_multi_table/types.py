@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, FrozenSet
 
-from prismadv.data_models.constraints_v2 import SourceLocation
-
 
 @dataclass(frozen=True, order=True)
 class ColumnRef:
@@ -89,20 +87,9 @@ class MultiFileCodeContext:
     def with_line_numbers(self) -> str:
         return "\n\n".join(self._render_file(file.path, file.content) for file in self.files)
 
-    def add_highlighted_line_numbers(self, source_locations: list[SourceLocation]) -> str:
-        highlights = {}
-        for source in source_locations:
-            highlights.setdefault(source.file, set()).update(range(source.start_line, source.end_line + 1))
-        return "\n\n".join(
-            self._render_file(file.path, file.content, highlights.get(file.path, set()))
-            for file in self.files
-        )
-
     @staticmethod
-    def _render_file(path: str, content: str, highlighted_lines: set[int] | None = None) -> str:
-        highlighted_lines = highlighted_lines or set()
+    def _render_file(path: str, content: str) -> str:
         rendered = [f"# File: {path}"]
         for line_number, line in enumerate(content.rstrip().splitlines(), start=1):
-            prefix = "-**-> " if line_number in highlighted_lines else "      "
-            rendered.append(f"{prefix}{line_number:04}: {line}")
+            rendered.append(f"      {line_number:04}: {line}")
         return "\n".join(rendered)

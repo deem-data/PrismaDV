@@ -20,18 +20,17 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any
 
 import oyaml as yaml
-import pandas as pd
 from langchain_core.prompts import ChatPromptTemplate
 
 from prismadv.dq_manager import DeequDataQualityManager
+from prismadv.llm_backend.model_routes import litellm_route, split_effort
 from prismadv.loader import MultiTableLoader
 from prismadv.project_manager import MultiTableProjectManager
 from workflow_prismadv.eid_bench_real_baselines.single_shot import (
@@ -41,9 +40,11 @@ from workflow_prismadv.eid_bench_real_baselines.single_shot import (
 from workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation import (
     build_downstream_task_description,
 )
+from workflow_prismadv.utils.replicates import artifact_filename, existing_artifacts, normalize_replicate
+from workflow_prismadv.utils.swe_agent_usage import cost_summary_from_trajectory
 
 
-BASELINE_METHOD = "swe_agent_real_etl"
+BASELINE_METHOD = "swe_agent"
 DEFAULT_COST_LIMIT = 0.50
 DEFAULT_SAMPLE_ROWS = 3
 MAX_RETRIES = 3
@@ -163,8 +164,11 @@ def sample_rows_by_table(
     *,
     sample_rows: int,
 ) -> dict[str, list[dict[str, Any]]]:
+    # The observed bundle, never one this row is scored against: `clean` is an
+    # evaluation target and every corrupted bundle is that same clean data
+    # corrupted.
     bundle = MultiTableLoader(project_manager).load_pandas(
-        variant="clean",
+        variant="observed",
         table_names=table_names,
     )
     samples: dict[str, list[dict[str, Any]]] = {}
@@ -199,24 +203,47 @@ def build_prompt_content(
 
 def route_for_model(model_name: str) -> str:
     """Map a bare model name to a litellm route mini-swe-agent understands."""
-    if "/" in model_name:
-        return model_name
-    if model_name.startswith("gemini-"):
-        return f"gemini/{model_name}"
-    if model_name.startswith("claude-"):
-        return f"anthropic/{model_name}"
-    # default: OpenAI route (matches EID convention)
-    return f"openai/{model_name}"
+    return litellm_route(model_name)
 
 
-def make_output_filename(model_name: str) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{BASELINE_METHOD}--{model_name}--{timestamp}.yaml"
+def make_output_filename(model_name: str, replicate=None) -> str:
+    return artifact_filename(BASELINE_METHOD, model_name, replicate)
 
 
-def existing_output_for_model(output_dir: Path, model_name: str) -> Path | None:
-    candidates = sorted(output_dir.glob(f"{BASELINE_METHOD}--{model_name}--*.yaml"))
+def existing_output_for_model(output_dir: Path, model_name: str, replicate=None) -> Path | None:
+    """The newest artifact for this model *and* replicate; another replicate is a new sample."""
+    candidates = existing_artifacts(output_dir, BASELINE_METHOD, model_name, replicate)
     return candidates[-1] if candidates else None
+
+
+def mini_environment() -> dict[str, str]:
+    """The agent's environment: ours, plus the flag that skips mini's first-run setup.
+
+    mini-swe-agent >= 1.13 prompts to write a global config file when
+    MSWEA_CONFIGURED is unset; in a non-interactive subprocess that prompt
+    aborts before the agent sends a single request. The model and key are
+    passed on the command line and in the environment, so the file adds nothing.
+    """
+    return {**os.environ, "MSWEA_CONFIGURED": "1"}
+
+
+def mini_config_args(model_name: str, work_dir: Path) -> list[str]:
+    """`-c <file>` when the project name carries a reasoning effort, else nothing.
+
+    mini takes the model on the command line but request parameters only from
+    its config file, so an effort variant (`gpt-6-sol-medium`) gets the
+    stock `mini.yaml` copied into the work dir with `reasoning_effort` added to
+    `model.model_kwargs`. A bare name keeps mini's default config untouched.
+    """
+    _, effort = split_effort(model_name)
+    if not effort:
+        return []
+    from minisweagent.run.mini import DEFAULT_CONFIG
+    config = yaml.safe_load(Path(DEFAULT_CONFIG).read_text(encoding="utf-8"))
+    config.setdefault("model", {}).setdefault("model_kwargs", {})["reasoning_effort"] = effort
+    config_path = work_dir / "mini_config.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return ["-c", str(config_path)]
 
 
 def run_mini_swe_agent_call(
@@ -225,6 +252,7 @@ def run_mini_swe_agent_call(
     model_route: str,
     cost_limit: float,
     work_dir: Path,
+    config_args: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Drop the prompt as task.txt, invoke mini, parse constraints.json."""
     task_file = work_dir / "task.txt"
@@ -244,21 +272,36 @@ def run_mini_swe_agent_call(
         "--cost-limit", f"{cost_limit:.2f}",
         "--yolo",
         "--exit-immediately",
+        *(config_args or []),
     ]
     cwd_before = os.getcwd()
     try:
         os.chdir(work_dir)
         last_err: Exception | None = None
-        for _ in range(MAX_RETRIES):
+        last_output = ""
+        failed_attempts: list[dict[str, Any]] = []
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                subprocess.run(command, check=False, capture_output=True, text=True)
+                result = subprocess.run(command, check=False, capture_output=True, text=True,
+                                        env=mini_environment())
+                # The agent's own words are the only diagnostic when it leaves no file
+                # behind; keep the tail of both streams for the failure message.
+                last_output = (result.stdout or "")[-2000:] + (result.stderr or "")[-2000:]
                 raw_constraints = json.loads(constraints_path.read_text(encoding="utf-8"))[
                     "constraints"
                 ]
                 trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
-                return raw_constraints, trajectory
+                return raw_constraints, trajectory, failed_attempts
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
+                # The attempt still cost tokens; keep its trajectory for the bill.
+                if trajectory_path.exists():
+                    try:
+                        failed_attempts.append(json.loads(trajectory_path.read_text(encoding="utf-8")))
+                    except json.JSONDecodeError:
+                        pass
+                print(f"mini-swe-agent attempt {attempt}/{MAX_RETRIES} failed: {exc}\n"
+                      f"--- agent output (tail) ---\n{last_output}\n---")
         raise RuntimeError(
             f"mini-swe-agent failed after {MAX_RETRIES} attempts; last error: {last_err}"
         )
@@ -266,7 +309,7 @@ def run_mini_swe_agent_call(
         os.chdir(cwd_before)
 
 
-def run_mini_swe_agent_real_etl(
+def run_mini_swe_agent(
     *,
     project_root: Path,
     example_id: str,
@@ -275,16 +318,18 @@ def run_mini_swe_agent_real_etl(
     cost_limit: float = DEFAULT_COST_LIMIT,
     sample_rows: int = DEFAULT_SAMPLE_ROWS,
     overwrite: bool = False,
+    replicate=None,
     dq_manager: DeequDataQualityManager | None = None,
 ) -> Path:
     from workflow_prismadv.eid_bench_real_experiments import utils as exp_utils
 
+    replicate = normalize_replicate(replicate)
     project_root = project_root.resolve()
     project_manager = MultiTableProjectManager(project_root=project_root, example_id=example_id)
     output_dir = exp_utils.constraints_dir(example_id, "project", project_root, create=True)
-    existing = existing_output_for_model(output_dir, model_name)
+    existing = existing_output_for_model(output_dir, model_name, replicate)
     if existing is not None and not overwrite:
-        print(f"swe-agent EIDBench-real baseline already exists; skipping: {existing}")
+        print(f"swe-agent EIDBench-real baseline (replicate {replicate}) already exists; skipping: {existing}")
         return existing
 
     prismadv_inputs, resolved_input_path = load_or_prepare_project_inputs(
@@ -295,18 +340,21 @@ def run_mini_swe_agent_real_etl(
     )
 
     model_route = route_for_model(model_name)
-    with tempfile.TemporaryDirectory(prefix="swe_agent_real_etl_") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="swe_agent_") as tmp_dir:
         work_dir = Path(tmp_dir)
         print(
             f"Running mini-swe-agent in {work_dir} for example={example_id}, "
             f"model={model_name} ({model_route}), cost_limit=${cost_limit:.2f}"
         )
-        raw_constraints, trajectory = run_mini_swe_agent_call(
+        started = time.perf_counter()
+        raw_constraints, trajectory, failed_attempts = run_mini_swe_agent_call(
             prompt_content,
             model_route=model_route,
             cost_limit=cost_limit,
             work_dir=work_dir,
+            config_args=mini_config_args(model_name, work_dir),
         )
+        elapsed_s = time.perf_counter() - started
 
     constraints = constraints_with_validation(
         project_manager,
@@ -315,16 +363,21 @@ def run_mini_swe_agent_real_etl(
         dq_manager=dq_manager,
     )
 
-    output_path = output_dir / make_output_filename(model_name)
+    output_path = output_dir / make_output_filename(model_name, replicate)
     payload = {
         "baseline_method": BASELINE_METHOD,
         "model_name": model_name,
         "model_route": model_route,
         "cost_limit": cost_limit,
+        "replicate": replicate,
         "input_artifact": str(resolved_input_path),
         "raw_constraints": raw_constraints,
         "trajectory": trajectory,
+        "failed_attempt_trajectories": failed_attempts,
         "constraints": constraints.to_dict()["constraints"],
+        # Same shape as the PrismaDV and LangChain-baseline artifacts; wall-clock
+        # is the agent episode including retries.
+        "cost_summary": cost_summary_from_trajectory(trajectory, elapsed_s, failed_attempts),
     }
     with output_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=False)

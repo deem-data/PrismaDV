@@ -103,7 +103,7 @@ def test_generate_constraints_writes_eid_bench_real_prismadv_artifact_without_ll
         generator_cls=FakeMultiTableGenerator,
     )
 
-    assert output_path.name.startswith("prismadv_real_etl--gpt-5-mini--")
+    assert output_path.name.startswith("prismadv--gpt-5-mini--")
     raw = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert raw["input_artifact"] == str(input_path)
     assert raw["constraints"]["patients.Id"]["table_name"] == "patients"
@@ -112,9 +112,18 @@ def test_generate_constraints_writes_eid_bench_real_prismadv_artifact_without_ll
         {"file": "adapter/case.py", "start_line": 1, "end_line": 2}
     ]
     assert "post_processing" not in raw
+    assert list(raw)[-2:] == ["cost_summary", "wall_clock_seconds"]
+    assert raw["wall_clock_seconds"] >= 0
     assert FakeMultiTableGenerator.config.model.correlation_detection is True
     assert FakeMultiTableGenerator.config.model.with_assumptions is True
     assert FakeMultiTableGenerator.input_variables["context"]["script"]["reads"] == ["patients", "encounters"]
+
+
+def test_default_filename_prefix_names_each_disabled_stage():
+    assert generation.default_filename_prefix() == "prismadv"
+    assert generation.default_filename_prefix(use_dataflow=False) == "prismadv_wo_dataflow"
+    assert generation.default_filename_prefix(correlation_detection=False) == "prismadv_wo_correlation"
+    assert generation.default_filename_prefix(with_assumptions=False) == "prismadv_wo_assumption"
 
 
 def test_generate_constraints_propagates_ablation_flags(tmp_path, monkeypatch):
@@ -125,7 +134,7 @@ def test_generate_constraints_propagates_ablation_flags(tmp_path, monkeypatch):
         lambda project_manager, prismadv_inputs: ({}, {}, None),
     )
 
-    generation.generate_constraints(
+    output_path = generation.generate_constraints(
         project_root=tmp_path,
         example_id="example_a",
         script_id="patient_summary",
@@ -139,6 +148,8 @@ def test_generate_constraints_propagates_ablation_flags(tmp_path, monkeypatch):
         generator_cls=FakeMultiTableGenerator,
     )
 
+    # An ablation never lands in the main prismadv-- family.
+    assert output_path.name.startswith("prismadv_wo_dataflow_wo_correlation_wo_assumption--gpt-5-mini--")
     assert FakeMultiTableGenerator.config.model.use_dataflow is False
     assert FakeMultiTableGenerator.config.model.correlation_detection is False
     assert FakeMultiTableGenerator.config.model.with_assumptions is False

@@ -2,7 +2,7 @@ import pandas as pd
 
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
-from workflow.cad_evaluation.pipelines.run_prismadv_cad import run_prismadv_cad
+from workflow_prismadv.eid_bench_cad_evaluation.pipelines.run_prismadv_cad import run_prismadv_cad
 
 dataset_selections = ["imdb", "IPL_win_prediction", "sleep_health", "hr_analytics", "students"]
 df_list = []
@@ -16,8 +16,7 @@ for dataset_name in dataset_selections:
         script_names = [script_path.stem for script_path in script_path_list]
         processed_data_label = "0"
         for script_name in script_names:
-            constraints_path = project_manager.get_constraints_path(
-                subtask_name, processed_data_label, script_name)
+            constraints_path = project_manager.get_source_constraints_path(subtask_name, script_name)
             constraint_validation_results_dir = project_manager.get_constraints_validation_path(
                 subtask_name, processed_data_label, script_name)
             constraint_file_list = list(constraints_path.glob("prismadv--*.yaml"))

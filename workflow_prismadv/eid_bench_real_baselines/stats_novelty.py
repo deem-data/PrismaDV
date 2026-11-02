@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -140,19 +141,27 @@ def run_stats_novelty(
 
     table_names = read_table_names_for_script(project_manager, PROJECT_SCRIPT_ID)
 
-    clean_bundle = MultiTableLoader(project_manager).load_pandas(
-        variant="clean", table_names=table_names
+    # The reference is the observed bundle, never a bundle it will be compared
+    # against. `clean` is an evaluation target below, and every corrupted bundle
+    # is that same clean data with a corruption applied, so referencing `clean`
+    # would be comparing the test set against itself.
+    fit_started = time.perf_counter()
+    observed_bundle = MultiTableLoader(project_manager).load_pandas(
+        variant="observed", table_names=table_names
     )
-    references = {table_name: clean_bundle.tables[table_name] for table_name in table_names}
+    references = {table_name: observed_bundle.tables[table_name] for table_name in table_names}
+    fit_s = round(time.perf_counter() - fit_started, 3)
 
     output_path = output_dir / make_output_filename()
-    stub = {"baseline_method": BASELINE_METHOD, "model_name": MODEL_TAG, "constraints": {}}
+    stub = {"baseline_method": BASELINE_METHOD, "model_name": MODEL_TAG, "wall_clock_seconds": fit_s,
+            "constraints": {}}
     write_yaml(output_path, stub)
     stem = output_path.stem
 
     targets: list[tuple[str, str | None]] = [("clean", None)]
     targets += [("corrupted", label) for label in utils.corruption_labels(project_manager)]
     for variant, corruption_label in targets:
+        started = time.perf_counter()
         result = _validate_bundle(
             project_manager,
             references,
@@ -160,6 +169,8 @@ def run_stats_novelty(
             variant=variant,
             corruption_label=corruption_label,
         )
+        # elapsed_s: load + test this bundle; fit_s: the one-off load of the observed bundle.
+        result["validation_summary"] = {"elapsed_s": round(time.perf_counter() - started, 3), "fit_s": fit_s}
         result["constraint_artifact"] = str(output_path)
         validation_dir = utils.constraints_validation_dir(
             example_id,

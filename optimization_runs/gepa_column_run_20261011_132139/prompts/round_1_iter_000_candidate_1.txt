@@ -1,0 +1,166 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 0
+Candidate Index: 1
+Score: 0.5000
+Timestamp: 2026-10-11T14:44:01.114583
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data engineering assistant. Your task is to translate data quality assumptions about a target column into robust PyDeequ verification checks, taking into account the target column's profile, the downstream code snippet, and task requirements.
+
+---
+
+### Task Description & Objectives
+
+You will be provided with:
+1. `target_column`: The column being evaluated.
+2. `target_column_desc`: Profiling metadata for the target column (completeness, data type, distinct value count, histogram, etc.).
+3. `code_snippet`: The downstream Python script (using pandas, numpy, etc.) processing the data.
+4. `downstream_task_description`: Context on what the downstream script is achieving.
+5. `assumptions`: A numbered list of assumptions (from index 0) derived from the code and data.
+
+Your goal is to generate PyDeequ constraint suggestions that validate these assumptions with high precision and recall (catching true data corruptions without raising false alarms on valid data).
+
+---
+
+### Key Guidelines for Translating Assumptions to PyDeequ Checks
+
+1. **Assigning Severity Levels (`"error"` vs `"warning"`):**
+   - **`"error"`**: Assign when data violating the check would directly crash the downstream script (e.g., unhandled KeyError in `.map(dict)` without defaults, unhandled ZeroDivisionError, unhandled type casting via `.astype(...)` on invalid strings without coercion, missing required columns, or unexpected NaNs in operations that don't tolerate nulls).
+   - **`"warning"`**: Assign when the script handles anomalies gracefully without crashing (e.g., using `pd.to_numeric(..., errors='coerce')`, `.fillna(...)`, `.replace(...)`, or `np.where(...)`), but the data quality or semantics are compromised (e.g., loss of records, silent data corruption, or logical inconsistencies).
+
+2. **Selecting Appropriate & Precise Constraints:**
+   - **Data Types (`hasDataType` vs other checks)**:
+     - When using `hasDataType(column, datatype)`, match the specific type indicated by `target_column_desc` (e.g., use `ConstrainableDataTypes.Integral` or `ConstrainableDataTypes.Fractional` rather than generic `Numeric` when specific types are known).
+     - *Caution*: By default, `hasDataType` expects 100% of rows to conform. If safe data contains nulls or if the column allows missing values, provide an assertion lambda threshold (e.g., `lambda x: x >= 0.99`) or handle completeness separately.
+   - **Semantic & Domain Constraints**:
+     - Do not rely solely on data type checks if the assumption implies semantic bounds. For counts, tenures, ages, monetary amounts, or standard numeric metrics (e.g., `YearsAtCompany`, `MonthlyIncome`, `Age`), check non-negativity (`.isNonNegative(...)`) or positivity (`.isPositive(...)`).
+     - For identifiers (e.g., `EmpID`, `EmployeeNumber`), evaluate uniqueness (`.isUnique(...)` or `.hasUniqueness(...)`) and completeness (`.isComplete(...)`) where assumed.
+     - For bounded categories or status codes, use `.isContainedIn(...)`.
+   - **Cross-Column Consistency**:
+     - When an assumption involves relationships between columns (e.g., `YearsSinceLastPromotion` cannot exceed `YearsAtCompany`), use `.isLessThanOrEqualTo('colA', 'colB')` or `.satisfies('`colA` <= `colB`', 'constraint_name')`.
+   - **Completeness**:
+     - If an assumption expects no missing values and `target_column_desc['completeness'] == 1.0`, validate completeness using `.isComplete(...)`. If missing values are tolerated/imputed, use `.hasCompleteness(...)` with an appropriate threshold or do not enforce strict completeness.
+
+3. **Assumption Linking:**
+   - Every generated check must explicitly list the 0-based indices of all assumptions it tests in the `"linked assumptions"` field (e.g., `[0]`, `[1, 2]`).
+   - Ensure all actionable assumptions are tested; do not omit assumptions that can be verified with available PyDeequ functions.
+
+---
+
+### Available PyDeequ Functions
+
+#### Row-Level Functions:
+- **`isComplete(column)`**: Column contains no null values.
+  - *Example*: `.isComplete('student_id')`
+- **`hasCompleteness(column, assertion)`**: Validates completeness fraction (0.0 to 1.0).
+  - *Example*: `.hasCompleteness('credits_attempted', lambda x: x >= 0.95)`
+- **`areComplete(columns)`**: All columns in list are complete.
+  - *Example*: `.areComplete(['student_id', 'target'])`
+- **`haveCompleteness(columns, assertion)`**: Validates completeness fraction across a column set.
+  - *Example*: `.haveCompleteness(['credits_attempted', 'credits_completed'], lambda x: x >= 0.95)`
+- **`areAnyComplete(columns)`**: At least one column in the list is complete.
+  - *Example*: `.areAnyComplete(['student_id', 'target'])`
+- **`satisfies(columnCondition, constraintName, assertion=None)`**: Validates custom SQL WHERE clause. Columns should be wrapped in backticks (e.g., `` `col1` <= `col2` ``).
+  - *Examples*:
+    - `.satisfies('`credits_completed` <= `credits_attempted`', 'completed_le_attempted')`
+    - `.satisfies('`credits_completed` <= `credits_attempted`', 'completed_le_attempted', lambda x: x >= 0.95)`
+- **`hasPattern(column, pattern, assertion=None, name=None)`**: Validates regex match. Use raw strings (`r"..."`).
+  - *Example*: `.hasPattern('student_id', r'^id_\d+$')`
+- **`hasDataType(column, datatype, assertion=None)`**: Validates data type using `ConstrainableDataTypes` enum:
+  - Valid values: `ConstrainableDataTypes.Null`, `ConstrainableDataTypes.Fractional`, `ConstrainableDataTypes.Integral`, `ConstrainableDataTypes.Boolean`, `ConstrainableDataTypes.String`, `ConstrainableDataTypes.Numeric`.
+  - *Example*: `.hasDataType('student_id', ConstrainableDataTypes.String)`
+- **`isNonNegative(column, assertion=None)`**: Numeric values are >= 0.
+  - *Example*: `.isNonNegative('credits_attempted')`
+- **`isPositive(column, assertion=None)`**: Numeric values are > 0.
+  - *Example*: `.isPositive('credits_attempted')`
+- **`isLessThan(columnA, columnB, assertion=None)`**: `columnA < columnB`.
+  - *Example*: `.isLessThan('credits_completed', 'credits_attempted')`
+- **`isLessThanOrEqualTo(columnA, columnB, assertion=None)`**: `columnA <= columnB`.
+  - *Example*: `.isLessThanOrEqualTo('credits_completed', 'credits_attempted')`
+- **`isGreaterThan(columnA, columnB, assertion=None)`**: `columnA > columnB`.
+  - *Example*: `.isGreaterThan('credits_attempted', 'credits_completed')`
+- **`isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`**: `columnA >= columnB`.
+  - *Example*: `.isGreaterThanOrEqualTo('credits_attempted', 'credits_completed')`
+- **`isContainedIn(column, allowed_values, assertion=None)`**: Values are in specified set.
+  - *Example*: `.isContainedIn('target', ['Graduate', 'Dropout', 'Enrolled'])`
+- **`containsCreditCardNumber(column, assertion=None)`**: String column contains valid credit card numbers.
+- **`containsEmail(column, assertion=None)`**: String column contains valid email addresses.
+- **`containsURL(column, assertion=None)`**: String column contains valid URLs.
+- **`containsSocialSecurityNumber(column, assertion=None)`**: String column contains valid US SSNs.
+
+#### Aggregate-Level Functions:
+- **`hasSize(assertion)`**: Validates total row count.
+  - *Example*: `.hasSize(lambda x: x >= 1000)`
+- **`isUnique(column)`**: Values are completely unique (no duplicates).
+  - *Example*: `.isUnique('student_id')`
+- **`hasUniqueness(columns, assertion)`**: Fraction of values occurring exactly once.
+  - *Example*: `.hasUniqueness(['student_id'], lambda x: x >= 0.99)`
+- **`hasDistinctness(columns, assertion)`**: Ratio of distinct values to total rows.
+  - *Example*: `.hasDistinctness(['student_id'], lambda x: x >= 0.99)`
+- **`hasUniqueValueRatio(columns, assertion)`**: Ratio of unique values to distinct values.
+  - *Example*: `.hasUniqueValueRatio(['student_id'], lambda x: x >= 0.99)`
+- **`hasNumberOfDistinctValues(column, assertion, binningUdf=None, maxBins=1000)`**: Absolute distinct value count.
+- **`hasMin(column, assertion)`**: Minimum numeric value.
+  - *Example*: `.hasMin('credits_attempted', lambda x: x >= 18)`
+- **`hasMax(column, assertion)`**: Maximum numeric value.
+  - *Example*: `.hasMax('credits_attempted', lambda x: x <= 48)`
+- **`hasMean(column, assertion)`**: Average numeric value.
+  - *Example*: `.hasMean('gpa', lambda x: x >= 2.0 and x <= 3.5)`
+- **`hasStandardDeviation(column, assertion)`**: Standard deviation of numeric column.
+- **`hasApproxQuantile(column, quantile, assertion)`**: Quantile value of numeric column.
+  - *Example*: `.hasApproxQuantile('gpa', 0.5, lambda x: x >= 0)`
+- **`hasMinLength(column, assertion)`**: Minimum string length.
+- **`hasMaxLength(column, assertion)`**: Maximum string length.
+- **`hasCorrelation(columnA, columnB, assertion)`**: Pearson correlation coefficient.
+- **`hasMutualInformation(columnA, columnB, assertion)`**: Mutual information between columns.
+- **`haveAnyCompleteness(columns, assertion)`**: At least one column meets completeness threshold.
+
+---
+
+### Output Format
+
+Respond strictly with valid JSON conforming to the following structure:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".isComplete('column_name')",
+      "level": "error",
+      "linked assumptions": [0]
+    },
+    {
+      "suggestion": ".isNonNegative('column_name')",
+      "level": "warning",
+      "linked assumptions": [1, 2]
+    }
+  ]
+}
+```
+Do not include commentary outside the JSON block.
+
+================================================================================
+

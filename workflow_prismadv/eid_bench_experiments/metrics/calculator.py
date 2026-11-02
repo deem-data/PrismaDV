@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 from prismadv.loader import FileLoader
-from workflow.e2e_evaluation.metrics.abstract_calculator import AbstractMetricsCalculation
+from workflow_prismadv.eid_bench_experiments.metrics.abstract_calculator import AbstractMetricsCalculation
 
 
 class MetricsCalculation(AbstractMetricsCalculation):
@@ -101,7 +101,6 @@ class MetricsCalculation(AbstractMetricsCalculation):
         }
 
     def calculate_sql_metrics(self, script_output_dir):
-        # TODO: make it more representative
         corrupted_new_data_path = script_output_dir / "results_on_corrupted_new_data"
         clean_new_data_path = script_output_dir / "results_on_clean_new_data"
         output_on_corrupted_new_data = self._load_output_file_or_error(corrupted_new_data_path / "output.csv")
@@ -127,7 +126,6 @@ class MetricsCalculation(AbstractMetricsCalculation):
         }
 
     def calculate_webpage_metrics(self, script_output_dir):
-        # TODO: make it more representative
         corrupted_new_data_path = script_output_dir / "results_on_corrupted_new_data"
         clean_new_data_path = script_output_dir / "results_on_clean_new_data"
         file_suffix_set_on_corrupted_new_data = set(
@@ -161,7 +159,10 @@ class MetricsCalculation(AbstractMetricsCalculation):
             result_on_corrupted_new_data = "error"
         else:
             result_on_corrupted_new_data = "success"
-        if (clean_new_data_path / "error").exists():
+        # The executor writes `error.txt` on both branches; this side looked
+        # for a file named `error`, so a script failing on clean input was
+        # still recorded as clean_data_is_safe=True.
+        if (clean_new_data_path / "error.txt").exists():
             result_on_clean_new_data = "error"
         else:
             result_on_clean_new_data = "success"

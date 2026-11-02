@@ -15,9 +15,10 @@ import oyaml as yaml
 from workflow_prismadv.eid_bench_real_baselines.pipelines.run_mini_swe_agent import (
     DEFAULT_COST_LIMIT,
     DEFAULT_SAMPLE_ROWS,
-    run_mini_swe_agent_real_etl,
+    run_mini_swe_agent,
 )
 from workflow_prismadv.eid_bench_real_experiments import utils
+from workflow_prismadv.utils.replicates import add_replicate_argument
 
 
 DEFAULT_EXAMPLE_ID = "omop_cdm_synthea"
@@ -48,13 +49,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Sample rows per table to include in the prompt.",
     )
     parser.add_argument("--overwrite", action="store_true")
+    add_replicate_argument(parser)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_root = utils.resolve_project_root(args.project_root)
-    output_path = run_mini_swe_agent_real_etl(
+    output_path = run_mini_swe_agent(
         project_root=project_root,
         example_id=args.example_id,
         input_path=args.input_path,
@@ -62,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         cost_limit=args.cost_limit,
         sample_rows=args.sample_rows,
         overwrite=args.overwrite,
+        replicate=args.replicate,
     )
     print(
         yaml.safe_dump(

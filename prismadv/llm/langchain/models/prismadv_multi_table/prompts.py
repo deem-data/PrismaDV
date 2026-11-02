@@ -32,12 +32,10 @@ TABLE_COLUMN_DATA_FLOW_PROMPT = cleandoc("""
 You are an expert in data-flow analysis for multi-file ETL code.
 Given a target input table column, list every code line that reads, transforms, filters, joins, aggregates, writes, or passes along data derived from that target column.
 
-The target table is: {target_table}
-The target column is: {target_column}
-The script reads these tables: {script_reads}
-
 The multi-file code is below. Each file has independent 1-based line numbers.
 {code_context}
+
+The script reads these tables: {script_reads}
 
 Return only valid JSON in this shape:
 ```json
@@ -49,12 +47,18 @@ Return only valid JSON in this shape:
 ```
 If there are no relevant lines, return {{"sources": []}}.
 Use plain decimal integers without leading zeros for line numbers (e.g., 22 not 0022).
+
+The target table is: {target_table}
+The target column is: {target_column}
 """)
 
 
 TABLE_COLUMN_ASSUMPTION_PROMPT = cleandoc("""
 You are part of a task-aware data validation system for real ETL pipelines.
-Your task is to infer assumptions about one raw input table column based on the table profile and focused multi-file code.
+Your task is to infer assumptions about one raw input table column based on the table profile and the multi-file code.
+
+The complete multi-file code is below. Each file has independent 1-based line numbers.
+{focused_code}
 
 The generated assumptions must be table-local: they should be constraints that can be checked on the target table alone. Do not generate cross-table constraints or foreign-key constraints.
 
@@ -67,8 +71,8 @@ Target table profile:
 Target column profile:
 {target_column_desc}
 
-Focused multi-file code:
-{focused_code}
+Lines where this column flows through the code:
+{relevant_lines}
 
 Downstream task description:
 {downstream_task_description}
@@ -111,8 +115,11 @@ Target table profile:
 Target column profile:
 {target_column_desc}
 
-Focused multi-file code:
+The complete multi-file code is below. Each file has independent 1-based line numbers.
 {focused_code}
+
+Lines where this column flows through the code:
+{relevant_lines}
 
 Downstream task description:
 {downstream_task_description}
@@ -150,8 +157,11 @@ Target columns: {target_columns}
 Target columns profile:
 {target_columns_desc}
 
-Focused multi-file code:
+The complete multi-file code is below. Each file has independent 1-based line numbers.
 {focused_code}
+
+Lines where these columns flow through the code:
+{relevant_lines}
 
 Downstream task description:
 {downstream_task_description}
@@ -225,14 +235,12 @@ TABLE_COLUMN_GROUP_DATA_FLOW_PROMPT = cleandoc("""
 You are an expert in data-flow analysis for multi-file ETL code.
 Given a target same-table set of columns, list every code line that jointly reads, transforms, filters, joins, aggregates, writes, or passes along data derived from any of those target columns.
 
-The target table is: {target_table}
-The target columns are: {target_columns}
+The multi-file code is below. Each file has independent 1-based line numbers.
+{code_context}
+
 The script reads these tables: {script_reads}
 
 Focus on regions where the listed target columns interact (used together, compared, joined, or combined). Solo references to a single column without coupling can be skipped.
-
-The multi-file code is below. Each file has independent 1-based line numbers.
-{code_context}
 
 Return only valid JSON in this shape:
 ```json
@@ -244,6 +252,12 @@ Return only valid JSON in this shape:
 ```
 If there are no relevant lines, return {{"sources": []}}.
 Use plain decimal integers without leading zeros for line numbers (e.g., 22 not 0022).
+
+The target table is: {target_table}
+The target columns are: {target_columns}
+
+Lines where these columns flow through the code individually:
+{relevant_lines}
 """)
 
 
@@ -252,7 +266,10 @@ You are part of a task-aware data validation system for real ETL pipelines.
 You serve as the *Same-Table Column Group Assumption Generation* component.
 When people write code, they often make joint assumptions about multiple columns from the same table  - relationships such as ordering, conditional presence, or functional dependencies.
 
-Your goal is to infer such joint assumptions for the target column group, based on the table profile and focused multi-file code. The assumptions must be table-local: checkable on the target table alone, no cross-table or foreign-key statements.
+Your goal is to infer such joint assumptions for the target column group, based on the table profile and the multi-file code. The assumptions must be table-local: checkable on the target table alone, no cross-table or foreign-key statements.
+
+The complete multi-file code is below. Each file has independent 1-based line numbers.
+{focused_code}
 
 Target table: {target_table}
 Target columns: {target_columns}
@@ -260,8 +277,8 @@ Target columns: {target_columns}
 Target columns profile:
 {target_columns_desc}
 
-Focused multi-file code:
-{focused_code}
+Lines where these columns flow through the code:
+{relevant_lines}
 
 Downstream task description:
 {downstream_task_description}
@@ -298,14 +315,17 @@ A single piece of generated code may be linked to multiple assumptions. If an as
 
 Levels: use "error" only when violation would crash or seriously degrade the downstream task; otherwise use "warning".
 
+The complete multi-file code is below. Each file has independent 1-based line numbers.
+{code_context}
+
 Target table: {target_table}
 Target columns: {target_columns}
 
 Target columns profile:
 {target_columns_desc}
 
-Multi-file code:
-{code_context}
+Lines where these columns flow through the code:
+{relevant_lines}
 
 Downstream task description:
 {downstream_task_description}
@@ -333,6 +353,9 @@ TABLE_COLUMN_CODE_PROMPT = cleandoc("""
 You are part of a task-aware data validation system for real ETL pipelines.
 Translate table-local assumptions into executable PyDeequ constraint code.
 
+The complete multi-file code is below. Each file has independent 1-based line numbers.
+{code_context}
+
 The generated code will run against only the target table dataframe, not against a joined table set. Do not generate cross-table constraints or foreign-key checks.
 
 PyDeequ row-level functions:
@@ -350,8 +373,8 @@ Target table profile:
 Target column profile:
 {target_column_desc}
 
-Multi-file code:
-{code_context}
+Lines where this column flows through the code:
+{relevant_lines}
 
 Downstream task description:
 {downstream_task_description}

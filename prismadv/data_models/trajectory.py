@@ -21,7 +21,6 @@ class DVTrajectory:
     validation_results: ValidationCodeEntry
     is_safe: bool
 
-    # TODO: add label: helpful or not helpful by comparing constraints validate with
 
     def __post_init__(self):
         if not isinstance(self.column_group, (str, frozenset)):

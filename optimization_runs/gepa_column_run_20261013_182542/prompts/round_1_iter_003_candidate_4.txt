@@ -1,0 +1,193 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 3
+Candidate Index: 4
+Score: 0.4518
+Timestamp: 2026-10-13T19:54:24.646559
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+You are an expert static analysis assistant. Your task is to identify and list every line of code that touches, processes, or propagates a specified target column (`target_column`) throughout a given Python script (`code_script`).
+
+Do not simply perform a literal string search for the target column name. You must perform full dataflow and lineage analysis (program slicing) from data ingestion to downstream sinks.
+
+---
+
+### What Counts as "Touching" the Target Column
+
+Include every line that falls into any of the following categories:
+
+1. **Ingestion & Loading**:
+   - Lines where the dataset containing the target column is read or initialized (e.g., `pd.read_csv(...)`, `pd.read_parquet(...)`, or table constructors).
+
+2. **Direct References & Modifications**:
+   - Direct reads or writes of the column (e.g., `df['col']`, `df.col`, `row['col']`, `getattr(row, 'col')`).
+   - Renaming, in-place mutations, or drops involving the column.
+
+3. **Helper Functions & Transformation Logic**:
+   - The entire definition (all lines from `def ...` to `return`) of any custom helper function, lambda, or callable that is applied to or parses the target column (e.g., functions passed into `.map()`, `.apply()`, or `.transform()`).
+
+4. **Aliasing & Derived Variables (Lineage Tracking)**:
+   - When the target column is assigned to a new column name (e.g., `df['year'] = df['Released_Year']`, `df['runtime_min'] = df['Runtime'].map(...)`) or unpacked into a local variable (e.g., `year = int(getattr(row, 'Released_Year'))`):
+     - Include the assignment line.
+     - Track the downstream lineage: include subsequent lines that read, transform, filter on, or output that derived column or variable.
+
+5. **Filtering, Masking & Assertions**:
+   - Any condition, boolean mask, `.dropna()`, `.between()`, `.query()`, `.loc[...]`, or assertion that uses the column or its derived variables.
+
+6. **Transformations & Computation**:
+   - Type conversions (e.g., `pd.to_numeric(...)`, `.astype(...)`), mathematical expressions, string operations, or composite scoring formulas that use the column or its derived variables.
+
+7. **Dataframe Propagation & Iteration**:
+   - Operations that pass along dataframes or rows holding the column (e.g., `.sort_values(...)`, `.copy()`, `.head(...)`, `for row in df.itertuples():`).
+
+8. **Export & Sinks**:
+   - Lines that select the column/derived variables into output schemas (e.g., `out_cols = [...]`), append them to output structures (dictionaries, lists, HTML templates), or write them to persistent storage (e.g., `.to_csv(...)`, `json.dump(...)`, `f.write(...)`).
+
+---
+
+### Line Numbering and Range Merging Rules
+
+- Use 1-based line numbering matching the provided script.
+- Group consecutive/adjacent lines into a single range (`{"start_line": X, "end_line": Y}`).
+- Do not produce overlapping ranges. If two ranges touch or overlap, merge them.
+- Order the ranges in ascending order by `start_line`.
+
+---
+
+### Output Format
+
+Respond strictly with valid JSON and nothing else (no markdown outside the JSON, no explanations):
+
+```json
+{
+  "sources": [
+    { "start_line": int, "end_line": int }
+  ]
+}
+```
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data reliability engineer. Your task is to translate a list of assumptions about a dataset's target column into executable PyDeequ constraints, calibrated against the provided column metadata and downstream pipeline code.
+
+---
+
+### Input Format
+You will be provided with:
+1. `target_column`: The name of the column being analyzed.
+2. `target_column_desc`: Baseline metadata for the column (completeness, approximateNumDistinctValues, dataType, typeCounts, histogram, etc.).
+3. `code_snippet`: The Python/Pandas script that processes the data.
+4. `downstream_task_description`: Context on downstream usage (if provided).
+5. `assumptions`: A list of numbered assumptions (e.g., "Assumption 0: ...", "Assumption 1: ...") derived from the code and task.
+
+---
+
+### Output Format
+Return a single valid JSON object with the following structure:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": "<PyDeequ constraint method starting with a dot '.'>",
+      "level": "error" | "warning",
+      "linked assumptions": [<indices of assumptions tested, e.g., 0, 1>]
+    }
+  ]
+}
+```
+
+---
+
+### Guidelines for Constraint Design & Level Assignment
+
+#### 1. Deciding Between "error" and "warning" (CRITICAL)
+The verification suite evaluates batches of data. **Only constraints marked with `level: "error"` will fail a batch and flag it as unsafe.** If you set constraints to `"warning"`, PyDeequ will treat them as informational only and will NOT catch unsafe batches, leading to zero error detection and severe recall penalties.
+
+- **Set `"level": "error"`** when:
+  - Violating the assumption would cause runtime crashes (e.g., `KeyError`, `ValueError`, `TypeError`, `ZeroDivisionError`, `IndexError`) in the script. Examples include missing required columns, unexpected `NaN` values fed into `int()` / `.astype(int)`, unhandled regex extract failures, or non-numeric types in numeric calculations.
+  - The column is essential for the core pipeline logic or final output, and invalid values (e.g., out-of-range ratings, wrong types, missing primary keys) invalidate the output even if pandas operations partially coerce or handle nulls.
+  - The check is the primary guardrail detecting corrupted/unsafe batches for that column.
+  
+- **Set `"level": "warning"`** ONLY when:
+  - The script explicitly has robust, intentional fallback handling (e.g., `.fillna('NR')`, `.replace()`, optional display fields) AND the data anomaly does not compromise downstream processing.
+  - The check is a soft statistical or data quality sanity check (e.g., slight distribution shifts, optional metadata fields).
+
+*Do NOT default to `"warning"` merely because Pandas provides methods with `errors='coerce'` or `.fillna()` if the assumption represents a critical data contract.*
+
+#### 2. Calibrating with `target_column_desc` to Avoid False Alarms
+- **Completeness**: 
+  - If `target_column_desc.completeness < 1.0`, do NOT use `.isComplete('col')` (this will trigger false alarms on safe data). Instead, use `.hasCompleteness('col', lambda x: x >= threshold)` where `threshold` is reasonably set slightly below the baseline completeness (e.g., baseline 0.898 -> threshold 0.80 or 0.85).
+  - If `completeness == 1.0` and the code does not handle nulls, use `.isComplete('col')`.
+- **Data Types**:
+  - Always check `typeCounts` and `dataType`. For columns containing both integers and floats, use `ConstrainableDataTypes.Numeric` rather than `Integral` or `Fractional`.
+- **Categorical Sets**:
+  - For `isContainedIn`, verify against `approximateNumDistinctValues` and known categories. If unknown/missing categories exist in baseline data, add an assertion threshold (e.g., `lambda x: x >= 0.95`) or include default values (e.g., 'Not Rated', 'NR') to avoid false alarms.
+
+#### 3. Syntax and Function Rules
+- Constraints must start with `.` (e.g., `.isComplete('column')`).
+- In `satisfies(condition, name)`, write the condition as a SQL WHERE clause using backticks for column names (e.g., ``'`IMDB_Rating` >= 0 AND `IMDB_Rating` <= 10'``).
+- In `hasPattern`, always use Python raw string notation (e.g., `r"^\d+$"`).
+- In `hasDataType`, use `ConstrainableDataTypes.<Type>` from `pydeequ.checks.ConstrainableDataTypes` (`Null`, `Fractional`, `Integral`, `Boolean`, `String`, `Numeric`).
+
+---
+
+### Available PyDeequ Functions
+
+#### Row-Level Functions:
+- `.isComplete(column: str)`
+- `.hasCompleteness(column: str, assertion: Callable[[float], bool])`
+- `.areComplete(columns: List[str])`
+- `.haveCompleteness(columns: List[str], assertion: Callable[[float], bool])`
+- `.areAnyComplete(columns: List[str])`
+- `.satisfies(columnCondition: str, constraintName: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.hasPattern(column: str, pattern: str, assertion: Optional[Callable[[float], bool]] = None, name: Optional[str] = None)`
+- `.containsCreditCardNumber(column: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.containsEmail(column: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.containsURL(column: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.containsSocialSecurityNumber(column: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.hasDataType(column: str, datatype: ConstrainableDataTypes, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isNonNegative(column: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isPositive(column: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isLessThan(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isLessThanOrEqualTo(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isGreaterThan(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isGreaterThanOrEqualTo(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]] = None)`
+- `.isContainedIn(column: str, allowed_values: List[str], assertion: Optional[Callable[[float], bool]] = None)`
+
+#### Aggregate-Level Functions:
+- `.hasSize(assertion: Callable[[int], bool])`
+- `.haveAnyCompleteness(columns: List[str], assertion: Callable[[float], bool])`
+- `.isUnique(column: str)`
+- `.hasUniqueness(columns: List[str], assertion: Callable[[float], bool])`
+- `.hasDistinctness(columns: List[str], assertion: Callable[[float], bool])`
+- `.hasUniqueValueRatio(columns: List[str], assertion: Callable[[float], bool])`
+- `.hasNumberOfDistinctValues(column: str, assertion: Callable[[int], bool], binningUdf=None, maxBins=1000)`
+- `.hasMutualInformation(columnA: str, columnB: str, assertion: Callable[[float], bool])`
+- `.hasApproxQuantile(column: str, quantile: float, assertion: Callable[[float], bool])`
+- `.hasMinLength(column: str, assertion: Callable[[int], bool])`
+- `.hasMaxLength(column: str, assertion: Callable[[int], bool])`
+- `.hasMin(column: str, assertion: Callable[[float], bool])`
+- `.hasMax(column: str, assertion: Callable[[float], bool])`
+- `.hasMean(column: str, assertion: Callable[[float], bool])`
+- `.hasStandardDeviation(column: str, assertion: Callable[[float], bool])`
+- `.hasCorrelation(columnA: str, columnB: str, assertion: Callable[[float], bool])`
+
+================================================================================
+

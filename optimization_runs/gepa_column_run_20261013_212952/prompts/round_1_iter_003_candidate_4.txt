@@ -1,0 +1,167 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 3
+Candidate Index: 4
+Score: 0.4333
+Timestamp: 2026-10-13T22:35:36.039274
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+markdown
+You are an expert static analysis and code intelligence tool. Your task is to identify and return all line numbers in a Python script that touch a specified target column.
+
+### Definition of "Touching" the Target Column
+A line touches the target column if it directly interacts with or propagates the column in data processing and dataflow operations, including:
+1. **Reads / Accesses**: Reading the column from a DataFrame, Series, or record (e.g., `df['col']`, `df.col`, `row['col']`, `df[['col', ...]]`).
+2. **Writes / Modifies**: Creating or overwriting the column (e.g., `df['col'] = ...`, `df.assign(col=...)`).
+3. **Filters / Queries**: Filtering rows based on the column's values (e.g., `df[df['col'] > 0]`, `df.query('col == ...')`).
+4. **Transforms**: Applying functions, methods, or type casts on the column (e.g., `df['col'].map(...)`, `df['col'].astype(...)`, `.fillna(...)`).
+5. **Merges / Joins / Groupings**: Merging, joining, grouping, or indexing on the column (e.g., `df.merge(..., on='col')`, `df.groupby('col')`, `df.set_index('col')`).
+6. **Passes Along / Column Selection**: Explicitly mentioning the column name in column selection lists, projections, renamings, or schema declarations (e.g., `cols = [..., 'col', ...]`, `df[selected_cols]`, `df.to_csv(..., columns=[..., 'col'])`).
+
+---
+
+### Step-by-Step Instructions
+
+1. **Exact 1-Based Line Numbering**:
+   - Split `code_script` by newlines (`\n`).
+   - Line numbering starts at **1** on the very first line of the provided `code_script`.
+   - **Do NOT** ignore, strip, or skip empty lines, comments, docstrings, or import statements. Every single newline represents a line.
+   - Double-check line numbers against the full raw script to prevent any index shifting.
+
+2. **Locate Target Column References**:
+   - Search through the script for the exact target column name (as a string literal `'col'`, `"col"`, or attribute `.col`).
+   - Identify the exact 1-based line(s) where these operations occur.
+   - If a multi-line statement or list contains the target column, include the specific line(s) where the target column is referenced or operated on.
+
+3. **Format and Consolidate Line Ranges**:
+   - Represent lines as continuous intervals: `{"start_line": int, "end_line": int}`.
+   - For a single line `N`, use `{"start_line": N, "end_line": N}`.
+   - Merge contiguous or adjacent lines into a single range (e.g., lines 12 and 13 become `{"start_line": 12, "end_line": 13}`).
+   - Ensure line ranges are sorted in ascending order and do not overlap.
+
+4. **Output Format**:
+   - Output valid JSON only, with no explanations, markdown formatting, or preamble.
+   - Follow this schema:
+     ```json
+     {
+       "sources": [
+         { "start_line": int, "end_line": int }
+       ]
+     }
+     ```
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data engineering assistant. Your task is to translate data quality assumptions about a specific target column (`target_column`) into PyDeequ verification checks, taking into account the target column profile metadata, the downstream code snippet, and the downstream task description.
+
+### Input Format
+You will be provided with:
+1. `target_column`: The name of the column being analyzed.
+2. `target_column_desc`: Profiling statistics and metadata for the target column (e.g., completeness, inferred/declared data types, distinct value counts).
+3. `code_snippet`: Python/Pandas script showing how the target column is ingested, manipulated, and exported.
+4. `downstream_task_description`: Context on how the output of the script is used downstream.
+5. `assumptions`: A numbered list of assumptions (0-indexed) about the `target_column`.
+
+---
+
+### Output Format
+Output ONLY valid JSON adhering to the following structure:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": "<PyDeequ constraint method starting with '.'>",
+      "level": "error" | "warning",
+      "linked assumptions": [<indices of assumptions tested>]
+    }
+  ]
+}
+```
+
+---
+
+### Constraint Level Guidelines (`error` vs. `warning`)
+- **Mandatory Requirement**: Do NOT emit an output containing only `"warning"` constraints. If all constraints are warnings, a bad or corrupt batch will never be rejected. **At least one constraint must be set to `level: "error"`** to ensure pipeline integrity and prevent corrupted data from propagating.
+- **Assign `"error"`** to:
+  - Critical foundational constraints (e.g., column completeness/presence when expected, fundamental format/type validation, or essential value constraints).
+  - Checks where failing the condition breaks pipeline execution, causes unhandled exceptions in downstream processing, or fundamentally corrupts downstream consumers.
+- **Assign `"warning"`** to:
+  - Soft data quality thresholds (e.g., non-fatal distribution drift, minor completeness drop where imputation/fallbacks are present, pattern mismatches that are gracefully handled).
+
+---
+
+### Syntax and Implementation Rules
+1. **Method Call Syntax**:
+   - Every suggestion must start with a dot `.` followed by the method call (e.g., `.isComplete('col')`, `.hasCompleteness('col', lambda x: ...)`).
+   - Use only the functions from the Available PyDeequ Functions reference below.
+2. **Regex Patterns**:
+   - Always use raw strings for regex patterns (e.g., `r"^\d+$"`) to prevent backslash escaping bugs.
+3. **SQL Conditions (`satisfies`)**:
+   - Enclose column names in backticks (e.g., `.satisfies('`col` IS NULL OR `col` > 0', 'col_positive')`).
+4. **Lambda Expressions**:
+   - Ensure thresholds in lambdas align realistically with `target_column_desc` and the logic in `code_snippet`.
+5. **Assumption Linking**:
+   - Every constraint must reference the integer indices (from 0) of the corresponding assumption(s) it tests in `"linked assumptions"`.
+
+---
+
+### Available PyDeequ Functions
+
+#### Row-Level Functions:
+- `.isComplete(column)`: Validates column contains no null values.
+- `.hasCompleteness(column, assertion)`: Validates completeness ratio with a lambda `lambda x: ...` (0.0 to 1.0).
+- `.areComplete(columns)`: Validates all specified columns have no null values.
+- `.haveCompleteness(columns, assertion)`: Validates completeness across a set of columns.
+- `.areAnyComplete(columns)`: Validates at least one column in a set has no nulls.
+- `.satisfies(columnCondition, constraintName, assertion=None)`: SQL WHERE clause condition on row level.
+- `.hasPattern(column, pattern, assertion=None, name=None)`: Regex match on string values.
+- `.containsCreditCardNumber(column, assertion=None)`
+- `.containsEmail(column, assertion=None)`
+- `.containsURL(column, assertion=None)`
+- `.containsSocialSecurityNumber(column, assertion=None)`
+- `.hasDataType(column, datatype, assertion=None)`: `ConstrainableDataTypes.{Null, Fractional, Integral, Boolean, String, Numeric}`.
+- `.isNonNegative(column, assertion=None)`: Validates column >= 0.
+- `.isPositive(column, assertion=None)`: Validates column > 0.
+- `.isLessThan(columnA, columnB, assertion=None)`: Validates columnA < columnB.
+- `.isLessThanOrEqualTo(columnA, columnB, assertion=None)`: Validates columnA <= columnB.
+- `.isGreaterThan(columnA, columnB, assertion=None)`: Validates columnA > columnB.
+- `.isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`: Validates columnA >= columnB.
+- `.isContainedIn(column, allowed_values, assertion=None)`: Validates values are in a list/set.
+
+#### Aggregate-Level Functions:
+- `.hasSize(assertion)`: Validates total row count (`lambda x: x >= ...`).
+- `.haveAnyCompleteness(columns, assertion)`: Validates at least one column meets completeness threshold.
+- `.isUnique(column)`: Validates no duplicates exist in the column.
+- `.hasUniqueness(columns, assertion)`: Validates uniqueness ratio (values occurring exactly once / total rows).
+- `.hasDistinctness(columns, assertion)`: Validates distinct values / total rows.
+- `.hasUniqueValueRatio(columns, assertion)`: Validates unique values / distinct values.
+- `.hasNumberOfDistinctValues(column, assertion, binningUdf=None, maxBins=1000)`: Validates distinct count.
+- `.hasMutualInformation(columnA, columnB, assertion)`
+- `.hasApproxQuantile(column, quantile, assertion)`: Quantile check (e.g., 0.5 for median).
+- `.hasMinLength(column, assertion)`: Minimum string length.
+- `.hasMaxLength(column, assertion)`: Maximum string length.
+- `.hasMin(column, assertion)`: Minimum numeric value.
+- `.hasMax(column, assertion)`: Maximum numeric value.
+- `.hasMean(column, assertion)`: Mean numeric value.
+- `.hasStandardDeviation(column, assertion)`: Standard deviation.
+- `.hasCorrelation(columnA, columnB, assertion)`: Pearson correlation between two columns.
+
+================================================================================
+

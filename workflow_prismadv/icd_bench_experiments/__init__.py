@@ -1,5 +1,6 @@
 from pathlib import Path
 from prismadv.utils import get_project_root
+from workflow_prismadv.utils.replicates import replicate_part
 
 from benchmarks.ICDBench.math_ops_log import MathOpsLog
 from benchmarks.ICDBench.math_ops_sqrt import MathOpsSqrt
@@ -108,26 +109,35 @@ def find_diverse_constraints_output_path(evaluation_case, approach_name):
     constraints_output_path = (constraints_output_dir / f"{approach_name}.yaml")
     return constraints_output_path
 
-def find_constraints_output_path(evaluation_case, model_name):
+def find_constraints_output_path(evaluation_case, model_name, replicate=None):
+    """`prismadv_constraints--<model>[--rN].yaml`; replicate 1 keeps the bare name."""
     target_dir = evaluation_case.__class__.__module__.split('.')[-1] + "." + evaluation_case.__class__.__name__
     constraints_output_dir = (get_project_root() / "data_processed" / "icd_bench" / target_dir / "constraints")
     Path(constraints_output_dir).mkdir(parents=True, exist_ok=True)
-    constraints_output_path = (constraints_output_dir / f"prismadv_constraints--{model_name}.yaml")
+    part = replicate_part(replicate)
+    suffix = f"--{part}" if part else ""
+    constraints_output_path = (constraints_output_dir / f"prismadv_constraints--{model_name}{suffix}.yaml")
     return constraints_output_path
 
 
-def find_single_prompt_constraints_output_path(evaluation_case, model_name):
+def find_single_prompt_constraints_output_path(evaluation_case, model_name, replicate=None):
+    """`single_prompt_constraints--<model>[--rN].yaml`; replicate 1 keeps the bare name."""
     target_dir = evaluation_case.__class__.__module__.split('.')[-1] + "." + evaluation_case.__class__.__name__
     constraints_output_dir = (get_project_root() / "data_processed" / "icd_bench" / target_dir / "constraints")
     Path(constraints_output_dir).mkdir(parents=True, exist_ok=True)
-    constraints_output_path = (constraints_output_dir / f"single_prompt_constraints--{model_name}.yaml")
+    part = replicate_part(replicate)
+    suffix = f"--{part}" if part else ""
+    constraints_output_path = (constraints_output_dir / f"single_prompt_constraints--{model_name}{suffix}.yaml")
     return constraints_output_path
 
-def find_fewshot_prompt_constraints_output_path(evaluation_case, model_name):
+def find_fewshot_prompt_constraints_output_path(evaluation_case, model_name, replicate=None):
+    """`fewshot_prompt_constraints--<model>[--rN].yaml`; replicate 1 keeps the bare name."""
     target_dir = evaluation_case.__class__.__module__.split('.')[-1] + "." + evaluation_case.__class__.__name__
     constraints_output_dir = (get_project_root() / "data_processed" / "icd_bench" / target_dir / "constraints")
     Path(constraints_output_dir).mkdir(parents=True, exist_ok=True)
-    constraints_output_path = (constraints_output_dir / f"fewshot_prompt_constraints--{model_name}.yaml")
+    part = replicate_part(replicate)
+    suffix = f"--{part}" if part else ""
+    constraints_output_path = (constraints_output_dir / f"fewshot_prompt_constraints--{model_name}{suffix}.yaml")
     return constraints_output_path
 
 def find_minisweagent_task_output_path(evaluation_case):

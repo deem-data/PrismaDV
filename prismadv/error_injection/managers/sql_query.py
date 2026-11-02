@@ -13,6 +13,7 @@ class GeneralErrorInjectionManager(AbstractErrorInjectionManager):
                  sample_size: float
                  ):
         self.post_corruption_new_data = None
+        self.corrupts = None
         self.raw_file_path = raw_file_path
         self.target_table_name = target_table_name
         self.processed_data_dir = processed_data_dir
@@ -27,14 +28,13 @@ class GeneralErrorInjectionManager(AbstractErrorInjectionManager):
         return FileLoader.load_csv(self.raw_file_path / f"{self.target_table_name}.csv")
 
     def error_injection(self, corrupts):
-        post_corruption_new_data = self.new_data.copy(deep=True)
-        for corrupt in corrupts:
-            post_corruption_new_data = corrupt.transform(post_corruption_new_data)
-        self.post_corruption_new_data = post_corruption_new_data
+        self.post_corruption_new_data = self.apply_corrupts(self.new_data, corrupts)
         self.corrupts = corrupts
 
-    def save_data(self):
-        processed_data_path = self._create_processed_data_path(self.processed_data_dir)
+    def save_data(self, processed_data_label):
+        if self.post_corruption_new_data is None:
+            raise RuntimeError("call error_injection() before save_data()")
+        processed_data_path = self._create_processed_data_path(self.processed_data_dir, processed_data_label)
         SQLQueryDatasetLoader().save_data(
             processed_data_path,
             self.previous_data,
@@ -42,11 +42,16 @@ class GeneralErrorInjectionManager(AbstractErrorInjectionManager):
             self.post_corruption_new_data
         )
         self.save_error_injection_config(processed_data_path, self.corrupts)
+        return processed_data_path
 
-    def save_error_injection_config(self, processed_data_path, corrupts):
-        config_path = processed_data_path / "error_injection_config.yaml"
-        with open(config_path, "w") as f:
-            f.write(self.corrupts_to_yaml(corrupts))
+    def save_clean_data(self, processed_data_label):
+        """Write the uncorrupted split only, for the clean baseline label."""
+        processed_data_path = self._create_processed_data_path(self.processed_data_dir, processed_data_label)
+        clean_path = processed_data_path / "files_with_clean_new_data"
+        clean_path.mkdir(parents=True, exist_ok=True)
+        self.previous_data.to_csv(clean_path / "previous_data.csv", index=False)
+        self.new_data.to_csv(clean_path / "new_data.csv", index=False)
+        return processed_data_path
 
     def _split_dataset(self, full_data, sample_size):
         full_data.drop(columns=["id"], inplace=True) if "id" in full_data.columns else None

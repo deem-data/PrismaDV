@@ -1,7 +1,7 @@
 """Run the PocketFlow code-generation agent to produce EIDBench-synth constraints."""
 import json
 import os
-from datetime import datetime
+import time
 
 import oyaml as yaml
 
@@ -15,14 +15,77 @@ from workflow_prismadv.icd_bench_experiments.pocketflow.flow import create_code_
 from workflow_prismadv.icd_bench_experiments.pocketflow.utils.code_executor import execute_python
 from workflow_prismadv.icd_bench_experiments.pocketflow.utils.call_llm import (
     get_message_log,
+    get_usage_summary,
     reset_message_log,
 )
+from workflow_prismadv.utils.spark_cleanup import close_spark_session
+from workflow_prismadv.utils.replicates import select_scripts, artifact_filename, existing_artifacts, normalize_replicate
 
+METHOD = "pocketflow"
 MODEL_TAG = "gpt-5"
 MAX_ITERATIONS = 3
 MAX_RETRIES = 3
 
 POCKETFLOW_PROBLEM = """Write a pydeequ data unit test for a dataset consumed by the following program.
+
+Here are two examples of data samples and the corresponding constraints that should be generated.
+---------------------------------------
+
+### First Example:
+
+Here is sample of data that can be processed by the program:
+
+ name  age
+Alice   25
+  Bob   30
+Carol   22
+ Dave   40
+  Eve   28
+
+Here is the program:
+
+for row['age'] in df.iterrows():
+    if row['age'] < 0:
+        raise ValueError("Age cannot be negative")
+
+Here is the desired output:
+
+def run_code():
+    return {{
+        "constraints": [
+            {{"column_name": "age", "code_for_constraint": ".isComplete('age')"}},
+            {{"column_name": "age", "code_for_constraint": ".isNonNegative('age')"}},
+        ]
+    }}
+
+### Second Example:
+
+Here is sample of data that can be processed by the program:
+
+ name  age
+Alice   25
+ NULL   30
+Carol   22
+ NULL   40
+  Eve   28
+
+Here is the program:
+
+unique_names = df['name'].dropna().unique().tolist()
+send_notifications(unique_names)
+
+Here is the desired output:
+
+def run_code():
+    return {{
+        "constraints": [
+            {{"column_name": "name", "code_for_constraint": ".hasNumberOfDistinctValues('name', lambda x: x > 0)"}},
+        ]
+    }}
+
+---------------------------------------
+
+NOW I WILL GIVE YOU THE ACTUAL TASK DETAILS.
 
 Here is a sample of data that can be processed by the program:
 {data_sample}
@@ -52,9 +115,8 @@ def run_code():
 """
 
 
-def run_pocketflow_flow(problem):
-    os.environ["POCKETFLOW_MODEL"] = MODEL_TAG
-    reset_message_log()
+def run_pocketflow_flow(problem, model_name=MODEL_TAG):
+    os.environ["POCKETFLOW_MODEL"] = model_name
     shared = {
         "problem": problem,
         "test_cases": [],
@@ -74,12 +136,13 @@ def run_pocketflow_flow(problem):
     return constraints
 
 
-def make_output_filename(model_name) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"pocketflow--{model_name}--{timestamp}.yaml"
+def make_output_filename(model_name, replicate=None) -> str:
+    return artifact_filename(METHOD, model_name, replicate)
 
 
-def run_pocketflow(dataset_name, subtask_name, processed_data_label, model_name=MODEL_TAG):
+def run_pocketflow(dataset_name, subtask_name, processed_data_label, model_name=MODEL_TAG, replicate=None,
+                   script_stems=None):
+    replicate = normalize_replicate(replicate)
     project_manager = ProjectManager(project_root=get_project_root(), dataset_name=dataset_name)
 
     dq_manager = DeequDataQualityManager()
@@ -90,24 +153,19 @@ def run_pocketflow(dataset_name, subtask_name, processed_data_label, model_name=
     example_rows = train_data.sample(3).to_dict(orient="records")
 
     script_path_list = project_manager.get_available_script_path_list_for_subtask(subtask_name=subtask_name)
-    for script_path in script_path_list:
-        constraints_path = project_manager.get_constraints_path(
-            subtask_name, processed_data_label, script_path.stem
-        )
+    for script_path in select_scripts(script_path_list, script_stems):
+        constraints_path = project_manager.get_source_constraints_path(subtask_name, script_path.stem)
         constraints_path.mkdir(parents=True, exist_ok=True)
-        constraint_output_path = constraints_path / make_output_filename(model_name)
-
-        skip = False
-        for path in constraints_path.glob("*.yaml"):
-            parts = path.stem.split("--")
-            if len(parts) >= 2 and parts[0] == "pocketflow" and parts[1] == model_name:
-                print(f"Constraints file for pocketflow/{model_name} already exists ({path}). Skipping...")
-                skip = True
-        if skip:
+        constraint_output_path = constraints_path / make_output_filename(model_name, replicate)
+        existing = existing_artifacts(constraints_path, METHOD, model_name, replicate)
+        if existing:
+            print(f"Constraints file {existing[-1]} already exists (replicate {replicate}). Skipping...")
             continue
 
+        # Same span as single/few-shot's wall_clock_seconds: source load, profiling, every attempt, filter_valid.
+        started = time.perf_counter()
         source_code, assertions = FileLoader.load_py_file(script_path).extract_assertions()
-        assert "# ASSERTION START" not in str(source_code)
+        assert "# ASSERTION_START" not in str(source_code)
 
         column_desc_dict = DeequInspectorManager().spark_df_to_column_desc_dict(spark_train, spark_train_data)
         column_desc = yaml.dump(column_desc_dict, default_flow_style=False, sort_keys=False)
@@ -121,9 +179,11 @@ def run_pocketflow(dataset_name, subtask_name, processed_data_label, model_name=
               f"processed_data_label: {processed_data_label}, script: {script_path.stem}, model: {model_name}")
 
         raw_constraints = []
+        # Reset outside the retry loop so a retried task reports the cost of every attempt.
+        reset_message_log()
         for attempt in range(MAX_RETRIES):
             try:
-                raw_constraints = run_pocketflow_flow(problem)
+                raw_constraints = run_pocketflow_flow(problem, model_name)
                 break
             except Exception as e:  # noqa: BLE001
                 if attempt < MAX_RETRIES - 1:
@@ -136,6 +196,11 @@ def run_pocketflow(dataset_name, subtask_name, processed_data_label, model_name=
             code_list_for_constraints, spark_train, spark_train_data
         )
         constraints = Constraints.from_deequ_output(raw_constraints, code_list_for_constraints_valid)
-        constraints.save_to_yaml(constraint_output_path)
+        constraints.cost_summary = {"constraint_generation": get_usage_summary()}
+        constraints.save_to_yaml(constraint_output_path, extra={
+            "replicate": replicate,
+            "wall_clock_seconds": round(time.perf_counter() - started, 3),
+        })
         messages_path = constraint_output_path.with_name(constraint_output_path.stem + ".messages.json")
         messages_path.write_text(json.dumps({"messages": get_message_log()}, indent=2))
+    close_spark_session(spark_train)

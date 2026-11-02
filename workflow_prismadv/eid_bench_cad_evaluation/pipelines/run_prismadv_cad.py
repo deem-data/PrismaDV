@@ -6,7 +6,7 @@ from prismadv.data_models.config import PrismaDVConfig
 from prismadv.data_models.constraints_v2 import de_column_group_key
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
-from workflow.cad_evaluation.metrics.cad import f1_accessed_columns, recall_correlated_columns
+from workflow_prismadv.eid_bench_cad_evaluation.metrics.cad import f1_accessed_columns, recall_correlated_columns
 
 
 def run_prismadv_cad(

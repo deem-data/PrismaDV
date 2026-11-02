@@ -3,9 +3,10 @@ import json
 import warnings
 
 from prismadv.dq_manager import DeequDataQualityManager
+from prismadv.project_manager import is_clean_label
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
-from workflow.e2e_evaluation.metrics.calculator import MetricsCalculation
+from workflow_prismadv.eid_bench_experiments.metrics.calculator import MetricsCalculation
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pyspark")
 
@@ -45,6 +46,14 @@ if __name__ == "__main__":
                     result = metric_calculator.calculate(
                         sub_task=subtask_name, script_output_dir=execution_output_dir
                     )
+                    if is_clean_label(processed_data_label):
+                        # There is no corrupted run at the clean label, so the
+                        # calculator's corrupted fields would report "error" and
+                        # corrupted_data_is_safe=False -- wrong, not merely
+                        # absent. Drop them rather than record a verdict on a
+                        # run that never happened.
+                        result = {k: v for k, v in result.items()
+                                  if "corrupted" not in k}
                     output_file = execution_output_validation_path / f"basic_metrics_evaluation.json"
                     output_file.parent.mkdir(parents=True, exist_ok=True)
                     print(f"Saving evaluation result to {output_file}")

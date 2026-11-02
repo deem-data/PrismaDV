@@ -9,6 +9,8 @@ from prismadv.data_models import ValidationResults, ConstraintsWithSources
 from prismadv.data_models.trajectory import DVTrajectory
 from prismadv.loader import FileLoader
 
+from ..labels import is_clean_label
+
 
 class TrajectoryManager:
     """Manages DSPy trajectory loading and formatting.
@@ -53,16 +55,14 @@ class TrajectoryManager:
         Raises:
             ValueError: If processed_data_label is 0 or no suggestion files found.
         """
-        if int(processed_data_label) == 0:
-            raise ValueError("Processed data label must be greater than 0 for DSPy trajectory retrieval.")
+        if is_clean_label(processed_data_label):
+            raise ValueError("DSPy trajectory retrieval needs a corrupted label, not the clean label 0.")
 
         clean = False
         new_test_data_path = self._data_manager.get_new_test_data_path(
             subtask_name, processed_data_label, clean=clean
         )
-        constraints_path = self._constraint_manager.get_constraints_path(
-            subtask_name, processed_data_label, script_name
-        )
+        constraints_path = self._constraint_manager.get_source_constraints_path(subtask_name, script_name)
         validation_results_dir = self._constraint_manager.get_constraints_validation_path(
             subtask_name, processed_data_label, script_name
         )

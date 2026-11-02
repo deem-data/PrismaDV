@@ -15,11 +15,12 @@ import pandas as pd
 from prismadv.error_injection.managers import MultiTableErrorInjectionManager, TableCorruptionSpec
 from prismadv.project_manager import MultiTableProjectManager
 from prismadv.utils import get_project_root
+from workflow_prismadv.eid_bench_real_experiments import utils
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--example-id", default="omop_cdm_synthea")
+    parser.add_argument("--example-id", required=True)
     parser.add_argument("--project-root", type=Path, default=None)
     parser.add_argument(
         "--config-dir",
@@ -70,15 +71,14 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
 
 
 def load_yaml_configs(config_dir: Path, labels: set[str] | None = None) -> list[tuple[Path, dict[str, Any]]]:
-    paths = sorted(config_dir.glob("*.yaml"))
+    paths = utils.config_paths_in(config_dir)
     if not paths:
         raise FileNotFoundError(f"no corruption YAML files found in {config_dir}")
 
     configs = []
     for path in paths:
         config = load_yaml_config(path)
-        # Identity is the file stem (e.g. project_0), eid-synth id style.
-        config["label"] = path.stem
+        config["label"] = utils.config_label(path)
         if labels is not None and config["label"] not in labels:
             continue
         configs.append((path, config))
@@ -258,8 +258,42 @@ def build_table_spec(
     corruption_class_name = corruption_config["class"]
     corruption_class = manager.corruption_classes[corruption_class_name]
     params = resolve_corruption_params(corruption_config, manager.clean_tables, config["table"], fraction, max_rows)
+    if params.get("random_state") is None:
+        raise ValueError(f"{config['label']}: set corruption.params.random_state in the error config")
     corruption = corruption_class(columns=corruption_config.get("columns"), **params)
     return TableCorruptionSpec(table_name=config["table"], corruptions=[corruption])
+
+
+def directory_assets(clean_tables_dir: Path) -> list[Path]:
+    """Non-table assets that sit beside the clean tables, e.g. omop's `vocab/`."""
+    return sorted(path for path in clean_tables_dir.iterdir() if path.is_dir())
+
+
+def copy_directory_assets(clean_tables_dir: Path, output_root: Path) -> list[str]:
+    """Mirror the directory assets into the bundle's `input/` and `tables/`.
+
+    The adapters read reference data from the input directory they are given
+    (omop loads `input/vocab`), so a bundle without them cannot run at all
+    and the corrupted variant would fail for a reason unrelated to the
+    corruption.
+    """
+    copied = []
+    for asset in directory_assets(clean_tables_dir):
+        for target_root in ("input", "tables"):
+            target = output_root / target_root / asset.name
+            if not target.exists() and (output_root / target_root).exists():
+                shutil.copytree(asset, target)
+        copied.append(asset.name)
+    return copied
+
+
+def tables_unchanged(clean_tables: dict[str, pd.DataFrame], corrupted_tables: dict[str, pd.DataFrame]) -> bool:
+    if set(clean_tables) != set(corrupted_tables):
+        return False
+    return all(
+        MultiTableErrorInjectionManager._same_content(clean_tables[name], corrupted_tables[name])
+        for name in clean_tables
+    )
 
 
 def metric_value(
@@ -342,6 +376,8 @@ def write_corruption(
         include_input_copy=True,
         report=report,
     )
+    report["directory_assets"] = copy_directory_assets(manager.clean_tables_dir, output_root)
+    (output_root / "corruption_report.json").write_text(json.dumps(report, indent=2) + "\n")
     shutil.copyfile(config_path, output_root / "corruption_source.yaml")
     report["skipped_existing_output"] = False
     return report
@@ -379,6 +415,8 @@ def main() -> int:
         manager.error_injection([table_spec])
         if manager.post_corruption_tables is None:
             raise RuntimeError(f"{config['label']} corruption did not produce tables")
+        if tables_unchanged(clean_tables, manager.post_corruption_tables):
+            raise RuntimeError(f"{config['label']}: the corruption left every table unchanged")
         report = build_report(clean_tables, manager.post_corruption_tables, config)
         reports.append(
             write_corruption(

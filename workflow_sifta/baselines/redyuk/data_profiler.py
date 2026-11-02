@@ -1,29 +1,3 @@
-"""Descriptive-statistics data profiler + one-class kNN novelty detector.
-
-Vendored and lightly adapted from the reference implementation accompanying:
-
-    S. Redyuk, Z. Kaoudi, V. Markl, S. Schelter.
-    "Automating Data Quality Validation for Dynamic Data Ingestion." EDBT 2021.
-    https://github.com/sergred/automating-data-quality-validation-data (demo.py)
-
-The original computes a per-batch feature vector of descriptive statistics
-(completeness, uniqueness, approx-distinct via HyperLogLog, most-frequent ratio,
-numeric min/mean/max/std/sum, and a text "index of peculiarity"), MinMax-scales
-the vectors, and fits a one-class kNN detector (mean distance to k neighbours).
-A new batch is flagged BAD (reject) if it is an outlier, GOOD (pass) otherwise.
-
-Adaptations vs. the original ``demo.py``:
-  * ``dabl.detect_types`` is dropped -- in the original it is computed but never
-    used by ``compute_for`` (free-string detection falls back to ``dtype``).
-  * ``nltk.util.ngrams`` is replaced by an inline sliding-window helper (identical
-    output, no nltk data download).
-  * The per-column metric set ("schema") is fixed from a reference batch so every
-    batch yields a constant-length vector even if pandas infers a column's dtype
-    differently on a corrupted batch. Columns declared numeric are coerced with
-    ``pd.to_numeric(errors="coerce")`` and aggregated with NaN-aware reducers; any
-    residual NaN in the final vector is set to 0.0 (the scaler/kNN cannot ingest NaN).
-"""
-
 from __future__ import annotations
 
 from collections import Counter
@@ -33,7 +7,6 @@ import numpy as np
 import pandas as pd
 from hyperloglog import HyperLogLog
 from pyod.models.knn import KNN
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
 
@@ -203,33 +176,5 @@ class KNNNoveltyDetector:
 
     def predict(self, X: List[List[float]]) -> np.ndarray:
         """Return 0 for inlier (GOOD/pass) and 1 for outlier (BAD/reject)."""
-        assert self.clf is not None, "call .fit() first"
-        return self.clf.predict(np.asarray(X, dtype="float64"))
-
-
-class SupervisedKNNClassifier:
-    """Plain (uniform-weight) supervised kNN classifier over labeled batches.
-
-    Unlike the one-class novelty detector, this USES both classes: it is trained on
-    historical batches labeled GOOD (0) / BAD (1) and classifies a new batch by the
-    majority vote of its k nearest labeled neighbours. Features are MinMax-scaled.
-
-    NB: this is no longer the Redyuk (one-class) method -- it is a separate
-    supervised-kNN baseline.
-    """
-
-    def __init__(self, n_neighbors: int = 5):
-        self.n_neighbors = n_neighbors
-        self.clf: Pipeline | None = None
-
-    def fit(self, X: List[List[float]], y: List[int]) -> "SupervisedKNNClassifier":
-        self.clf = Pipeline([
-            ("scaler", MinMaxScaler()),
-            ("learner", KNeighborsClassifier(n_neighbors=self.n_neighbors, weights="uniform")),
-        ]).fit(np.asarray(X, dtype="float64"), np.asarray(y, dtype="int"))
-        return self
-
-    def predict(self, X: List[List[float]]) -> np.ndarray:
-        """Return 0 for GOOD/pass and 1 for BAD/reject."""
         assert self.clf is not None, "call .fit() first"
         return self.clf.predict(np.asarray(X, dtype="float64"))

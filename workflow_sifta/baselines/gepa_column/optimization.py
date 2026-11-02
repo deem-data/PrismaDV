@@ -1,17 +1,8 @@
-"""Column-level GEPA baseline optimization for PrismaDV.
-
-This baseline uses:
-- Column-level constraint generation (ConstraintGenerationModule)
-- GEPA optimizer (instead of SIFTA)
-- F1 score metric (instead of fail precision)
-- No train set condensing (uses full dataset)
-- Same data splitting and test configurations as SIFTA
-"""
-
 import argparse
 import json
 import logging
 import random
+import time
 import re
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +11,9 @@ from dspy import GEPA
 from dspy.dsp.utils.settings import settings
 
 from prismadv.llm.dspy.models.column_wise_module import ConstraintGenerationModule
+from prismadv.llm_backend.model_routes import litellm_route
+from prismadv.project_manager import is_clean_label
+from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import (
     get_project_root,
     load_dotenv,
@@ -28,7 +22,11 @@ from workflow_sifta.baselines.gepa_column.metrics import (
     create_column_level_f1_metric,
     create_column_level_f1_metric_with_feedback,
 )
+from workflow_sifta.runtime import budget as opt_budget, gepa_state
+from workflow_sifta._0_splits import load_split
+from workflow_sifta.metrics.optimization_metrics import METRIC_REV
 from workflow_sifta.optimization_fns import OptimizationWorkflow
+from workflow_sifta.runtime.usage import REFLECTION_LM, TASK_LM, reset_usage, set_rollout_id, tracked_lm, usage_summary
 
 settings.max_errors = 10
 load_dotenv()
@@ -99,8 +97,95 @@ parser.add_argument(
     default=0.0001,
     help="Minimum improvement to consider as progress (default: 0.0001)"
 )
+parser.add_argument(
+    "--metric",
+    type=str,
+    choices=["f1", "fail_precision"],
+    default="f1",
+    help="Optimization objective: f1 = macro F1 of the column's constraints over the script's labels. Use "
+         "fail_precision to hold the objective constant against SIFTA and isolate the optimizer (default: f1)"
+)
+parser.add_argument(
+    "--llm_name",
+    type=str,
+    default="gpt-4.1-mini",
+    help="Task model for constraint generation, bare name (default: gpt-4.1-mini). "
+         "Must match the SIFTA arm being compared against"
+)
+parser.add_argument(
+    "--reflection_llm_name",
+    type=str,
+    default="gpt-5.2",
+    help="Reflection/proposal model. Must match the SIFTA arm being compared against "
+         "(default: gpt-5.2)"
+)
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=0,
+    help="GEPA's own seed: minibatch and candidate sampling, and the feedback sampler. "
+         "Vary it for replicates; the split is fixed by --random_seed / --split_strategy_from"
+)
+parser.add_argument(
+    "--max_full_evals",
+    type=int,
+    default=15,
+    help="Max full evaluations per round (default: 15)"
+)
+parser.add_argument(
+    "--max_metric_calls",
+    type=int,
+    default=None,
+    help="Absolute metric-call budget. Overrides --max_full_evals. Use with "
+         "--match_budget_from to equalize total cost against a SIFTA run"
+)
+parser.add_argument(
+    "--match_budget_from",
+    type=str,
+    default=None,
+    help="Path to a SIFTA run dir (e.g. optimization_runs/run_2026...). Reads its true "
+         "total_metric_computations from summary.json and uses it as --max_metric_calls"
+)
+
+parser.add_argument(
+    "--split_seed",
+    type=int,
+    default=None,
+    help="Replicate N: read benchmarks/EIDBench-synth/<dataset>/splits/split<N>.yaml and use N as the GEPA seed "
+         "too (overrides --random_seed and --seed; needs --dataset_name)"
+)
+parser.add_argument(
+    "--validation_passes",
+    type=int,
+    default=None,
+    help="Budget: K validation passes, i.e. K x |eval set| program evaluations in total (workflow_sifta/runtime/budget.py); "
+         "replaces the metric-call budget when set"
+)
 
 args = parser.parse_args()
+if args.split_seed is not None:
+    if args.split_strategy_from or not args.dataset_name:
+        parser.error("--split_seed needs --dataset_name and excludes --split_strategy_from")
+    args.random_seed = args.seed = args.split_seed
+
+# Budget matching: SIFTA's real cost includes its condense passes and the fail
+# precision sampler's precompute, neither of which sits inside max_metric_calls.
+# Reading the recorded total keeps the two arms on equal total compute.
+if args.match_budget_from:
+    import json as _json
+    from pathlib import Path as _Path
+
+    _summary = _Path(args.match_budget_from) / "summary.json"
+    if not _summary.exists():
+        raise FileNotFoundError(f"No summary.json in {args.match_budget_from}")
+    _total = _json.loads(_summary.read_text()).get("total_metric_computations")
+    if not _total:
+        raise ValueError(
+            f"{_summary} has no total_metric_computations. It predates budget tracking; "
+            f"rerun the SIFTA arm or pass --max_metric_calls explicitly."
+        )
+    args.max_metric_calls = _total
+    print(f"Matching budget from {args.match_budget_from}: max_metric_calls={_total}")
 
 # =============================================================================
 # Configuration from Arguments
@@ -118,27 +203,37 @@ EARLY_STOP_PATIENCE = args.early_stop_patience
 EARLY_STOP_MIN_DELTA = args.early_stop_min_delta
 
 # --- LLM Configuration ---
-LLM_NAME = "gpt-4.1-mini"  # Model for constraint generation
-LLM_TEMPERATURE = 1  # Sampling temperature
+LLM_NAME = args.llm_name  # Model for constraint generation
+LLM_TEMPERATURE = 0.6  # Sampling temperature
 LLM_MAX_TOKENS = 32000  # Max output tokens
 
-REFLECTION_LLM_NAME = "gpt-5"  # Model for GEPA reflection/proposal
-REFLECTION_LLM_TEMPERATURE = 1.0
+REFLECTION_LLM_NAME = args.reflection_llm_name  # Model for GEPA reflection/proposal
+REFLECTION_LLM_TEMPERATURE = 0.6
 REFLECTION_LLM_MAX_TOKENS = 32000
 
+# --- Replicate seed ---
+GEPA_SEED = args.seed
+
 # --- Initial Program Configuration ---
-INITIAL_PROGRAM_TYPE = "base"  # Using ConstraintGenerationModule (base, column-level)
+INITIAL_PROGRAM_TYPE = "base"
 
 # --- GEPA Optimizer Configuration ---
-GEPA_MAX_FULL_EVALS = 15  # Max full evaluations per round
+GEPA_MAX_FULL_EVALS = args.max_full_evals  # Max full evaluations per round
+GEPA_MAX_METRIC_CALLS = args.max_metric_calls  # Absolute budget; overrides max_full_evals
+METRIC_TYPE = args.metric  # "f1" or "fail_precision"
 GEPA_NUM_THREADS = 8  # Parallel threads for evaluation
 GEPA_REFLECTION_MINIBATCH_SIZE = 3  # Minibatch size for reflection
 GEPA_SKIP_PERFECT_SCORE = True  # Skip examples with perfect score
 GEPA_USE_MERGE = False  # Don't merge candidates
 
 # Configure DSPy LM
-lm = dspy.LM(f"openai/{LLM_NAME}", temperature=LLM_TEMPERATURE, max_tokens=LLM_MAX_TOKENS)
+reset_usage()
+set_rollout_id(args.split_seed)  # replicate N: its own cached answers
+run_started = time.time()
+lm = tracked_lm(litellm_route(LLM_NAME), temperature=LLM_TEMPERATURE, max_tokens=LLM_MAX_TOKENS,
+                usage_role=TASK_LM)
 dspy.configure(lm=lm)
+print(f"llm={LLM_NAME} reflection_llm={REFLECTION_LLM_NAME} seed={GEPA_SEED} metric={args.metric}")
 
 # =============================================================================
 # Dataset Configuration
@@ -169,8 +264,11 @@ dataset_subtasks = {
     ]
 }
 
-# All available error labels (1-25)
-all_processed_data_labels = [str(i) for i in range(1, 26)]
+all_processed_data_labels = [
+    label for label in ProjectManager(project_root=get_project_root(), dataset_name=train_dataset_name)
+    .get_available_processed_data_labels_for_subtask("general_task")
+    if not is_clean_label(label)
+]
 
 # =============================================================================
 # Load splits from reference run or generate new splits
@@ -196,15 +294,35 @@ def load_splits_from_reference_run(reference_run_name: str):
         "train_script_name_list": reference_summary["train_script_name_list"],
         "eval_script_name_list": reference_summary["eval_script_name_list"],
         "new_script_name_list": reference_summary.get("new_script_name_list", []),
+        "random_seed": reference_summary.get("random_seed"),
     }
 
-if SPLIT_STRATEGY_FROM is not None:
+SPLIT_SEED = args.split_seed
+if SPLIT_SEED is not None:
+    split = load_split(train_dataset_name, SPLIT_SEED)
+    train_eval_label_list = split["train_eval_labels"]
+    cross_new_data_test_label_list = split["test_labels"]
+    reference_script_splits = {
+        "train_eval_script_name_list": split["train_scripts"] + split["eval_scripts"],
+        "train_script_name_list": split["train_scripts"],
+        "eval_script_name_list": split["eval_scripts"],
+        "new_script_name_list": split["test_scripts"],
+    }
+    random.seed(SPLIT_SEED)  # draws the eval sample below
+elif SPLIT_STRATEGY_FROM is not None:
     # Load splits from reference run
     splits = load_splits_from_reference_run(SPLIT_STRATEGY_FROM)
     train_eval_label_list = splits["train_eval_label_list"]
     cross_new_data_test_label_list = splits["cross_new_data_test_label_list"]
     # Script splits will be loaded after we get available scripts
     reference_script_splits = splits
+    # The reference run drew its splits and then its eval sample from one seeded
+    # stream. Replaying the same draws puts this run's eval sample on the same
+    # examples as the SIFTA arm, instead of leaving it to an unseeded generator.
+    if splits["random_seed"] is not None:
+        RANDOM_SEED = splits["random_seed"]
+    random.seed(RANDOM_SEED)
+    random.shuffle(all_processed_data_labels.copy())
 else:
     # Generate new splits using random seed
     print(f"\n{'='*60}")
@@ -257,7 +375,11 @@ if reference_script_splits is not None:
     if missing_scripts:
         raise ValueError(f"Scripts from reference run not found in dataset: {missing_scripts}")
 
-    print(f"\nUsing script splits from reference run")
+    if SPLIT_SEED is None:
+        # Second draw of the reference run's stream (see the label shuffle above), so
+        # the eval sample below comes out of the same generator state.
+        random.shuffle(all_script_names.copy())
+    print(f"\nUsing script splits from {'split file' if SPLIT_SEED is not None else 'reference run'}")
 else:
     # Generate new splits using random seed
     random.seed(RANDOM_SEED)
@@ -326,20 +448,32 @@ print(f"Eval set size: {len(eval_set)} (sampled from {len(eval_set_all)} total)"
 # METRIC & EVALUATOR SETUP
 # =============================================================================
 
-# Instantiate initial program - ConstraintGenerationModule (base, column-level)
 initial_program = ConstraintGenerationModule()
-print(f"Using ConstraintGenerationModule (base, column-level) as initial program")
+print(f"Using ConstraintGenerationModule (base) as initial program")
 
-# Create metrics
-metric = create_column_level_f1_metric(
-    workflow=workflow,
-    convert_nan_to_zero=True,
-)
+# Create metrics. fail_precision reuses SIFTA's own metric so the two arms optimize
+# the identical objective and only the optimizer differs.
+if METRIC_TYPE == "fail_precision":
+    from workflow_sifta.metrics import create_metric as create_fp_metric
+    from workflow_sifta.metrics import create_metric_with_feedback as create_fp_metric_with_feedback
 
-metric_with_feedback = create_column_level_f1_metric_with_feedback(
-    workflow=workflow,
-    convert_nan_to_zero=True,
-)
+    metric = create_fp_metric(
+        workflow=workflow,
+        llm_name=LLM_NAME,
+        convert_nan_to_zero=True,
+    )
+    metric_with_feedback = create_fp_metric_with_feedback(
+        workflow=workflow,
+        llm_name=LLM_NAME,
+        convert_nan_to_zero=True,
+    )
+else:
+    metric = create_column_level_f1_metric(workflow=workflow)
+    metric_with_feedback = create_column_level_f1_metric_with_feedback(
+        workflow=workflow,
+        feedback_seed=GEPA_SEED,
+    )
+print(f"Optimization objective: {METRIC_TYPE}")
 
 # Eval evaluator - created once with fixed eval set
 evaluate = dspy.Evaluate(
@@ -518,6 +652,28 @@ class GEPALoggingHandler(logging.Handler):
 # =============================================================================
 
 
+def iteration_info_of(detailed_results) -> dict:
+    """Iteration bookkeeping in the shape SIFTA's result object reports.
+
+    DSPy's `DspyGEPAResult` (3.0.x) exposes no `get_iteration_info`; it only
+    lists the accepted candidates in discovery order and the metric-call count
+    at which each was found. So for GEPA the "iteration" of a candidate is its
+    discovery rank, and rejected proposals are not recoverable from the result.
+    """
+    if hasattr(detailed_results, "get_iteration_info"):
+        return detailed_results.get_iteration_info()
+    n = len(detailed_results.candidates)
+    candidate_to_iteration = {0: -1}
+    candidate_to_iteration.update({idx: idx - 1 for idx in range(1, n)})
+    return {
+        "candidate_to_iteration": candidate_to_iteration,
+        "iteration_to_candidate": {idx - 1: idx for idx in range(1, n)},
+        "rejected_iterations": [],
+        "num_iterations": n - 1,
+        "iteration_semantics": "discovery rank of accepted candidates; rejected proposals not exposed by DspyGEPAResult",
+    }
+
+
 def extract_program_instructions(module):
     """Extract all predictor instructions from a module."""
     instructions = {}
@@ -588,7 +744,7 @@ def create_prompt_evolution_log(log_dir: Path, round_num: int, detailed_results)
         f.write("---\n\n")
 
         # Get iteration info
-        iteration_info = detailed_results.get_iteration_info()
+        iteration_info = iteration_info_of(detailed_results)
         candidate_to_iteration = iteration_info["candidate_to_iteration"]
         iteration_to_candidate = iteration_info["iteration_to_candidate"]
 
@@ -672,10 +828,13 @@ def write_summary(
         "reflection_llm_name": REFLECTION_LLM_NAME,
         # Baseline configuration
         "baseline_type": "gepa_column",
-        "metric_type": "f1_score",
+        "metric_type": "f1_score" if METRIC_TYPE == "f1" else "fail_precision",
+        "metric_rev": None if METRIC_TYPE == "f1" else METRIC_REV,
         # Split strategy
         "split_strategy_from": SPLIT_STRATEGY_FROM,
-        "random_seed": RANDOM_SEED if SPLIT_STRATEGY_FROM is None else None,
+        "split_seed": SPLIT_SEED,
+        "random_seed": RANDOM_SEED,
+        "gepa_seed": GEPA_SEED,
         # Initial program configuration
         "initial_program_type": INITIAL_PROGRAM_TYPE,
         "initial_program_instructions": extract_program_instructions(initial_program),
@@ -713,6 +872,8 @@ def write_summary(
         "eval_set_all_size": len(eval_set_all),
         # GEPA configuration
         "gepa_max_full_evals": GEPA_MAX_FULL_EVALS,
+        "gepa_max_metric_calls": GEPA_MAX_METRIC_CALLS,
+        "budget_matched_from": args.match_budget_from,
         "gepa_num_threads": GEPA_NUM_THREADS,
         "gepa_reflection_minibatch_size": GEPA_REFLECTION_MINIBATCH_SIZE,
         "gepa_skip_perfect_score": GEPA_SKIP_PERFECT_SCORE,
@@ -724,6 +885,10 @@ def write_summary(
         "initial_program_evaluation": initial_program_data if 'initial_program_data' in globals() else None,
         # History
         "optimization_history": optimization_history,
+        # Tokens, cost, calls and API latency, split by task and reflection LM.
+        "llm_usage": usage_summary(),
+        **opt_budget.summary_fields(),
+        "wall_clock_s": round(time.time() - run_started, 3),
     }
     if final_program_data is not None:
         summary["final_program"] = final_program_data
@@ -738,9 +903,14 @@ def write_summary(
 # LOGGING SETUP
 # =============================================================================
 
-run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_dir = Path(get_project_root()) / "optimization_runs" / f"gepa_column_run_{run_timestamp}"
-log_dir.mkdir(parents=True, exist_ok=True)
+while True:
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(get_project_root()) / "optimization_runs" / f"gepa_column_run_{run_timestamp}"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=False)
+        break
+    except FileExistsError:
+        time.sleep(1)
 print(f"Logging optimization history to: {log_dir}")
 
 optimization_history = []
@@ -748,6 +918,9 @@ latest_program_list = [initial_program]
 
 # Evaluate initial program
 print("\nEvaluating initial program...")
+# Every evaluation from here on counts toward the budget, the initial evaluation included.
+budget = opt_budget.install(args.validation_passes, len(eval_set))
+gepa_state.apply()  # the logged val subscores of the start program stay its own
 initial_evaluation = evaluate(initial_program)
 initial_score = initial_evaluation['score']
 print(f"Initial program eval F1 score: {initial_score:.4f}")
@@ -779,7 +952,7 @@ write_summary()
 
 round_num = 0
 
-while round_num < MAX_ROUNDS:
+while round_num < MAX_ROUNDS and not budget.exhausted:
     print(f"\n{'=' * 60}")
     print(f"=== Round {round_num + 1}/{MAX_ROUNDS} ===")
     print(f"{'=' * 60}")
@@ -818,16 +991,24 @@ while round_num < MAX_ROUNDS:
         logging_handler.setLevel(logging.INFO)
         gepa_logger.addHandler(logging_handler)
 
+    # GEPA takes exactly one of max_metric_calls / max_full_evals / auto.
+    budget_kwargs = (
+        {"max_metric_calls": GEPA_MAX_METRIC_CALLS} if GEPA_MAX_METRIC_CALLS is not None
+        else {"max_full_evals": GEPA_MAX_FULL_EVALS}
+    )
+    budget_kwargs = opt_budget.engine_budget_kwargs(args.validation_passes, budget_kwargs)
     optimizer = GEPA(
         metric=metric_with_feedback,
-        max_full_evals=GEPA_MAX_FULL_EVALS,
+        **budget_kwargs,
         num_threads=GEPA_NUM_THREADS,
         track_stats=True,
         use_merge=GEPA_USE_MERGE,
         reflection_minibatch_size=GEPA_REFLECTION_MINIBATCH_SIZE,
         skip_perfect_score=GEPA_SKIP_PERFECT_SCORE,
-        reflection_lm=dspy.LM(
-            model=f"openai/{REFLECTION_LLM_NAME}",
+        seed=GEPA_SEED,
+        reflection_lm=tracked_lm(
+            model=litellm_route(REFLECTION_LLM_NAME),
+            usage_role=REFLECTION_LM,
             temperature=REFLECTION_LLM_TEMPERATURE,
             max_tokens=REFLECTION_LLM_MAX_TOKENS,
         ),
@@ -903,7 +1084,7 @@ while round_num < MAX_ROUNDS:
             all_candidate_instructions.append(candidate_instructions)
 
         # Get iteration tracking information
-        iteration_info = detailed_results.get_iteration_info()
+        iteration_info = iteration_info_of(detailed_results)
 
         # Log GEPA optimization trajectory
         round_data["gepa_details"] = {
@@ -921,6 +1102,7 @@ while round_num < MAX_ROUNDS:
             "iteration_to_candidate": {int(k): int(v) for k, v in iteration_info["iteration_to_candidate"].items()},
             "rejected_iterations": iteration_info["rejected_iterations"],
             "num_iterations": iteration_info["num_iterations"],
+            "iteration_semantics": iteration_info.get("iteration_semantics", "optimizer iteration numbers"),
         }
         print(f"Round {round_num}: GEPA ran {iteration_info['num_iterations']} iterations")
         print(f"  Accepted: {len(detailed_results.candidates) - 1} candidates (excluding base)")
@@ -1035,3 +1217,6 @@ else:
 print(f"\n{'=' * 60}")
 
 workflow.cleanup_spark_sessions()
+
+from workflow_sifta import hard_exit  # noqa: E402
+hard_exit(0)

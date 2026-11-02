@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
 import oyaml as yaml
 
-from prismadv.project_manager import MultiTableProjectManager
+from prismadv.project_manager import MultiTableProjectManager, label_sort_key
 from prismadv.utils import get_project_root
 
 
 REAL_ETL_PROCESSED_DIR = "eid_bench_real"
 VALID_VARIANTS = {"observed", "clean", "corrupted"}
+_GROUP_DIR = re.compile(r"^error-group-(\d+)$")
+_CONFIG_FILE = re.compile(r"^project_(\d+)\.yaml$")
 
 
 def resolve_project_root(project_root: Path | str | None = None) -> Path:
@@ -118,11 +121,28 @@ def error_config_dir(project_manager: MultiTableProjectManager) -> Path:
     return project_manager.example_path / "errors"
 
 
-def error_config_paths(project_manager: MultiTableProjectManager) -> list[Path]:
-    config_dir = error_config_dir(project_manager)
+def config_label(path: Path) -> str:
+    """`errors/error-group-<k>/project_<n>.yaml` -> label `<k>-<n>`, as in EIDBench-synth.
+
+    The group `k` is the error type of the config (the same group numbers as EIDBench-synth) and `n` counts from 1
+    in each group.
+    """
+    group = _GROUP_DIR.match(path.parent.name)
+    number = _CONFIG_FILE.match(path.name)
+    if group is None or number is None:
+        raise ValueError(f"EIDBench-real error config must be errors/error-group-<k>/project_<n>.yaml: {path}")
+    return f"{int(group.group(1))}-{int(number.group(1))}"
+
+
+def config_paths_in(config_dir: Path) -> list[Path]:
+    """Every error config under `config_dir`, in label order."""
     if not config_dir.exists():
         return []
-    return sorted(config_dir.glob("*.yaml"))
+    return sorted(config_dir.glob("error-group-*/*.yaml"), key=lambda path: label_sort_key(config_label(path)))
+
+
+def error_config_paths(project_manager: MultiTableProjectManager) -> list[Path]:
+    return config_paths_in(error_config_dir(project_manager))
 
 
 def load_error_config(path: Path) -> dict[str, Any]:
@@ -131,8 +151,7 @@ def load_error_config(path: Path) -> dict[str, Any]:
     if not isinstance(config, Mapping):
         raise ValueError(f"EIDBench-real error config must be a mapping: {path}")
     config = dict(config)
-    # Identity is the file stem (e.g. project_0), eid-synth id style.
-    config["label"] = path.stem
+    config["label"] = config_label(path)
     return config
 
 
@@ -148,4 +167,4 @@ def load_error_configs(project_manager: MultiTableProjectManager) -> dict[str, d
 
 
 def corruption_labels(project_manager: MultiTableProjectManager) -> list[str]:
-    return sorted(load_error_configs(project_manager))
+    return sorted(load_error_configs(project_manager), key=label_sort_key)

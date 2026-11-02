@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
 """Drive repeated EIDBench-real generation + validation runs for stability analysis.
-
-Iterates the (dataset, method, model) grid that backs `results_analysis/
-result_full_approach.ipynb` and, for each cell, makes sure at least
-`--target-runs` constraint artifacts exist. Idempotent: cells that already have
-enough artifacts are skipped. Validation is run for every artifact (clean +
-corruptions); the per-target validator skips outputs that already exist.
-
-Usage (from repo root, inside the poetry env):
-
-    poetry run python -m workflow_prismadv.eid_bench_real_experiments._5_repeat_runs \
-        --target-runs 2 \
-        --stage all \
-        --dataset bank_marketing_analysis  # optional filter
-
-The grid mirrors the notebook so re-aggregation Just Works once new artifacts
-land in `data_processed/eid_bench_real/<dataset>/constraints/project/`.
 """
 
 from __future__ import annotations
@@ -27,6 +11,7 @@ import sys
 from pathlib import Path
 
 from workflow_prismadv.eid_bench_real_experiments import utils
+from workflow_prismadv.utils.replicates import parse_replicate
 
 
 DATASETS = (
@@ -35,35 +20,28 @@ DATASETS = (
     "omop_cdm_databricks",
 )
 
-# (method_label, module, model_name, artifact_prefix)
-# artifact_prefix matches what the generator's make_output_filename emits.
 GRID: tuple[tuple[str, str, str, str], ...] = (
-    # Model order within prismadv block matches eid_bench's model_order
-    # (gemini-2.5-flash, gpt-4.1, gpt-4o, gpt-5-mini, gemini-2.5-pro, gpt-5).
-    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gemini-2.5-flash", "prismadv_real_etl"),
-    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gpt-4.1",          "prismadv_real_etl"),
-    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gpt-5-mini",       "prismadv_real_etl"),
-    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gemini-2.5-pro",   "prismadv_real_etl"),
-    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gpt-5",            "prismadv_real_etl"),
-    # Baselines run on the same model set as prismadv (eid_bench model_order).
-    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gemini-2.5-flash", "single_shot_real_etl"),
-    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gpt-4.1",          "single_shot_real_etl"),
-    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gpt-5-mini",       "single_shot_real_etl"),
-    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gemini-2.5-pro",   "single_shot_real_etl"),
-    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gpt-5",            "single_shot_real_etl"),
-    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gemini-2.5-flash", "few_shot_real_etl"),
-    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gpt-4.1",          "few_shot_real_etl"),
-    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gpt-5-mini",       "few_shot_real_etl"),
-    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gemini-2.5-pro",   "few_shot_real_etl"),
-    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gpt-5",            "few_shot_real_etl"),
-    # swe-agent is reported only for gpt-5 (and the existing gemini-2.5-flash),
-    # not the full model set like zero/few-shot.
-    ("swe_agent", "workflow_prismadv.eid_bench_real_baselines.swe_agent",                     "gemini-2.5-flash", "swe_agent_real_etl"),
-    ("swe_agent", "workflow_prismadv.eid_bench_real_baselines.swe_agent",                     "gpt-5",            "swe_agent_real_etl"),
-    # deequ is deterministic (no LLM); run with --target-runs 1.
+    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gemini-2.5-flash", "prismadv"),
+    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gpt-4.1",          "prismadv"),
+    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gpt-5-mini",       "prismadv"),
+    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gemini-2.5-pro",   "prismadv"),
+    ("prismadv",  "workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation", "gpt-5",            "prismadv"),
+    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gemini-2.5-flash", "single_shot"),
+    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gpt-4.1",          "single_shot"),
+    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gpt-5-mini",       "single_shot"),
+    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gemini-2.5-pro",   "single_shot"),
+    ("zero_shot", "workflow_prismadv.eid_bench_real_baselines.single_shot",                   "gpt-5",            "single_shot"),
+    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gemini-2.5-flash", "few_shot"),
+    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gpt-4.1",          "few_shot"),
+    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gpt-5-mini",       "few_shot"),
+    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gemini-2.5-pro",   "few_shot"),
+    ("few_shot",  "workflow_prismadv.eid_bench_real_baselines.few_shot",                      "gpt-5",            "few_shot"),
+    ("swe_agent", "workflow_prismadv.eid_bench_real_baselines.swe_agent",                     "gemini-2.5-flash", "swe_agent"),
+    ("swe_agent", "workflow_prismadv.eid_bench_real_baselines.swe_agent",                     "gpt-5",            "swe_agent"),
     ("deequ",     "workflow_prismadv.eid_bench_real_baselines.deequ",                         "deequ",            "deequ"),
-    # pocketflow agent (gpt-5, like the other agents); reported as a single row.
     ("pocketflow", "workflow_prismadv.eid_bench_real_baselines.pocketflow_agent",            "gpt-5",            "pocketflow"),
+    ("codex",     "workflow_prismadv.eid_bench_real_baselines.codex_agent",                  "gpt-5",            "codex"),
+    ("codex",     "workflow_prismadv.eid_bench_real_baselines.codex_agent",                  "gpt-6-sol",        "codex"),
 )
 
 VALIDATION_MODULE = "workflow_prismadv.eid_bench_real_experiments._4_constraints_validation"
@@ -122,22 +100,26 @@ def generate_for_cell(
     dry_run: bool,
 ) -> int:
     have = existing_artifacts(constraints_dir, prefix, model_name)
-    print(f"\n[{dataset} / {prefix} / {model_name}] {len(have)} artifact(s) already present.")
+    present = {parse_replicate(path.stem) for path in have}
+    print(f"\n[{dataset} / {prefix} / {model_name}] {len(have)} artifact(s) already present, "
+          f"replicates {sorted(present) or '-'}.")
     for path in have:
         print(f"    - {path.name}")
-    if len(have) >= target_runs:
+    missing = [k for k in range(1, target_runs + 1) if k not in present]
+    if not missing:
         print(f"  -> target_runs={target_runs} already met; skipping generation.")
         return 0
-    missing = target_runs - len(have)
     final_rc = 0
-    for i in range(missing):
-        print(f"\n  ==> launching new run ({i + 1}/{missing}) for {prefix} / {model_name} on {dataset}")
+    for i, replicate in enumerate(missing):
+        print(f"\n  ==> launching replicate {replicate} ({i + 1}/{len(missing)}) "
+              f"for {prefix} / {model_name} on {dataset}")
         command = [
-            "poetry", "run", "python", "-m", module,
+            "uv", "run", "python", "-m", module,
             "--example-id", dataset,
             "--model-name", model_name,
-            "--overwrite",
         ]
+        if replicate > 1:
+            command += ["--replicate", str(replicate)]
         rc = run(command, dry_run)
         if rc != 0:
             print(f"  !! generation returned non-zero exit code {rc}; will not abort the sweep.")
@@ -156,7 +138,7 @@ def validate_artifacts(*, dataset: str, constraints_dir: Path, dry_run: bool) ->
     final_rc = 0
     for artifact in artifacts:
         command = [
-            "poetry", "run", "python", "-m", VALIDATION_MODULE,
+            "uv", "run", "python", "-m", VALIDATION_MODULE,
             "--example-id", dataset,
             "--script-id", SCRIPT_ID,
             "--target", "all",

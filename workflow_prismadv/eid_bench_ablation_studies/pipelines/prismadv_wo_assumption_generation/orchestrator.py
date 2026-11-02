@@ -60,7 +60,7 @@ class PrismaLangChainDVwoAssumption(AbstractPrismaLangChainDV):
         all_codes = {}
         column_desc_dict = input_variables["column_desc_dict"]
         input_variables[
-            "downstream_task_description"] = self.downstream_task_description  # TODO: generate it before invoke
+            "downstream_task_description"] = self.downstream_task_description
         columns_to_consider = run_with_cost(
             "column_access_detection",
             lambda: column_access.basic_column_access_detection(self.runtime, input_variables),
@@ -114,17 +114,14 @@ class PrismaLangChainDVwoAssumption(AbstractPrismaLangChainDV):
             cost_summary,
         )
         all_codes.update(all_single_column_codes)
-        constraints_with_sources = ConstraintsWithSources.from_assumptions_and_code_dict(
-            all_assumptions, all_codes
-        )
-        return constraints_with_sources, column_data_flow_locations, cost_summary
+        return self._without_assumptions(all_codes), column_data_flow_locations, cost_summary
 
     async def ainvoke(self, input_variables: dict):
         cost_summary = {}
         all_codes = {}
         column_desc_dict = input_variables["column_desc_dict"]
         input_variables[
-            "downstream_task_description"] = self.downstream_task_description  # TODO: generate it before invoke
+            "downstream_task_description"] = self.downstream_task_description
         columns_to_consider = run_with_cost(
             "column_access_detection",
             lambda: column_access.basic_column_access_detection(self.runtime, input_variables),
@@ -184,13 +181,15 @@ class PrismaLangChainDVwoAssumption(AbstractPrismaLangChainDV):
             cost_summary,
         )
         all_codes.update(all_single_column_codes)
-        code_dict = all_codes
+        return self._without_assumptions(all_codes), column_data_flow_locations, cost_summary
+
+    @staticmethod
+    def _without_assumptions(code_dict: dict) -> ConstraintsWithSources:
+        """The generated code of every column group, with no assumptions behind it."""
         constraints_with_sources = ConstraintsWithSources()
-        code_dict = {de_column_group_key(k): v for k, v in code_dict.items()}
-        for column_group, _ in code_dict.items():
-            code_entries = code_dict[column_group]
-            constraints_with_sources.data_map[column_group] = ColumnConstraintsWithSources(
+        for column_group, code_entries in code_dict.items():
+            constraints_with_sources.data_map[de_column_group_key(column_group)] = ColumnConstraintsWithSources(
                 assumptions=[],
                 code=code_entries,
             )
-        return constraints_with_sources, column_data_flow_locations, cost_summary
+        return constraints_with_sources

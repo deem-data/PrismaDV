@@ -22,6 +22,7 @@ class ColumnConstraints:
 @dataclass
 class Constraints:
     constraints: Dict[str, ColumnConstraints] = field(default_factory=dict)
+    cost_summary: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, input_path: Union[str, Path]):
@@ -31,12 +32,15 @@ class Constraints:
 
     def to_dict(self):
         # Convert the dataclass structure to a dictionary that yaml.dump can use
-        return {
+        out = {
             "constraints": {
                 column: self._column_constraints_to_dict(column, constraint)
                 for column, constraint in sorted(self.constraints.items())
             }
         }
+        if self.cost_summary:
+            out["cost_summary"] = self.cost_summary
+        return out
 
     @staticmethod
     def _qualified_key(column_name: str, table_name: Optional[str] = None) -> str:
@@ -103,9 +107,13 @@ class Constraints:
             )
         return constraints
 
-    def save_to_yaml(self, output_path: str):
+    def save_to_yaml(self, output_path: str, extra: Optional[dict] = None):
+        """Write the artifact; `extra` adds top-level provenance keys such as `replicate`."""
+        data = self.to_dict()
+        if extra:
+            data.update(extra)
         with open(output_path, "w") as f:
-            yaml.dump(self.to_dict(), f)
+            yaml.dump(data, f)
 
     def to_string(self):
         return yaml.dump(self.to_dict())
@@ -113,6 +121,7 @@ class Constraints:
     def _load_from_yaml(self, input_path: str):
         with open(input_path, "r") as f:
             data = yaml.safe_load(f)
+            self.cost_summary = data.get("cost_summary", {})
             for column, constraint in data["constraints"].items():
                 self.constraints[column] = ColumnConstraints(
                     code=[CodeEntry(suggestion=suggestion, validity=validity) for suggestion, validity in

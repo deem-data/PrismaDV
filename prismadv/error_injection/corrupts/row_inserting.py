@@ -25,7 +25,8 @@ class DuplicatedRows(TabularCorruption):
 
         df = dataframe.copy(deep=True)
         use_super = True
-        if (self.sampling and (self.sampling.endswith('AR') or self.sampling.endswith('NAR'))) and not self.columns:
+        if (self.sampling and (self.sampling.endswith('AR') or self.sampling.endswith('NAR'))) and not self.columns \
+                and self.slice_column is None:
             use_super = False
         if use_super:
             rows = super().sample_rows(df)

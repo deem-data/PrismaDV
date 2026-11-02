@@ -1,6 +1,7 @@
 """Evaluate Deequ constraint suggestion on ICDBench"""
 import os
 import sys
+import time
 import warnings
 
 import pandas as pd
@@ -11,7 +12,10 @@ from prismadv.utils import get_project_root
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from workflow_prismadv.icd_bench_experiments import instantiate_evaluation_case, RED, RESET
+from workflow_prismadv.icd_bench_experiments.scoring import case_dirs, out_argument, write_outcomes
 
+args = out_argument(__doc__, "deequ--deequ--r1.tsv")
+rows = []
 exact_matches = 0
 true_positives = 0
 false_positives = 0
@@ -20,9 +24,9 @@ false_negatives = 0
 
 num_constraints = 0
 
-constraints_output_dir = (get_project_root() / "data_processed" / "icd_bench")
-for case_dir in os.listdir(constraints_output_dir):
+for case_dir in case_dirs():
     evaluation_case = instantiate_evaluation_case(case_dir)
+    started = time.perf_counter()
 
     dq_manager = DeequDataQualityManager()
 
@@ -63,6 +67,8 @@ for case_dir in os.listdir(constraints_output_dir):
     data_to_pass_df, spark = dq_manager.spark_df_from_pandas_df(data_to_pass)
     pass_constraint_results = dq_manager.validate_on_spark_df(spark, data_to_pass_df, generated_constraints)
     passed = 'Failure' not in pass_constraint_results
+    rows.append({"case": case_dir, "passes_pass_batch": passed, "rejects_reject_batch": rejected,
+                 "wall_clock_seconds": round(time.perf_counter() - started, 3)})
 
     print(f"\nEvaluating {evaluation_case.__class__.__module__}.{evaluation_case.__class__.__name__}...")
 
@@ -92,24 +98,9 @@ for case_dir in os.listdir(constraints_output_dir):
     else:
         true_positives += 1
 
-num_cases = true_positives + false_negatives
-print(f"\n\nFinal evaluation results for {num_cases} cases:\n")
-
-print(f"{exact_matches}/{num_cases} exact matches of the ground truth constraint.\n")
-
-print(f"{true_positives}/{num_cases} correct data batches passed.")
-print(f"{false_negatives}/{num_cases} false alarms for correct data batches.")
-
-print(f"{true_negatives}/{num_cases} problematic data batches identified.")
-print(f"{false_positives}/{num_cases} problematic data batches missed.\n")
-
-precision = true_positives / (true_positives + false_positives)
-recall = true_positives / (true_positives + false_negatives)
-f1 = 2 * (precision * recall) / (precision + recall)
-
-print("F1 Score:", f1)
-
+print(f"{exact_matches}/{len(rows)} exact matches of the ground truth constraint.")
 print("Number of constraints generated:", num_constraints)
+write_outcomes(rows, args.out)
 
 # Stop Spark session
 spark.stop()

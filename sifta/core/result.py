@@ -27,7 +27,7 @@ class SIFTAResult(Generic[RolloutOutput]):
     - tracked_scores: optional tracked aggregate scores (if different from val_aggregate_scores)
 
     Convenience:
-    - best_idx: candidate index with the highest val_aggregate_scores
+    - best_idx: candidate index with the highest val_aggregate_scores (the latest one on a tie)
     - best_candidate: the program text mapping for best_idx
     - non_dominated_indices(): candidate indices that are not dominated across per-instance pareto fronts
     - lineage(idx): parent chain from base to idx
@@ -64,19 +64,13 @@ class SIFTAResult(Generic[RolloutOutput]):
 
     @property
     def best_idx(self) -> int:
-        # Exclude the original program (index 0) - choose best from new programs only
+        # The original program (index 0) competes too: a round keeps it when no new candidate scores higher.
         scores = self.val_aggregate_scores
-        if len(scores) <= 1:
-            return 0  # Only original exists, use it
-
-        # Find best score among new programs (index 1+)
-        new_scores = scores[1:]
-        best_new_score = max(new_scores)
-        # Return the latest candidate with best score among new programs
-        for i in range(len(scores) - 1, 0, -1):  # Start from end, stop before 0
-            if scores[i] == best_new_score:
+        best_score = max(scores)
+        # Return the latest candidate with the best score
+        for i in range(len(scores) - 1, -1, -1):
+            if scores[i] == best_score:
                 return i
-        return 0  # fallback (shouldn't reach here)
 
     @property
     def best_candidate(self) -> dict[str, str]:

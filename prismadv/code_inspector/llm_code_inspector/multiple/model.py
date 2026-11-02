@@ -10,6 +10,25 @@ from prismadv.code_inspector.llm_code_inspector.multiple.prompt import (
 from prismadv.llm_backend.entry import get_langchain_model
 
 
+def _is_source_list(value) -> bool:
+    return (isinstance(value, list) and len(value) > 0
+            and all(isinstance(v, dict) and "start_line" in v and "end_line" in v for v in value))
+
+
+def _require_sources(output):
+    """The parsed reply with its line ranges under `sources`, or a ValueError the retry loop can act on.
+    """
+    if isinstance(output, dict) and "sources" not in output:
+        aliased = [k for k, v in output.items() if _is_source_list(v)]
+        if len(aliased) == 1:
+            print(f"\tdata-flow reply used key '{aliased[0]}' for 'sources'; accepted")
+            output = {**output, "sources": output[aliased[0]]}
+    if not isinstance(output, dict) or "sources" not in output:
+        keys = sorted(output) if isinstance(output, dict) else type(output).__name__
+        raise ValueError(f"data-flow reply has no 'sources' key (got {keys})")
+    return output
+
+
 class ColumnDataFlowInspector():
     def __init__(self, model_name: str = None,
                  logger: logging.Logger = None):
@@ -67,7 +86,7 @@ class ColumnDataFlowInspector():
             dict: The output from the model.
         """
         input_variables["code_script"] = input_variables["code_script"]
-        return self.single_chain.invoke(input_variables)
+        return _require_sources(self.single_chain.invoke(input_variables))
 
     def invoke_with_retries(self, input_variables: dict, max_retries: int = 3):
         """
@@ -94,7 +113,7 @@ class ColumnDataFlowInspector():
         Ensures code_script has line numbers before calling.
         """
         input_variables["code_script"] = input_variables["code_script"]
-        return await self.single_chain.ainvoke(input_variables)
+        return _require_sources(await self.single_chain.ainvoke(input_variables))
 
     async def ainvoke_with_retries(self, input_variables: dict, max_retries: int = 3, backoff_s: float = 0.5):
         """

@@ -18,16 +18,25 @@ from prismadv.ir_translator.deequ_constraints.function_manager import DeequFunct
 
 
 class ScriptLevelConstraintSig(dspy.Signature):
-    """Generate constraints for all columns in a script in one pass."""
-
-    __doc__ = f"""Generate PyDeequ validation constraints for all relevant columns.
-
-    Available Row-Level Functions:
-    {chr(10).join(DeequFunctionManager().get_constraints(is_row_level=True))}
-
-    Available Aggregate-Level Functions:
-    {chr(10).join(DeequFunctionManager().get_constraints(is_row_level=False))}
-    """
+    # The three steps of the column-level base program (prismadv/llm/dspy/models/column_wise_module/signatures.py,
+    # BASIC_INSTRUCTIONS), in its words and with its level rule, done for every column in one prompt; only the
+    # output format is the script-level one.
+    __doc__ = (
+        "For each column of the input data that the code uses:\n\n"
+        "1. List every line of the code that touches the column: reads it, writes it, filters on it, transforms "
+        "it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.\n\n"
+        "2. Code makes assumptions about its input data, often without stating them. For example, fillna on a "
+        "column means the column may contain nulls, and an assert sets a bound the data must meet. From the code "
+        "that uses the column and the task description, write these assumptions as statements about the input "
+        "data that a Deequ check can test. Give each assumption the line ranges from step 1 it comes from.\n\n"
+        "3. Translate the assumptions into PyDeequ checks. Set level \"error\" if data that fails the check would "
+        "crash the code, and \"warning\" if the code still runs but the data quality is not ideal. Link each "
+        "check to the indices (from 0) of the assumptions it tests.\n\n"
+        "Available Row-Level Functions:\n"
+        + "\n".join(DeequFunctionManager().get_constraints(is_row_level=True))
+        + "\n\nAvailable Aggregate-Level Functions:\n"
+        + "\n".join(DeequFunctionManager().get_constraints(is_row_level=False))
+    )
 
     columns_desc: str = dspy.InputField(
         description="YAML description of all columns (schema + stats)."
@@ -41,11 +50,11 @@ class ScriptLevelConstraintSig(dspy.Signature):
 
     constraints: List[Dict[str, Any]] = dspy.OutputField(
         description=(
-            "List of constraint blocks. Each block is a JSON object with: "
+            "One block per column. Each block is a JSON object with: "
             "{\"column_group\": str|[str,...], "
             "\"assumptions\": [{\"text\": str, \"sources\": [{\"start_line\": int, \"end_line\": int}]}], "
-            "\"code\": [{\"suggestion\": str, \"level\": \"error\"|\"warning\", "
-            "\"linked_assumptions\": [int,...]}]}."
+            "\"code\": [{\"suggestion\": PyDeequ code (starting with \".\" or a function), "
+            "\"level\": \"warning\"|\"error\", \"linked_assumptions\": [indices]}]}."
         )
     )
 

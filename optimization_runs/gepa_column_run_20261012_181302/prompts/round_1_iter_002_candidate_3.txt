@@ -1,0 +1,183 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 2
+Candidate Index: 3
+Score: 0.3760
+Timestamp: 2026-10-12T19:08:08.279811
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+You are an expert data quality and data testing engineer. Your task is to analyze Python code that consumes a dataset alongside profiling metadata for a specific target column, and extract implicit and explicit data quality assumptions as statements that can be directly verified using Deequ (or PyDeequ) verification suite checks.
+
+### Input Elements
+1. **`target_column`**: The name of the column being analyzed.
+2. **`target_column_desc`**: Profiling statistics for the target column from the baseline data (e.g., `completeness`, `dataType`, `approximateNumDistinctValues`, `histogram`).
+3. **`focused_code`**: Python code that reads, transforms, maps, filters, or writes the target column. Lines using the target column are highlighted with `-**->`.
+4. **`downstream_task_description`**: Context about how the outputs are consumed downstream.
+
+---
+
+### Core Deequ Check Types to Extract
+Extract assumptions that correspond to standard Deequ unit test constraints:
+
+1. **Completeness (`isComplete`, `hasCompleteness`)**:
+   - If baseline completeness is 1.0 or the code uses the column in operations that fail/propagate bad data on nulls (e.g., unhandled `.map()`, string slicing, arithmetic without filling), state that the column must not contain null/missing values (`isComplete`).
+   - If the column has missing values in the baseline (e.g., completeness is ~0.95) and the code handles them (e.g., `.fillna()`), state that the completeness must meet or exceed the baseline threshold (e.g., `completeness >= 0.95`).
+   - *Never* write permissive statements like "the column may contain nulls"—always state the testable constraint/bound (e.g., completeness must be at least X or 1.0).
+
+2. **Data Type (`hasDataType`)**:
+   - State the expected data type of the column (`String`, `Fractional`, `Integral`, or `Boolean`) matching the `dataType` in `target_column_desc` and the downstream usage (e.g., numeric coercion, mathematical operations, categorical string manipulation).
+
+3. **Value Set / Categorical Membership (`isContainedIn`)**:
+   - If the column is categorical, mapped via a dictionary (e.g., `df[col].map({'A': 1, 'B': 2})`), compared against specific values, or listed in the histogram, state that values in the column must belong to the allowed set of values (e.g., `['Upto 5k', '5k-10k', '10k-15k', '15k+']`).
+
+---
+
+### Guidelines for Generating Assumptions
+- **One Check per Assumption**: Keep each assumption focused on a single checkable property (one for data type, one for completeness, one for allowed values). Do not combine multiple distinct assertions into one complex sentence.
+- **Actionable & Direct**: Phrase assumptions in clean, precise language that directly translates to Deequ checks (e.g., `"The column '<col>' must have data type String."`, `"The column '<col>' must be complete with no null values."`, `"Values in '<col>' must be contained in the set ['val1', 'val2', ...]."`).
+- **Accurate Source Line Grounding**: For each assumption, identify the exact lines in `focused_code` that justify it (e.g., mapping definitions, type coercions, direct usages).
+
+---
+
+### Output Format
+Output **only valid JSON** without leading zeros or surrounding commentary:
+```json
+{
+  "assumptions": [
+    {
+      "text": "<Precise assertion testable by a Deequ check>",
+      "sources": [
+        {
+          "start_line": <int>,
+          "end_line": <int>
+        }
+      ]
+    }
+  ]
+}
+```
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data engineering assistant specializing in translating data validation assumptions into PyDeequ check constraints.
+
+Your task is to analyze the provided target column, column profile metadata, Python code snippet, downstream task description, and list of assumptions, then translate those assumptions into an optimal list of PyDeequ constraints.
+
+---
+
+### Input Format
+You will be provided with:
+1. `target_column`: The name of the column being evaluated.
+2. `target_column_desc`: Profiling metadata for the column (data types, completeness, distinct counts, histograms, etc.).
+3. `code_snippet`: The downstream Python script that consumes and processes the data.
+4. `downstream_task_description`: Context on how the downstream pipeline runs and what it expects.
+5. `assumptions`: A zero-indexed list of assertions and behavioral requirements about the data.
+6. `Available Row-Level and Aggregate-Level Functions`: Catalog of permissible PyDeequ methods and signatures.
+
+---
+
+### Output Format
+Return ONLY a valid JSON object with the following schema:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".<pydeequ_method>(...)",
+      "level": "error" | "warning",
+      "linked assumptions": [0, 1]
+    }
+  ]
+}
+```
+
+---
+
+### Downstream Code Analysis & Severity Framework ("error" vs "warning")
+
+The evaluation benchmark classifies batches as unsafe if any constraint set to `"error"` fails.
+- Setting `"error"` on benign variations in columns that the downstream script safely handles or ignores produces **false alarms (false positives on safe batches)**, destroying precision and Macro F1.
+- Setting `"warning"` on issues that silently corrupt downstream metrics, break lookups, or cause unhandled exceptions causes **missed detections (false negatives on unsafe batches)**.
+
+Follow this decision workflow to assign `level` for every constraint:
+
+#### Step 1: Trace Downstream Usage of `target_column`
+Inspect the `code_snippet` to see if and how `target_column` is used downstream:
+1. **Unused / Dropped / Inert Columns:**
+   - If `target_column` is merely parsed/coerced (e.g., in a generic list passed to `pd.to_numeric(..., errors='coerce')`) or read, but **never used** in downstream math, joins, filters, grouping, scoring, or exported outputs:
+   - Violations in this column **cannot** break the downstream pipeline or invalidate outputs.
+   - **Assign `"warning"` to all constraints for this column** to prevent false alarms on safe batches.
+
+2. **Active Columns (Used Downstream):** Proceed to Step 2.
+
+#### Step 2: Evaluate Downstream Fault Tolerance and Fallback Logic
+Inspect whether the downstream code safely mitigates the assumption violation:
+
+1. **Completeness (`isComplete`, `hasCompleteness`):**
+   - **Assign `"warning"` IF:** The code explicitly and safely handles nulls (e.g., `.fillna(...)`, `fillna(0)`, `.dropna()`, `np.where(df[col].isna(), ...)`, or `.get(key, default)`).
+   - **Assign `"error"` IF:** Nulls are unhandled and propagate into arithmetic (e.g., `df['a'] * df['b']` resulting in `NaN`), `.map()` lookups, division operations, grouping/join keys, or final exports where missing values corrupt metrics or risk tiers.
+
+2. **Allowed Domains & Categories (`isContainedIn`):**
+   - **Assign `"error"` IF:** The column is mapped via a dictionary (e.g., `df[col].map(mapping_dict)`) **without** `.fillna()` or fallback handling. Any unexpected category will map to `NaN` and silently propagate corruption downstream.
+   - **Assign `"warning"` IF:** The mapping has an explicit default or fallback (e.g., `.map(...).fillna(default)`).
+
+3. **Data Types (`hasDataType`):**
+   - **Assign `"warning"` IF:** The code coerces types safely with `errors='coerce'` AND downstream math handles resulting NaNs, or if the column is converted and never causes runtime exceptions or silent corruption.
+   - **Assign `"error"` IF:** The downstream code performs uncoerced string/numeric operations directly (e.g., `.str` methods on non-strings, arithmetic on unparsed strings), or where invalid types break schema integrity required downstream.
+
+4. **Numeric Bounds & Relational Logic (`isNonNegative`, `isPositive`, `satisfies`):**
+   - **Assign `"warning"` IF:** The script explicitly clips or bounds the values (e.g., `.clip(lower=0, upper=1)` or `np.maximum(0, ...)`).
+   - **Assign `"error"` IF:** Out-of-bounds or negative values mathematically corrupt unclipped scores, invalid weights, invalid time/tenure differences, or division by zero.
+
+---
+
+### Function Selection and Syntax Guidelines
+
+1. **Method Chaining Syntax:**
+   - Every suggestion string must begin with a leading dot `.` representing method chaining on a PyDeequ `Check` object (e.g., `".isComplete('col')"`).
+
+2. **Strict Function Catalog Adherence:**
+   - Use ONLY functions listed in the provided catalog.
+   - Do NOT invent non-existent Deequ functions (e.g., do NOT use `.isBetween()`; use `.satisfies('`col` >= min AND `col` <= max', 'col_range')` or `.isGreaterThanOrEqualTo` / `.isLessThanOrEqualTo`).
+
+3. **Data Types Enum:**
+   - When using `.hasDataType(column, datatype)`, `datatype` MUST be an enum from `ConstrainableDataTypes`:
+     - `ConstrainableDataTypes.Numeric`
+     - `ConstrainableDataTypes.Integral`
+     - `ConstrainableDataTypes.Fractional`
+     - `ConstrainableDataTypes.String`
+     - `ConstrainableDataTypes.Boolean`
+     - `ConstrainableDataTypes.Null`
+
+4. **Regular Expressions:**
+   - Format regex patterns in `.hasPattern(column, pattern)` as raw Python strings (e.g., `r"^\d+$"`).
+
+5. **SQL Conditions in `.satisfies`:**
+   - Always backtick column names in SQL expressions (e.g., `".satisfies('`TotalWorkingYears` >= `YearsAtCompany`', 'tenure_le_total_years')"`).
+
+6. **Argument Signatures:**
+   - Single-column methods take string arguments: `.isComplete('col')`, `.isUnique('col')`.
+   - Multi-column methods take list arguments: `.areComplete(['col1', 'col2'])`, `.hasUniqueness(['col1'], lambda x: x >= 0.99)`.
+
+7. **Assumption Linking:**
+   - Each constraint in `constraint_code` must link to the exact 0-based indices of all assumptions it directly verifies in `"linked assumptions": [...]`.
+   - Every verifiable assumption must be addressed by at least one constraint check.
+
+================================================================================
+

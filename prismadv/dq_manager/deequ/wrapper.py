@@ -8,7 +8,7 @@ from prismadv.dq_manager.abstract_data_quality_manager import AbstractDataQualit
 from prismadv.dq_manager.deequ._analyzing import analyze_on_spark_df
 from prismadv.dq_manager.deequ._constraint_suggestion import \
     get_suggestion_for_spark_df
-from prismadv.dq_manager.deequ._constraint_validation import apply_checks_from_strings_on_spark_df
+from prismadv.dq_manager.deequ._constraint_validation import apply_checks_from_strings_on_spark_df, isolated_checks
 from prismadv.dq_manager.deequ._profiling import profile_on_spark_df
 from prismadv.dq_manager.interfaces.constraint_suggestion import ConstraintSuggesting
 from prismadv.dq_manager.deequ._constraint_validation import _normalize_check_str
@@ -123,42 +123,53 @@ class DeequDataQualityManager(AbstractDataQualityManager, ConstraintSuggesting):
             List of (validity: bool, reason_if_invalid: str) tuples, one per constraint
         """
         from pydeequ.checks import Check, CheckLevel, ConstrainableDataTypes
-        
-        # Pre-process constraints: filter and validate instantiation
-        # Track which constraints need validation vs which are pre-filtered
+
         results = [None] * len(code_list_for_constraints)
         constraints_to_validate = []
         indices_to_validate = []
 
-        for i, constraint_str in enumerate(code_list_for_constraints):
-            # Try to instantiate the check to filter out invalid constraints early
-            try:
-                constraint_str = _normalize_check_str(constraint_str)
-                check = Check(spark, CheckLevel.Warning, "Check for data")
-                exec(f"check.addConstraint(check.{constraint_str})")
-                constraints_to_validate.append(constraint_str)
+        if isolated_check:
+            # isolated_checks instantiates every constraint itself and reports the ones
+            # that fail with error_stage "instantiate"; a separate instantiation pass
+            # here would only double the py4j round trips per constraint.
+            for i, constraint_str in enumerate(code_list_for_constraints):
+                constraints_to_validate.append(_normalize_check_str(constraint_str))
                 indices_to_validate.append(i)
-            except Exception as e:
-                reason_if_invalid = f"Unable to instantiate constraint '{constraint_str}': {e}"
-                results[i] = (False, reason_if_invalid)
-        
-        # If no valid constraints remain, return early
-        if not constraints_to_validate:
-            return results
-        
-        # Validate the filtered constraints in batch
-        check_results = apply_checks_from_strings_on_spark_df(
-            spark, spark_df, constraints_to_validate, isolated_check=isolated_check
-        )
-        
+            check_results = isolated_checks(spark, spark_df, constraints_to_validate)
+        else:
+            # Pre-process constraints: filter and validate instantiation
+            # Track which constraints need validation vs which are pre-filtered
+            for i, constraint_str in enumerate(code_list_for_constraints):
+                # Try to instantiate the check to filter out invalid constraints early
+                try:
+                    constraint_str = _normalize_check_str(constraint_str)
+                    check = Check(spark, CheckLevel.Warning, "Check for data")
+                    exec(f"check.addConstraint(check.{constraint_str})")
+                    constraints_to_validate.append(constraint_str)
+                    indices_to_validate.append(i)
+                except Exception as e:
+                    reason_if_invalid = f"Unable to instantiate constraint '{constraint_str}': {e}"
+                    results[i] = (False, reason_if_invalid)
+
+            # If no valid constraints remain, return early
+            if not constraints_to_validate:
+                return results
+
+            check_results = apply_checks_from_strings_on_spark_df(
+                spark, spark_df, constraints_to_validate, isolated_check=False
+            )
+
         # Process validation results and fill in the results list
         for idx, check_result in enumerate(check_results):
             original_idx = indices_to_validate[idx]
             constraint_str = constraints_to_validate[idx]
-            
+
             if check_result is None:
                 validity = False
                 reason_if_invalid = f"Constraint '{constraint_str}' returned None result"
+            elif isinstance(check_result, dict) and check_result.get("error_stage") == "instantiate":
+                validity = False
+                reason_if_invalid = f"Unable to instantiate constraint '{constraint_str}': {check_result['constraint_message']}"
             else:
                 # Use dictionary-style access which works for both Spark Row objects and dicts
                 # Same pattern as filter_valid_constraints_on_spark (line 150)

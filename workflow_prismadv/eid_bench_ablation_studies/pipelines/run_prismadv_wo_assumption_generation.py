@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 
 import oyaml as yaml
 from prismadv.data_models.constraints_v2 import ser_column_group_key
@@ -11,14 +10,18 @@ from prismadv.loader import FileLoader
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
 from workflow_prismadv.eid_bench_ablation_studies.pipelines.prismadv_wo_assumption_generation import PrismaLangChainDVwoAssumption
+from workflow_prismadv.utils.replicates import select_scripts, artifact_filename, normalize_replicate, replicate_of_artifact
+
+METHOD = "prismadv_wo_assumption"
 
 
-def make_output_filename(model_name) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"prismadv_wo_assumption_before_post--{model_name}--{timestamp}.yaml"
+def make_output_filename(model_name, replicate=None) -> str:
+    return artifact_filename(METHOD, model_name, replicate)
 
 
-def run_prismadv_wo_assumption_generation(dataset_name, subtask_name, processed_data_label, prismadv_config):
+def run_prismadv_wo_assumption_generation(dataset_name, subtask_name, processed_data_label, prismadv_config,
+                                          replicate=None, script_stems=None):
+    replicate = normalize_replicate(replicate)
     project_manager = ProjectManager(project_root=get_project_root(), dataset_name=dataset_name)
 
     dq_manager = DeequDataQualityManager()
@@ -29,18 +32,16 @@ def run_prismadv_wo_assumption_generation(dataset_name, subtask_name, processed_
     spark_validation_data, spark_validation = dq_manager.spark_df_from_pandas_df(train_data)
 
     script_path_list = project_manager.get_available_script_path_list_for_subtask(subtask_name=subtask_name)
-    for script_path in script_path_list:
-        constraints_path = project_manager.get_constraints_path(
-            subtask_name, processed_data_label, script_path.stem
-        )
+    for script_path in select_scripts(script_path_list, script_stems):
+        constraints_path = project_manager.get_source_constraints_path(subtask_name, script_path.stem)
         constraints_path.mkdir(parents=True, exist_ok=True)
-        constraint_output_path = constraints_path / make_output_filename(prismadv_config.llm.model_name)
+        constraint_output_path = constraints_path / make_output_filename(prismadv_config.llm.model_name, replicate)
         skip = False
-        for path in constraints_path.glob("prismadv_wo_assumption_before_post--*.yaml"):
+        for path in constraints_path.glob(f"{METHOD}--*.yaml"):
             with open(path, "r") as f:
                 existing_raw_data = yaml.load(f, Loader=yaml.FullLoader)
             existing_config = PrismaDVConfig.from_dict(existing_raw_data["prismadv_config"])
-            if existing_config == prismadv_config:
+            if existing_config == prismadv_config and replicate_of_artifact(path, existing_raw_data) == replicate:
                 if prismadv_config.io.overwrite is False:
                     print(f"Constraints file {constraint_output_path} already exists. Skipping...")
                     skip = True
@@ -50,7 +51,7 @@ def run_prismadv_wo_assumption_generation(dataset_name, subtask_name, processed_
         if skip:
             continue
         source_code, assertions = FileLoader.load_py_file(script_path).extract_assertions()
-        assert "# ASSERTION START" not in str(source_code)
+        assert "# ASSERTION_START" not in str(source_code)
         column_desc_dict = DeequInspectorManager().spark_df_to_column_desc_dict(spark_train, spark_train_data)
         column_desc = yaml.dump(column_desc_dict, default_flow_style=False, sort_keys=False)
 
@@ -74,6 +75,7 @@ def run_prismadv_wo_assumption_generation(dataset_name, subtask_name, processed_
                 input_variables)
         res_dict = {
             "prismadv_config": prismadv_config.to_dict(),
+            "replicate": replicate,
             "constraints": constraints_with_sources.to_dict()["constraints"],
             "column_data_flow_locations": {
                 ser_column_group_key(col): loc.to_dict() for col, loc in column_data_flow_locations.items()

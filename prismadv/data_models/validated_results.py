@@ -23,6 +23,7 @@ class ColumnValidationResults:
 @dataclass
 class ValidationResults:
     results: Dict[ColumnGroup, ColumnValidationResults] = field(default_factory=dict)
+    validation_summary: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -43,7 +44,7 @@ class ValidationResults:
         return instance
 
     def to_dict(self):
-        return {
+        out = {
             "results": {
                 ser_column_group_key(column): {
                     "code": [
@@ -55,6 +56,9 @@ class ValidationResults:
                 for column, validation_result in self.results.items()
             }
         }
+        if self.validation_summary:
+            out["validation_summary"] = self.validation_summary
+        return out
 
     def save_to_yaml(self, output_path: str):
         with open(output_path, "w") as f:
@@ -65,6 +69,7 @@ class ValidationResults:
         with open(input_path, "r") as f:
             data = yaml.safe_load(f)
         results = cls.from_dict(data["results"])
+        results.validation_summary = data.get("validation_summary", {})
         return results
 
     def check_result(self, column_skipped=None, constraints_on_single_column_only=False) -> tuple[

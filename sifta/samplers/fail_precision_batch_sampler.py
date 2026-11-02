@@ -10,6 +10,7 @@ import numpy as np
 
 from prismadv.llm.dspy.models.sampler.base import TrajectorySampler
 from sifta.proposer.reflective_mutation.base import BatchSampler
+from workflow_sifta.metrics.optimization_metrics import METRIC_REV, error_level_only
 from workflow_sifta.optimization_fns import OptimizationWorkflow
 
 
@@ -39,6 +40,8 @@ class FailPrecisionBatchSampler(BatchSampler):
             cache_path: Optional[str | Path] = None,
             use_cache: bool = True,
             sampling_strategy: str = "worst_first",
+            budget_tracker: Optional[dict] = None,
+            seed: Optional[int] = None,
     ):
         """
         Initialize the fail precision batch sampler.
@@ -59,6 +62,15 @@ class FailPrecisionBatchSampler(BatchSampler):
                 - "worst_first": Prioritize lowest-scoring (worst performing) examples
                 - "extreme_first": Prioritize most extreme scores (furthest from 0.5)
                 - "random": Uniform random sampling
+            budget_tracker: Optional dict to accumulate this sampler's precompute cost
+                into, under "sampler_precompute_computations". This cost sits outside
+                SIFTA's max_metric_calls, so it has to be reported separately for
+                budget comparisons against baselines to be honest.
+            seed: Run seed, included in the cache key. Constraint generation runs at a
+                non-zero LLM temperature, so cached scores are one stochastic draw.
+                Without the seed here, separate seeds would share a cache file and
+                return identical scores, making run-to-run variance look far smaller
+                than it is.
         """
         self.trainset = trainset
         self.workflow = workflow
@@ -67,6 +79,7 @@ class FailPrecisionBatchSampler(BatchSampler):
         self.temperature = temperature
         self.use_cache = use_cache
         self.sampling_strategy = sampling_strategy
+        self.seed = seed
 
         if rng is None:
             self.rng = random.Random(0)
@@ -77,6 +90,13 @@ class FailPrecisionBatchSampler(BatchSampler):
         self._fail_precision_scores: dict[int, float] = {}
         # Cache for detailed information (index -> detailed dict)
         self._fail_precision_details: dict[int, dict] = {}
+        # Indices whose scoring raised. Distinct from a NaN score, which means the
+        # constraints ran but never fired. Errors are a broken pipeline, not a
+        # training signal, so they must not be treated as "worst" and sampled first.
+        self._errored_indices: set[int] = set()
+        # Number of examples actually scored (cache misses), for budget reporting.
+        self.num_metric_computations = 0
+        self.budget_tracker = budget_tracker
         self._probabilities: Optional[np.ndarray] = None
         self._epoch = -1
         self._sampled_this_epoch: set[int] = set()
@@ -211,12 +231,12 @@ class FailPrecisionBatchSampler(BatchSampler):
                     # Get is_safe from first trajectory (all should be the same for this label)
                     trajectory_is_safe = getattr(label_trajectories[0], 'is_safe', None)
 
-                # Check if all trajectories passed validation (predicted_as_safe)
+                # Predicted safe unless an error-level constraint failed: only those reject a batch
                 predicted_as_safe = 0
                 if label_trajectories:
                     all_passed = all(
                         getattr(traj.validation_results, 'status', False) is True
-                        for traj in label_trajectories
+                        for traj in label_trajectories if traj.constraint.level == "error"
                     )
                     predicted_as_safe = 1 if all_passed else 0
 
@@ -225,12 +245,12 @@ class FailPrecisionBatchSampler(BatchSampler):
                     "num_trajectories": len(label_trajectories),
                     "has_failures": len(label_trajectories) > 0,  # Trajectories indicate failures
                     "is_safe": trajectory_is_safe,
-                    "predicted_as_safe": predicted_as_safe,  # 1 if all constraints passed, 0 otherwise
+                    "predicted_as_safe": predicted_as_safe,  # 1 if all error-level constraints passed, 0 otherwise
                 }
 
-            # Aggregate trajectories
+            # Aggregate trajectories; fail precision counts error-level constraints only, as the metric does
             aggregated_trajectories = self.workflow.aggregate_trajectories_for_sampling(
-                trajectories_dict=all_trajectories_dict,
+                trajectories_dict=error_level_only(all_trajectories_dict),
                 llm_name=self.llm_name,
             )
 
@@ -266,13 +286,15 @@ class FailPrecisionBatchSampler(BatchSampler):
             }
 
         except Exception as e:
-            # Return error result dict
+            # Scoring crashed. Flag it as an error rather than a NaN score so the
+            # probability builder can deprioritize it and the cache can skip it.
             example_id = f"{example.get('dataset_name', '?')}/{example.get('script_name', '?')}/{example.get('target_column', '?')}"
             print(f"Warning: Failed to calculate fail precision for example {example_id}: {e}")
             return {
                 "fail_precision": np.nan,
                 "validity_info": {},
                 "per_label_info": {},
+                "error": f"{type(e).__name__}: {e}",
             }
 
     def _compute_candidate_hash(self, candidate: Optional[dict[str, str]]) -> Optional[str]:
@@ -315,6 +337,14 @@ class FailPrecisionBatchSampler(BatchSampler):
         labels_str = "_".join(sorted(self.workflow.train_processed_data_label_list))
         labels_hash = hashlib.md5(labels_str.encode()).hexdigest()[:8]
         key_parts.append(f"labels_{labels_hash}")
+        # Scores of another fail precision version must not be reused
+        key_parts.append(f"metric_{METRIC_REV}")
+
+        # Constraint generation is stochastic, so cached scores are one draw. Separating
+        # by seed keeps reuse within a seed while letting different seeds draw
+        # independently, which run-to-run variance estimates depend on.
+        if self.seed is not None:
+            key_parts.append(f"seed_{self.seed}")
 
         # Add candidate hash if provided
         if candidate:
@@ -497,11 +527,18 @@ class FailPrecisionBatchSampler(BatchSampler):
 
             # Calculate and get detailed result
             result = self._calculate_fail_precision_for_example(example, candidate)
+            computed_count += 1
+            self.num_metric_computations += 1
+
+            if "error" in result:
+                # Not a score. Keep it out of the score map and out of the cache so
+                # a transient failure is retried instead of persisted as a NaN.
+                self._errored_indices.add(idx)
+                continue
 
             # Store score and details separately
             self._fail_precision_scores[idx] = result["fail_precision"]
             self._fail_precision_details[idx] = result
-            computed_count += 1
 
             # Save cache periodically (every 5 scores)
             if computed_count % 5 == 0:
@@ -512,6 +549,30 @@ class FailPrecisionBatchSampler(BatchSampler):
         # Final save
         self._save_cache()
         print(f"Score precomputation complete. Total cached: {len(self._fail_precision_scores)}/{total_count}")
+        print(
+            f"Fail precision precompute cost: {self.num_metric_computations} constraint validations "
+            f"({cached_count} loaded from the score cache). This is outside SIFTA's max_metric_calls budget."
+        )
+        if self.budget_tracker is not None:
+            self.budget_tracker["sampler_precompute_computations"] = (
+                self.budget_tracker.get("sampler_precompute_computations", 0)
+                + self.num_metric_computations
+            )
+
+        if self._errored_indices:
+            print(
+                f"WARNING: {len(self._errored_indices)}/{total_count} examples failed to score and will be "
+                f"deprioritized (not treated as worst-case):"
+            )
+            for idx in sorted(self._errored_indices):
+                print(f"  - [{idx}] {self._get_example_key(self.trainset[idx])}")
+
+        if len(self._errored_indices) == total_count:
+            raise RuntimeError(
+                f"Fail precision scoring failed for all {total_count} training examples. "
+                f"The scoring pipeline is broken; see the warnings above."
+            )
+
         self._build_probability_distribution()
 
     def _build_probability_distribution(self):
@@ -537,9 +598,17 @@ class FailPrecisionBatchSampler(BatchSampler):
             for i in range(trainset_size)
         ])
 
+        # Examples whose scoring raised. A NaN score means "constraints ran but never
+        # fired", which is a real signal; an error means the pipeline broke, which is
+        # not. They are separated here so the strategies below only reason about the
+        # former, and the latter is pushed to the bottom afterwards.
+        error_mask = np.zeros(trainset_size, dtype=bool)
+        if self._errored_indices:
+            error_mask[list(self._errored_indices)] = True
+
         # Handle NaN scores
-        nan_mask = np.isnan(scores)
-        non_nan_scores = scores[~nan_mask]
+        nan_mask = np.isnan(scores) & ~error_mask
+        non_nan_scores = scores[~np.isnan(scores)]
 
         if len(non_nan_scores) == 0:
             # All scores are NaN, use uniform distribution
@@ -565,7 +634,6 @@ class FailPrecisionBatchSampler(BatchSampler):
 
         elif self.sampling_strategy == "extreme_first":
             # Most extreme scores (furthest from 0.5) get higher probability
-            # weight = abs(score - 0.5)
             sampling_weights = np.abs(scores - 0.5)
             # NaN gets medium priority (treat as 0.5, so weight = 0)
             # Add small epsilon to avoid zero weights
@@ -577,6 +645,12 @@ class FailPrecisionBatchSampler(BatchSampler):
                 f"Unknown sampling_strategy: {self.sampling_strategy}. "
                 f"Must be one of: 'best_first', 'worst_first', 'extreme_first', 'random'"
             )
+
+        # Errored examples still carry NaN weights from the arithmetic above. Park
+        # them at zero for now; they are ranked below every real example after the
+        # probabilities are normalized, where the comparison is scale-independent.
+        if self._errored_indices:
+            sampling_weights[error_mask] = 0.0
 
         # Ensure all weights are non-negative
         sampling_weights = np.maximum(sampling_weights, 0.0)
@@ -594,6 +668,15 @@ class FailPrecisionBatchSampler(BatchSampler):
             logits = logits - np.max(logits)
             exp_logits = np.exp(logits)
             self._probabilities = exp_logits / exp_logits.sum()
+
+        # Rank errored examples strictly below every real one. Kept non-zero so the
+        # epoch loop can still drain them rather than dividing by a zero-sum tail.
+        if self._errored_indices:
+            real_probs = self._probabilities[~error_mask]
+            if real_probs.size:
+                floor = 0.01 * float(np.min(real_probs))
+                self._probabilities[error_mask] = max(floor, 1e-12)
+            self._probabilities = self._probabilities / self._probabilities.sum()
 
     def _reset_epoch(self):
         """Reset epoch tracking."""

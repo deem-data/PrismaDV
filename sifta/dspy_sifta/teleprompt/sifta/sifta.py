@@ -93,8 +93,10 @@ class DspySIFTAResult:
 
     @property
     def best_idx(self) -> int:
+        # The latest candidate with the best score, as sifta.core.result.SIFTAResult.best_idx, so the index logged is
+        # the program compile returns.
         scores = self.val_aggregate_scores
-        return max(range(len(scores)), key=lambda i: scores[i])
+        return max(range(len(scores)), key=lambda i: (scores[i], i))
 
     @property
     def best_candidate(self) -> dict[str, str]:
@@ -196,6 +198,7 @@ class SIFTA(Teleprompter):
             llm_name: str | None = None,
             batch_sampler_temperature: float = 0.5,
             batch_sampler_strategy: Literal["best_first", "worst_first", "extreme_first", "random"] = "random",
+            budget_tracker: dict | None = None,
     ):
         try:
             inspect.signature(metric).bind(None, None, None, None, None)
@@ -226,7 +229,7 @@ class SIFTA(Teleprompter):
         self.reflection_minibatch_size = reflection_minibatch_size
         self.candidate_selection_strategy = candidate_selection_strategy
         # self.reflection_lm = reflection_lm
-        assert reflection_lm is not None, "SIFTA requires a reflection language model to be provided. Typically, you can use `dspy.LM(model='gpt-5', temperature=1.0, max_tokens=32000)` to get a good reflection model. Reflection LM is used by SIFTA to reflect on the behavior of the program and propose new instructions, and will benefit from a strong model."
+        assert reflection_lm is not None, "SIFTA requires a reflection language model to be provided. Typically, you can use `dspy.LM(model='gpt-5.2', temperature=0.6, max_tokens=32000)` to get a good reflection model. Reflection LM is used by SIFTA to reflect on the behavior of the program and propose new instructions, and will benefit from a strong model."
         self.reflection_lm = lambda x: reflection_lm(x)[0]
         self.skip_perfect_score = skip_perfect_score
         self.add_format_failure_as_feedback = add_format_failure_as_feedback
@@ -256,6 +259,7 @@ class SIFTA(Teleprompter):
         self.llm_name = llm_name
         self.batch_sampler_temperature = batch_sampler_temperature
         self.batch_sampler_strategy = batch_sampler_strategy
+        self.budget_tracker = budget_tracker
 
     def auto_budget(self, num_preds, num_candidates, valset_size: int, minibatch_size: int = 35,
                     full_eval_steps: int = 5) -> int:
@@ -414,6 +418,7 @@ class SIFTA(Teleprompter):
             llm_name=self.llm_name,
             batch_sampler_temperature=self.batch_sampler_temperature,
             batch_sampler_strategy=self.batch_sampler_strategy,
+            budget_tracker=self.budget_tracker,
         )
 
         new_prog = adapter.build_program(sifta_result.best_candidate)

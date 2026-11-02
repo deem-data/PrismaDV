@@ -83,6 +83,9 @@ class OptimizationWorkflow:
 
         self.downstream_task_type = downstream_task_type
         self.project_root = project_root
+        # Units (dataset, label, script) whose corrupted batch the optimization sees as safe: the
+        # "undiscovered silent failures" ablation (optimization_labels). Empty: the true labels.
+        self.silent_as_safe: frozenset = frozenset()
 
         # Create ProjectManager instances for each unique dataset across train/val/test
         all_datasets = set(train_dataset_subtasks.keys())
@@ -200,11 +203,12 @@ class OptimizationWorkflow:
             List of dicts, each containing training example information
         """
         return _prepare_single_column_training_dataset(
-            project_manager=self.project_manager,  # Only used for backward compat, not actually used
+            project_manager=self.project_manager,
             dataset_subtasks=self.train_dataset_subtasks,
             script_name_list=script_name_list,
             processed_data_label=processed_data_label,
             new_processed_data_label_list=new_processed_data_label_list,
+            relabelled=self.silent_as_safe,
         )
 
     def prepare_single_column_validation_dataset(
@@ -236,11 +240,12 @@ class OptimizationWorkflow:
             new_processed_data_label_list = self.val_processed_data_label_list
 
         return _prepare_single_column_training_dataset(
-            project_manager=self.project_manager,  # Only used for backward compat, not actually used
+            project_manager=self.project_manager,
             dataset_subtasks=self.val_dataset_subtasks,
             script_name_list=script_name_list,
             processed_data_label=processed_data_label,
             new_processed_data_label_list=new_processed_data_label_list,
+            relabelled=self.silent_as_safe,
         )
 
     def generate_constraints_for_column(
@@ -489,6 +494,7 @@ class OptimizationWorkflow:
                         constraints_with_sources=constraints_with_sources,
                         validation_results=validation_results,
                         clean=clean,
+                        relabelled=self.silent_as_safe,
                     )
 
                     if script_name not in all_trajectories[dataset_name]:
@@ -532,21 +538,18 @@ class OptimizationWorkflow:
 
         return aggregated_trajectories
 
-    def evaluate_f1_on_test_set(
+    def generate_test_constraints(
         self,
         module: ConstraintGenerationModule,
         test_script_name_list: List[str],
         num_threads: int,
-    ) -> Dict:
+    ) -> List[Dict]:
         """
-        Evaluate a module on the test set using F1 score.
+        Generate the constraints of every test script once, so that several label sets can be scored on them.
 
-        This method:
-        1. For each test script, discovers columns and generates constraints
-        2. Validates constraints on training data (to set validity flags)
-        3. Validates constraints on corrupted test data for each processed_data_label
-        4. Reads ground truth (is_safe) from execution results
-        5. Calculates precision, recall, and F1 score
+        For each test script:
+        1. Discovers columns and generates constraints per column
+        2. Combines them and validates them on training data (to set validity flags)
 
         Args:
             module: The ConstraintGenerationModule to evaluate
@@ -554,20 +557,11 @@ class OptimizationWorkflow:
             num_threads: Number of threads for per-column constraint generation
 
         Returns:
-            Dict with keys:
-                - "f1": Overall F1 score
-                - "precision": Overall precision
-                - "recall": Overall recall
-                - "tp", "fp", "tn", "fn": Confusion matrix counts
-                - "per_script_results": Per-script detailed results
-                - "total_constraints": Total constraints generated
+            One dict per script with constraints: dataset_name, subtask_name, script_name, project_manager,
+            columns_to_consider (from column discovery), single_column_results (column -> {"assumptions", "code"};
+            a column whose generation failed is missing) and constraints_with_sources.
         """
-        import oyaml as yaml
-
-        per_script_results = []
-        all_tp, all_fp, all_tn, all_fn = 0, 0, 0, 0
-        total_constraints = 0
-        total_non_compilable = 0
+        generated = []
 
         # Count total scripts for progress
         total_scripts = sum(
@@ -576,7 +570,7 @@ class OptimizationWorkflow:
         )
         script_counter = 0
 
-        print(f"[F1 Eval] Starting evaluation on {total_scripts} script(s) x {len(self.test_processed_data_label_list)} label(s)")
+        print(f"[F1 Eval] Generating constraints for {total_scripts} script(s)")
 
         for dataset_name, subtask_list in self.test_dataset_subtasks.items():
             pm = self.project_managers.get(dataset_name)
@@ -679,106 +673,19 @@ class OptimizationWorkflow:
                             session_reset_callback=self._reset_spark_session,
                         )
 
-                        # Step 5: For each test label, validate and compare with ground truth
-                        print(f"  [Step 5/5] Validating on {len(self.test_processed_data_label_list)} test labels...")
-                        label_progress = 0
-                        for processed_data_label in self.test_processed_data_label_list:
-                            label_progress += 1
-                            try:
-                                # Validate on corrupted test data
-                                validation_results = _validate_constraints_on_test_data(
-                                    project_manager=pm,
-                                    subtask_name=subtask_name,
-                                    processed_data_label=processed_data_label,
-                                    constraints_with_sources=constraints_with_sources,
-                                    spark_session=spark_session,
-                                    session_reset_callback=self._reset_spark_session,
-                                    clean=False,
-                                )
-
-                                # Get constraint counts
-                                num_passed_warning, num_failed_warning, num_failed_error, num_passed_error, num_non_compilable = \
-                                    validation_results.check_result()
-                                num_constraints = num_passed_warning + num_failed_warning + num_failed_error + num_passed_error
-                                total_constraints += num_constraints
-                                total_non_compilable += num_non_compilable
-
-                                # Prediction: safe if no error-level constraints failed
-                                predicted_as_safe = (num_failed_error == 0)
-
-                                # Read ground truth from execution results
-                                exec_path = pm.get_execution_output_validation_path(
-                                    subtask_name, processed_data_label, script_name
-                                ) / "basic_metrics_evaluation.json"
-
-                                with open(exec_path, "r") as f:
-                                    exec_results = yaml.load(f, Loader=yaml.FullLoader)
-                                is_safe = exec_results.get('corrupted_data_is_safe', True)
-
-                                # Update confusion matrix
-                                # Positive class = "unsafe/error" (standard for anomaly detection)
-                                # TP = correctly detected error, TN = correctly accepted safe data
-                                # FP = false alarm, FN = missed error (BAD!)
-                                if not is_safe and not predicted_as_safe:
-                                    all_tp += 1  # TP: error detected correctly
-                                elif not is_safe and predicted_as_safe:
-                                    all_fn += 1  # FN: error missed (BAD!)
-                                elif is_safe and not predicted_as_safe:
-                                    all_fp += 1  # FP: false alarm
-                                else:  # is_safe and predicted_as_safe
-                                    all_tn += 1  # TN: safe data accepted correctly
-
-                                per_script_results.append({
-                                    "dataset_name": dataset_name,
-                                    "subtask_name": subtask_name,
-                                    "script_name": script_name,
-                                    "processed_data_label": processed_data_label,
-                                    "num_constraints": num_constraints,
-                                    "num_non_compilable": num_non_compilable,
-                                    "num_failed_error": num_failed_error,
-                                    "predicted_as_safe": predicted_as_safe,
-                                    "is_safe": is_safe,
-                                })
-
-                            except FileNotFoundError:
-                                # Skip if execution results not found
-                                continue
-                            except Exception as e:
-                                # Skip on other errors
-                                continue
-
-                        # Print progress after each script
-                        print(f"  [Script Summary] Labels processed: {label_progress}, Running totals: TP={all_tp}, FP={all_fp}, TN={all_tn}, FN={all_fn}")
+                        generated.append({
+                            "dataset_name": dataset_name,
+                            "subtask_name": subtask_name,
+                            "script_name": script_name,
+                            "project_manager": pm,
+                            "columns_to_consider": columns_to_consider,
+                            "single_column_results": single_column_results,
+                            "constraints_with_sources": constraints_with_sources,
+                        })
 
                     except Exception as e:
                         print(f"  [Error] Script failed: {e}")
                         # Skip scripts that fail
                         continue
 
-        # Print final summary before calculating metrics
-        print(f"\n[F1 Eval] Evaluation complete!")
-        print(f"[F1 Eval] Final confusion matrix: TP={all_tp}, FP={all_fp}, TN={all_tn}, FN={all_fn}")
-        print(f"[F1 Eval] Total constraints validated: {total_constraints}, Non-compilable: {total_non_compilable}")
-
-        # Calculate metrics
-        precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else float('nan')
-        recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else float('nan')
-
-        import math
-        if math.isfinite(precision) and math.isfinite(recall) and (precision + recall) > 0:
-            f1 = 2 * precision * recall / (precision + recall)
-        else:
-            f1 = float('nan')
-
-        return {
-            "f1": f1,
-            "precision": precision,
-            "recall": recall,
-            "tp": all_tp,
-            "fp": all_fp,
-            "tn": all_tn,
-            "fn": all_fn,
-            "total_constraints": total_constraints,
-            "total_non_compilable": total_non_compilable,
-            "per_script_results": per_script_results,
-        }
+        return generated

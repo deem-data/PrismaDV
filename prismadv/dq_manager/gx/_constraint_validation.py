@@ -30,11 +30,6 @@ def apply_checks_from_strings_on_spark_df(spark, spark_df, code_list_for_constra
             )
     batch = batch_definition.get_batch(batch_parameters=batch_parameters)
     validation_results = batch.validate(suite)
-    # ordered_results = [
-    #     result for expectation in expectations
-    #     for result in validation_results.results
-    #     if result.expectation_config.id == expectation.id
-    # ]
     ordered_results = []
     for idx in range(len(code_list_for_constraints)):
         if isinstance(expectations[idx], gx.expectations.expectation.Expectation):

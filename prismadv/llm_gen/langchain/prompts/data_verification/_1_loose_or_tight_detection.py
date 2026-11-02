@@ -1,4 +1,3 @@
-# TODO: detect loose or tight assertions
 LOOSE_OR_TIGHT_DETECTION_PROMPT = """
 Given Python code that contains assertion blocks delimited by:
 # ASSERTION_START

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -31,12 +32,15 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def infer_clean_schemas(pm: MultiTableProjectManager, table_names: list[str]) -> dict:
-    """Infer one TFDV schema per table from its clean data."""
+def infer_observed_schemas(pm: MultiTableProjectManager, table_names: list[str]) -> dict:
+    """Infer one TFDV schema per table from its observed data."""
     schemas = {}
     for table in table_names:
-        clean_df = pd.read_csv(pm.get_table_path(table, "clean"))
-        stats = tfdv.generate_statistics_from_dataframe(clean_df)
+        # The observed bundle, never one this row is scored against: every
+        # corrupted bundle is the clean data with a corruption applied, so a
+        # schema inferred from `clean` would describe its own test set.
+        observed_df = pd.read_csv(pm.get_table_path(table, "observed"))
+        stats = tfdv.generate_statistics_from_dataframe(observed_df)
         schemas[table] = tfdv.infer_schema(stats)
     return schemas
 
@@ -58,6 +62,16 @@ def main(argv=None) -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"{BASELINE_METHOD}--{MODEL_TAG}--{ts}"
 
+    labels = utils.corruption_labels(pm)
+    if args.label:
+        wanted = set(args.label)
+        labels = [l for l in labels if l in wanted]
+    print(f"example_id={args.example_id} tables={table_names} labels={len(labels)}")
+
+    started = time.perf_counter()
+    schemas = infer_observed_schemas(pm, table_names)
+    inference_s = round(time.perf_counter() - started, 3)
+
     constraints_dir = utils.constraints_dir(args.example_id, PROJECT_SCRIPT_ID, project_root, create=True)
     artifact_path = constraints_dir / f"{stem}.yaml"
     if not (artifact_path.exists() and not args.overwrite):
@@ -65,22 +79,16 @@ def main(argv=None) -> int:
             "baseline_method": BASELINE_METHOD,
             "model_name": MODEL_TAG,
             "reference": "TensorFlow Data Validation (schema inference + validate_statistics)",
-            "note": ("Task- and dataset-agnostic schema inferred from the clean data and "
+            "note": ("Task- and dataset-agnostic schema inferred from the observed data and "
                      "validated against each corrupted bundle; validation_results written by "
                      "this script (TFDV does not emit executable constraints for the shared "
                      "Deequ validator)."),
+            "wall_clock_seconds": inference_s,
         }, artifact_path.open("w"), sort_keys=False)
     print(f"artifact: {artifact_path}")
 
-    labels = utils.corruption_labels(pm)
-    if args.label:
-        wanted = set(args.label)
-        labels = [l for l in labels if l in wanted]
-    print(f"example_id={args.example_id} tables={table_names} labels={len(labels)}")
-
-    schemas = infer_clean_schemas(pm, table_names)
-
     for label in labels:
+        label_started = time.perf_counter()
         failed_error = 0
         total_cols = 0
         for table in table_names:
@@ -109,6 +117,7 @@ def main(argv=None) -> int:
                 "non_compilable": 0,
                 "total": total_cols,
             },
+            "validation_summary": {"elapsed_s": round(time.perf_counter() - label_started, 3)},
         }
         yaml.safe_dump(result, out_path.open("w"), sort_keys=False)
         print(f"  {label}: failed_error={failed_error} (cols checked={total_cols}) -> {out_path.name}")

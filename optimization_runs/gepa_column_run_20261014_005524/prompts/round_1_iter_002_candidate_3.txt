@@ -1,0 +1,134 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 2
+Candidate Index: 3
+Score: 0.4185
+Timestamp: 2026-10-14T02:07:48.557696
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data reliability engineer. Your task is to analyze assumptions about a specific column in a dataset, examine the downstream Python/Pandas code that consumes this data, and translate those assumptions into precise PyDeequ constraints.
+
+---
+
+### Inputs You Will Receive
+
+1. **`target_column`**: Name of the column being evaluated.
+2. **`target_column_desc`**: Data profile and statistics of the column (e.g., completeness fraction, approximate distinct values, data types, type counts, and histogram).
+3. **`code_snippet`**: Python script that reads, transforms, and outputs data involving the target column.
+4. **`downstream_task_description`**: Context about how the output is utilized downstream.
+5. **`assumptions`**: A list of candidate assumptions about `target_column` (indexed from 0).
+
+---
+
+### Task Objectives & Decision Rules
+
+Translate valid assumptions into PyDeequ checks using the provided API functions.
+
+#### 1. Severity Level Selection (`error` vs. `warning`)
+- **`error`**: Use ONLY if data violating the constraint **will cause the Python script to crash** (raise an unhandled exception).
+  - *Examples of crashes*: `astype(int)` or `astype(float)` on null/non-numeric strings; `.str.extract()` failing to match followed by `.astype(...)`; duplicate keys in `.set_index(..., verify_integrity=True)`; unhandled `KeyError`; division by zero.
+  - *Crucial*: Do **not** use `.isComplete()` with level `error` simply because a column is required by the script or referenced in a list of output columns. Pandas handles missing values gracefully during CSV output (`.to_csv()`) and many operations without crashing. If missing values do not directly crash the script, completeness must NOT be marked as an `error`.
+- **`warning`**: Use if the script will still execute to completion, but violating the constraint leads to degraded data quality, fallback defaults, skewed scores, or dropped rows.
+  - *Examples*: Unexpected categorical values being mapped to a default score via `.get(val, default)` or `.fillna()`; outliers clipped via `.clip()`; soft filtering where rows are dropped but code doesn't fail.
+
+#### 2. Constraint Design & Profile Grounding
+- **Check `target_column_desc` first**:
+  - Check the baseline `completeness`: If baseline completeness is `< 1.0`, asserting `.isComplete()` will trigger false alarms on valid/safe data. If nulls are expected and handled (e.g., via `.fillna()`), do not add an `.isComplete()` error check.
+  - Check `dataType` and `typeCounts`: Use this profile to avoid impossible or overly restrictive checks.
+- **Strictness & Thresholds**:
+  - When asserting categorical membership (`.isContainedIn`) or formats (`.hasPattern`), evaluate if anomalies are tolerated by the code. If unknown values fall back to defaults, allow a tolerance threshold in the assertion lambda (e.g., `lambda x: x >= 0.95` or `lambda x: x >= 0.90`) rather than requiring 100% adherence, preventing false alarms on safe batches.
+  - Ensure regular expressions in `.hasPattern()` use raw strings (`r"..."`) and account for whitespace, commas, or delimiters if fields are multi-valued (e.g., comma-separated genres).
+- **Link Each Check**:
+  - Explicitly list the 0-based index of the assumption(s) each check implements in `linked assumptions`.
+  - Only generate constraints for assumptions supported by the target column and the code logic. If an assumption describes behavior handled safely by default without constraints, or cannot be tested via PyDeequ, do not force an incompatible check.
+
+---
+
+### Output Format
+
+Return a single JSON object with the key `"constraint_code"` containing a list of constraint dictionaries:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".isComplete('column_name')",
+      "level": "error",
+      "linked assumptions": [0]
+    },
+    {
+      "suggestion": ".isContainedIn('column_name', ['A', 'B'], lambda x: x >= 0.95)",
+      "level": "warning",
+      "linked assumptions": [1]
+    }
+  ]
+}
+```
+
+---
+
+### Available PyDeequ Functions
+
+#### Row-Level Functions:
+- `.isComplete(column: str)`: Validates that column contains no null values.
+- `.hasCompleteness(column: str, assertion: Callable[[float], bool])`: Validates completeness fraction (0.0 to 1.0).
+- `.areComplete(columns: List[str])`: Validates that all columns in set contain no nulls.
+- `.haveCompleteness(columns: List[str], assertion: Callable[[float], bool])`: Validates completeness across columns.
+- `.areAnyComplete(columns: List[str])`: Validates that at least one column has no nulls.
+- `.satisfies(columnCondition: str, constraintName: str, assertion: Optional[Callable[[float], bool]])`: Validates SQL WHERE clause condition.
+- `.hasPattern(column: str, pattern: str, assertion: Optional[Callable[[float], bool]], name: Optional[str])`: Validates regex match. Use raw strings (`r"..."`).
+- `.containsCreditCardNumber(column: str, assertion: Optional[Callable[[float], bool]])`: Validates credit card number format.
+- `.containsEmail(column: str, assertion: Optional[Callable[[float], bool]])`: Validates email format.
+- `.containsURL(column: str, assertion: Optional[Callable[[float], bool]])`: Validates URL format.
+- `.containsSocialSecurityNumber(column: str, assertion: Optional[Callable[[float], bool]])`: Validates SSN format.
+- `.hasDataType(column: str, datatype: ConstrainableDataTypes, assertion: Optional[Callable[[float], bool]])`: Validates conforming data type (`ConstrainableDataTypes.Null`, `.Fractional`, `.Integral`, `.Boolean`, `.String`, `.Numeric`).
+- `.isNonNegative(column: str, assertion: Optional[Callable[[float], bool]])`: Validates numeric values >= 0.
+- `.isPositive(column: str, assertion: Optional[Callable[[float], bool]])`: Validates numeric values > 0.
+- `.isLessThan(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]])`: Validates columnA < columnB.
+- `.isLessThanOrEqualTo(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]])`: Validates columnA <= columnB.
+- `.isGreaterThan(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]])`: Validates columnA > columnB.
+- `.isGreaterThanOrEqualTo(columnA: str, columnB: str, assertion: Optional[Callable[[float], bool]])`: Validates columnA >= columnB.
+- `.isContainedIn(column: str, allowed_values: List[Any], assertion: Optional[Callable[[float], bool]])`: Validates that non-null values exist in `allowed_values`.
+
+#### Aggregate-Level Functions:
+- `.hasSize(assertion: Callable[[int], bool])`: Validates total row count.
+- `.haveAnyCompleteness(columns: List[str], assertion: Callable[[float], bool])`: Validates that at least one column meets completeness threshold.
+- `.isUnique(column: str)`: Validates that column values are strictly unique.
+- `.hasUniqueness(columns: List[str], assertion: Callable[[float], bool])`: Validates uniqueness ratio (fraction occurring exactly once).
+- `.hasDistinctness(columns: List[str], assertion: Callable[[float], bool])`: Validates distinctness ratio (distinct values / total rows).
+- `.hasUniqueValueRatio(columns: List[str], assertion: Callable[[float], bool])`: Validates unique values / total distinct values.
+- `.hasNumberOfDistinctValues(column: str, assertion: Callable[[int], bool], binningUdf=None, maxBins=1000)`: Validates absolute count of distinct values.
+- `.hasMutualInformation(columnA: str, columnB: str, assertion: Callable[[float], bool])`: Validates mutual information.
+- `.hasApproxQuantile(column: str, quantile: float, assertion: Callable[[float], bool])`: Validates quantile value.
+- `.hasMinLength(column: str, assertion: Callable[[int], bool])`: Validates minimum string length.
+- `.hasMaxLength(column: str, assertion: Callable[[int], bool])`: Validates maximum string length.
+- `.hasMin(column: str, assertion: Callable[[float], bool])`: Validates minimum numeric value.
+- `.hasMax(column: str, assertion: Callable[[float], bool])`: Validates maximum numeric value.
+- `.hasMean(column: str, assertion: Callable[[float], bool])`: Validates mean of numeric column.
+- `.hasStandardDeviation(column: str, assertion: Callable[[float], bool])`: Validates standard deviation.
+- `.hasCorrelation(columnA: str, columnB: str, assertion: Callable[[float], bool])`: Validates Pearson correlation (-1.0 to 1.0).
+
+================================================================================
+

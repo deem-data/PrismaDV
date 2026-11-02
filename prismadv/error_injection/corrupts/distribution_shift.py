@@ -24,10 +24,14 @@ class DistributionShift(TabularCorruption):
     """
     
     def __init__(self, columns=None, severity=None, sampling=None,
-                 strategy='mean_shift', shift_factor=2.0, random_state=None, **kwargs):
+                 strategy='mean_shift', shift_factor=2.0, shift_value=None, random_state=None, **kwargs):
         super().__init__(columns=columns, severity=severity, sampling=sampling, **kwargs)
         self.strategy = strategy
         self.shift_factor = shift_factor
+        # Absolute offset for 'mean_shift'. When set it replaces the
+        # std * shift_factor shift, so an integer column moves by an exact
+        # integer: an age or a year computed against a stale reference date.
+        self.shift_value = shift_value
         self.random_state = random_state
         if random_state is not None:
             random.seed(random_state)
@@ -88,8 +92,8 @@ class DistributionShift(TabularCorruption):
         if pd.isna(mean_val) or pd.isna(std_val):
             return df
         
-        # Shift by shift_factor standard deviations
-        shift = std_val * self.shift_factor
+        # Shift by shift_factor standard deviations, or by the configured offset
+        shift = self.shift_value if self.shift_value is not None else std_val * self.shift_factor
         
         for idx in rows:
             if idx in df.index and not pd.isna(df.at[idx, col]):
@@ -135,10 +139,13 @@ class DistributionShift(TabularCorruption):
         return df
     
     def _apply_scale_change(self, df, col, rows):
-        """Multiply values by a factor."""
+        """Multiply values by a factor. An integer column stays an integer column
+        (a count scaled by 0.8 is still a count), so the result is rounded."""
+        is_int = pd.api.types.is_integer_dtype(df[col])
         for idx in rows:
             if idx in df.index and not pd.isna(df.at[idx, col]):
-                df.at[idx, col] = df.at[idx, col] * self.shift_factor
-        
+                value = df.at[idx, col] * self.shift_factor
+                df.at[idx, col] = int(round(value)) if is_int else value
+
         return df
 

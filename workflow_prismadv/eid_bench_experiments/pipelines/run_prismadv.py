@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import oyaml as yaml
 
@@ -10,9 +11,14 @@ from prismadv.llm.langchain.models.prismadv import PrismaLangChainDV
 from prismadv.loader import FileLoader
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
+from workflow_prismadv.utils.replicates import select_scripts, artifact_filename, normalize_replicate, replicate_of_artifact
+
+METHOD = "prismadv"
 
 
-def run_prismadv(dataset_name, subtask_name, processed_data_label, prismadv_config):
+def run_prismadv(dataset_name, subtask_name, processed_data_label, prismadv_config, replicate=None,
+                 script_stems=None):
+    replicate = normalize_replicate(replicate)
     project_manager = ProjectManager(project_root=get_project_root(), dataset_name=dataset_name)
 
     dq_manager = DeequDataQualityManager()
@@ -23,18 +29,19 @@ def run_prismadv(dataset_name, subtask_name, processed_data_label, prismadv_conf
     spark_validation_data, spark_validation = dq_manager.spark_df_from_pandas_df(train_data)
 
     script_path_list = project_manager.get_available_script_path_list_for_subtask(subtask_name=subtask_name)
-    for script_path in script_path_list:
-        constraints_path = project_manager.get_constraints_path(
-            subtask_name, processed_data_label, script_path.stem
-        )
+    for script_path in select_scripts(script_path_list, script_stems):
+        constraints_path = project_manager.get_source_constraints_path(subtask_name, script_path.stem)
         constraints_path.mkdir(parents=True, exist_ok=True)
-        constraint_output_path = constraints_path / prismadv_config.make_output_filename()
+        constraint_output_path = constraints_path / artifact_filename(
+            METHOD, prismadv_config.llm.model_name, replicate)
         skip = False
-        for path in constraints_path.glob("prismadv--*.yaml"):
+        for path in constraints_path.glob(f"{METHOD}--*.yaml"):
             with open(path, "r") as f:
                 existing_raw_data = yaml.load(f, Loader=yaml.FullLoader)
             existing_config = PrismaDVConfig.from_dict(existing_raw_data["prismadv_config"])
-            if existing_config == prismadv_config:
+            # Same configuration *and* same replicate: another replicate of this
+            # configuration is a new sample, not a duplicate of this one.
+            if existing_config == prismadv_config and replicate_of_artifact(path, existing_raw_data) == replicate:
                 if prismadv_config.io.overwrite is False:
                     print(f"Constraints file {constraint_output_path} already exists. Skipping...")
                     skip = True
@@ -43,8 +50,10 @@ def run_prismadv(dataset_name, subtask_name, processed_data_label, prismadv_conf
                     path.unlink()
         if skip:
             continue
+        # Same span as the baselines' wall_clock_seconds: from here to the artifact, profiling and every phase included.
+        started = time.perf_counter()
         source_code, assertions = FileLoader.load_py_file(script_path).extract_assertions()
-        assert "# ASSERTION START" not in str(source_code)
+        assert "# ASSERTION_START" not in str(source_code)
         column_desc_dict = DeequInspectorManager().spark_df_to_column_desc_dict(spark_train, spark_train_data)
         column_desc = yaml.dump(column_desc_dict, default_flow_style=False, sort_keys=False)
 
@@ -67,11 +76,13 @@ def run_prismadv(dataset_name, subtask_name, processed_data_label, prismadv_conf
             constraints_with_sources, column_data_flow_locations, cost_summary = prismadv.invoke(input_variables)
         res_dict = {
             "prismadv_config": prismadv_config.to_dict(),
+            "replicate": replicate,
             "constraints": constraints_with_sources.to_dict()["constraints"],
             "column_data_flow_locations": {
                 ser_column_group_key(col): loc.to_dict() for col, loc in column_data_flow_locations.items()
             },
-            "cost_summary": cost_summary
+            "cost_summary": cost_summary,
+            "wall_clock_seconds": round(time.perf_counter() - started, 3),
         }
         with open(constraint_output_path, "w") as f:
             yaml.dump(res_dict, f, default_flow_style=False, sort_keys=False)

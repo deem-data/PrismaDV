@@ -2,7 +2,8 @@ import json
 import os
 import subprocess
 import tempfile
-from datetime import datetime
+import time
+from pathlib import Path
 
 import oyaml as yaml
 from langchain_core.prompts import ChatPromptTemplate
@@ -11,7 +12,14 @@ from prismadv.data_models import Constraints
 from prismadv.dq_manager import DeequDataQualityManager
 from prismadv.loader import FileLoader
 from prismadv.project_manager.manager.base import ProjectManager
+from prismadv.llm_backend.model_routes import litellm_route
 from prismadv.utils import get_project_root
+from workflow_prismadv.utils.spark_cleanup import close_spark_session
+from workflow_prismadv.utils.replicates import select_scripts, artifact_filename, existing_artifacts, normalize_replicate
+from workflow_prismadv.eid_bench_real_baselines.pipelines.run_mini_swe_agent import mini_config_args, mini_environment
+from workflow_prismadv.utils.swe_agent_usage import cost_summary_from_trajectory
+
+METHOD = "mini_swe_agent"
 
 TASK_PROMPT = """Write a pydeequ data unit test for a dataset consumed by the following program.
 
@@ -112,8 +120,10 @@ Please make sure the constraints.json is the output file in the current folder.
 """
 
 
-def run_mini_swe_agent(dataset_name, subtask_name, processed_data_label, model_name):
+def run_mini_swe_agent(dataset_name, subtask_name, processed_data_label, model_name, replicate=None,
+                       script_stems=None):
     max_retries = 3
+    replicate = normalize_replicate(replicate)
     project_manager = ProjectManager(project_root=get_project_root(), dataset_name=dataset_name)
     dq_manager = DeequDataQualityManager()
     train_data = FileLoader.load_csv(
@@ -123,23 +133,18 @@ def run_mini_swe_agent(dataset_name, subtask_name, processed_data_label, model_n
     example_rows = train_data.sample(3).to_dict(orient="records")
 
     script_path_list = project_manager.get_available_script_path_list_for_subtask(subtask_name=subtask_name)
-    for script_path in script_path_list:
-        constraints_path = project_manager.get_constraints_path(
-            subtask_name, processed_data_label, script_path.stem
-        )
+    for script_path in select_scripts(script_path_list, script_stems):
+        constraints_path = project_manager.get_source_constraints_path(subtask_name, script_path.stem)
         constraints_path.mkdir(parents=True, exist_ok=True)
-        constraint_output_path = constraints_path / make_output_filename(model_name)
-        skip = False
-        for path in constraints_path.glob("*.yaml"):
-            setup = path.stem.split("--")[0]
-            existing_name = path.stem.split("--")[1]
-            if setup == "mini_swe_agent" and existing_name == model_name:
-                print(f"Constraints file {constraint_output_path} already exists. Skipping...")
-                skip = True
-        if skip:
+        constraint_output_path = constraints_path / make_output_filename(model_name, replicate)
+        existing = existing_artifacts(constraints_path, METHOD, model_name, replicate)
+        if existing:
+            print(f"Constraints file {existing[-1]} already exists (replicate {replicate}). Skipping...")
             continue
+        # Same span as single/few-shot's wall_clock_seconds; cost_summary's elapsed_s keeps the episode alone.
+        script_started = time.perf_counter()
         source_code, assertions = FileLoader.load_py_file(script_path).extract_assertions()
-        assert "# ASSERTION START" not in str(source_code)
+        assert "# ASSERTION_START" not in str(source_code)
 
         input_variables = {
             "code": source_code,
@@ -159,10 +164,16 @@ def run_mini_swe_agent(dataset_name, subtask_name, processed_data_label, model_n
                 f.write(prompt_content)
 
             print(f"Running Mini SWE Agent in {temp_dir}")
+            # Wall-clock of the whole episode, retries included; tokens, calls and
+            # cost are read back off the trajectory the agent writes.
+            started = time.perf_counter()
+            failed_attempts = []
             for attempt in range(max_retries):
                 try:
-                    command = f"mini --model \"openai/{model_name}\" --task \"Solve the task specified in task.txt.\" --output trajectory.json --cost-limit 0.50 --yolo --exit-immediately"
-                    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+                    config_args = " ".join(mini_config_args(model_name, Path(temp_dir)))
+                    command = f"mini --model \"{litellm_route(model_name)}\" --task \"Solve the task specified in task.txt.\" --output trajectory.json --cost-limit 0.50 --yolo --exit-immediately {config_args}"
+                    result = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                            env=mini_environment())
                     print(result)
                     with open("./constraints.json", "r", encoding="utf-8") as f:
                         raw_constraints = json.load(f)['constraints']
@@ -172,22 +183,35 @@ def run_mini_swe_agent(dataset_name, subtask_name, processed_data_label, model_n
                     code_list_for_constraints = [item["code_for_constraint"] for item in raw_constraints]
                     break
                 except Exception as e:
+                    print(f"mini-swe-agent attempt {attempt + 1}/{max_retries} failed: {e}")
+                    # The attempt still cost tokens; keep its trajectory for the bill.
+                    if os.path.exists("./trajectory.json"):
+                        try:
+                            with open("./trajectory.json", "r", encoding="utf-8") as f:
+                                failed_attempts.append(json.load(f))
+                        except json.JSONDecodeError:
+                            pass
                     if attempt < max_retries - 1:
                         continue
                     else:
                         raise e
+            elapsed_s = time.perf_counter() - started
 
             code_list_for_constraints_valid = dq_manager.filter_valid_constraints_on_spark(
                 code_list_for_constraints, spark_train, spark_train_data)
             constraints = Constraints.from_deequ_output(raw_constraints, code_list_for_constraints_valid)
 
+            output['replicate'] = replicate
             output['raw_constraints'] = raw_constraints
             output['trajectory'] = trajectory_container
+            output['failed_attempt_trajectories'] = failed_attempts
             output['constraints'] = constraints.to_dict()
+            output['cost_summary'] = cost_summary_from_trajectory(trajectory_container, elapsed_s, failed_attempts)
+            output['wall_clock_seconds'] = round(time.perf_counter() - script_started, 3)
             with open(constraint_output_path, "w", encoding="utf-8") as f:
                 yaml.dump(output, f, allow_unicode=True)
+    close_spark_session(spark_train)
 
 
-def make_output_filename(model_name) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"mini_swe_agent--{model_name}--{timestamp}.yaml"
+def make_output_filename(model_name, replicate=None) -> str:
+    return artifact_filename(METHOD, model_name, replicate)

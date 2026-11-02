@@ -1,5 +1,6 @@
 import shutil
 
+from prismadv.project_manager import corruption_variants
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.runtime_environments import PythonExecutor
 from prismadv.utils import get_project_root
@@ -12,7 +13,7 @@ def run_general_python_code(dataset_name, subtask_name, processed_data_label, si
     for script_path in project_manager.get_available_script_path_list_for_subtask(subtask_name):
         if len(single_script) > 0 and single_script not in script_path.name:
             continue
-        for clean in [True, False]:
+        for clean in corruption_variants(processed_data_label):
             input_path = project_manager.get_new_data_path(subtask_name, processed_data_label, clean=clean)
             output_path = project_manager.get_execution_output_path(
                 subtask_name,

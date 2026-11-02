@@ -53,8 +53,6 @@ for case_dir in os.listdir(constraints_output_dir):
     except:
         generated_constraints = []
 
-    # HACK: FILTER OUT DATATYPE constraints, since they are not generated correctly at the moment
-    # generated_constraints = [c for c in generated_constraints if not c.startswith(".hasDataType")]
 
     generated_exact_ground_truth = evaluation_case.ground_truth_constraint() in generated_constraints
     if generated_exact_ground_truth:

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import subprocess
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -22,8 +24,8 @@ from workflow_prismadv.eid_bench_real_experiments import utils
 
 VALID_TARGETS = {"clean", "observed", "corrupted", "all"}
 CONSTRAINT_ARTIFACT_GLOBS = (
-    "prismadv_real_etl--*.yaml",
-    "single_shot_real_etl--*.yaml",
+    "prismadv--*.yaml",
+    "single_shot--*.yaml",
 )
 JAVA_SECURITY_MANAGER_FLAG = "-Djava.security.manager=allow"
 PROJECT_SCRIPT_ID = "project"
@@ -32,13 +34,22 @@ PROJECT_SCRIPT_ID = "project"
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--example-id", default="omop_cdm_synthea")
-    parser.add_argument("--script-id", default="patient_summary")
+    parser.add_argument("--script-id", default="project")
     parser.add_argument("--project-root", type=Path, default=None)
     parser.add_argument(
         "--constraint-path",
         type=Path,
         default=None,
         help="Constraint artifact to validate. Defaults to the latest known EIDBench-real constraint artifact.",
+    )
+    parser.add_argument(
+        "--all-artifacts",
+        action="store_true",
+        help=(
+            "Validate every constraint artifact in the example's constraints dir -- all "
+            "methods, models and replicates -- instead of only the latest one. Artifacts "
+            "whose validation results already exist are skipped unless --overwrite."
+        ),
     )
     parser.add_argument(
         "--target",
@@ -69,8 +80,32 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def ensure_java_security_manager_compat() -> None:
-    """Set a JVM compatibility flag needed by some local Spark/JDK combinations."""
+def java_major_version() -> int | None:
+    """Major version of the `java` Spark will launch (JAVA_HOME first), or None if unknown."""
+    java_home = os.environ.get("JAVA_HOME")
+    java = str(Path(java_home) / "bin" / "java") if java_home else "java"
+    try:
+        banner = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30).stderr
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r'version "(\d+)(?:\.(\d+))?', banner)
+    if not match:
+        return None
+    major = int(match.group(1))
+    return int(match.group(2)) if major == 1 and match.group(2) else major
+
+
+def ensure_java_security_manager_compat(java_major: int | None = None) -> None:
+    """Let Spark install its SecurityManager on JDK 12+ without touching older JVMs.
+
+    `-Djava.security.manager=allow` is what Spark 3.5 needs on JDK 17+; JDK 12-16
+    accept it too. JDK 11 (the cluster default) reads `allow` as a class name and
+    refuses to start, so the flag is added only when the JVM understands it.
+    """
+    if java_major is None:
+        java_major = java_major_version()
+    if java_major is None or java_major < 12:
+        return
     current_options = os.environ.get("JAVA_TOOL_OPTIONS", "")
     if JAVA_SECURITY_MANAGER_FLAG not in current_options:
         os.environ["JAVA_TOOL_OPTIONS"] = f"{JAVA_SECURITY_MANAGER_FLAG} {current_options}".strip()
@@ -86,6 +121,22 @@ def latest_constraint_path(example_id: str, script_id: str, project_root: Path) 
     if not candidates:
         raise FileNotFoundError(f"no EIDBench-real constraint artifacts found in {constraints_dir}")
     return sorted(candidates, key=lambda path: (path.stat().st_mtime, path.name))[-1]
+
+
+def all_constraint_paths(example_id: str, script_id: str, project_root: Path) -> list[Path]:
+    """Every generation artifact in the constraints dir: `<method>--<model>--...yaml`.
+
+    The input artifacts (`prismadv_inputs.yaml`, `table_profiles.yaml`,
+    `eid_bench_real_context.yaml`) carry no `--` and are left out.
+    """
+    constraints_dir = utils.constraints_dir(example_id, script_id, project_root)
+    candidates = sorted(
+        path for path in constraints_dir.glob("*--*.yaml")
+        if path.is_file() and not path.name.startswith("validation_results")
+    )
+    if not candidates:
+        raise FileNotFoundError(f"no EIDBench-real constraint artifacts found in {constraints_dir}")
+    return candidates
 
 
 def load_constraints(path: Path) -> ConstraintsWithSources:
@@ -325,16 +376,26 @@ def run_validation(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_root = utils.resolve_project_root(args.project_root)
-    output_paths = run_validation(
-        project_root=project_root,
-        example_id=args.example_id,
-        script_id=args.script_id,
-        constraint_path=args.constraint_path,
-        target=args.target,
-        labels=args.label,
-        valid_only=not args.include_invalid_generated,
-        overwrite=args.overwrite,
+    if args.all_artifacts and args.constraint_path is not None:
+        raise SystemExit("--all-artifacts and --constraint-path are mutually exclusive")
+    constraint_paths = (
+        all_constraint_paths(args.example_id, args.script_id, project_root)
+        if args.all_artifacts else [args.constraint_path]
     )
+    output_paths = []
+    for constraint_path in constraint_paths:
+        if args.all_artifacts:
+            print(f"=== validating {constraint_path.name} ===")
+        output_paths.extend(run_validation(
+            project_root=project_root,
+            example_id=args.example_id,
+            script_id=args.script_id,
+            constraint_path=constraint_path,
+            target=args.target,
+            labels=args.label,
+            valid_only=not args.include_invalid_generated,
+            overwrite=args.overwrite,
+        ))
     print(
         yaml.safe_dump(
             {

@@ -1,6 +1,6 @@
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
-from workflow.e2e_evaluation.code_execution.run_general_python_code_for_assertion_selection import \
+from workflow_prismadv.eid_bench_experiments.code_execution.run_general_python_code_for_assertion_selection import \
     run_general_python_code_for_assertion_selection
 
 # test which assertions in the code are valid and which are not.

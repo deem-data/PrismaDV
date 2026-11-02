@@ -1,5 +1,6 @@
 import shutil
 
+from prismadv.project_manager import corruption_variants
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.runtime_environments import DuckDBExecutor
 from prismadv.utils import get_task_instance, get_project_root
@@ -13,7 +14,7 @@ def run_general_sql_code(dataset_name, subtask_name, processed_data_label, singl
         if len(single_script) > 0 and single_script not in script_path.name:
             continue
         task_instance = get_task_instance(script_path)
-        for clean in [True, False]:
+        for clean in corruption_variants(processed_data_label):
             input_path = project_manager.get_new_data_path(subtask_name, processed_data_label, clean=clean)
             output_path = project_manager.get_execution_output_path(
                 subtask_name,

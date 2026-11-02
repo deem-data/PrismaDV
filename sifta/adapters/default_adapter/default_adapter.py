@@ -1,4 +1,8 @@
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable
+
+# typing_extensions, not typing: pydantic rejects typing.TypedDict on Python < 3.12,
+# which bites as soon as one of these is used as a model or signature field type.
+from typing_extensions import TypedDict
 
 from sifta.core.adapter import EvaluationBatch, SIFTAAdapter
 
@@ -62,6 +66,7 @@ class DefaultAdapter(SIFTAAdapter[DefaultDataInst, DefaultTrajectory, DefaultRol
             if isinstance(self.model, str):
                 responses = [resp.choices[0].message.content.strip() for resp in
                              self.litellm.batch_completion(model=self.model, messages=litellm_requests,
+                                                           temperature=0.6,
                                                            max_workers=self.max_litellm_workers)]
             else:
                 responses = [self.model(messages) for messages in litellm_requests]

@@ -1,0 +1,92 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 2
+Candidate Index: 3
+Score: 0.4633
+Timestamp: 2026-10-13T02:10:50.376435
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data engineering assistant. Your task is to translate data assumptions for a specific column into PyDeequ quality checks based on the provided dataset profiling metadata and downstream Python/Pandas code.
+
+### Input Format
+You will be provided with:
+1. `target_column`: The name of the column being evaluated.
+2. `target_column_desc`: Data profiling information (completeness, inferred data types, distinct values count, histograms, quantiles, etc.).
+3. `code_snippet`: The downstream Python/Pandas script that consumes the dataset.
+4. `downstream_task_description`: Context regarding how the pipeline is run or used.
+5. `assumptions`: A numbered list of assumptions (index 0-based) regarding the column, derived from code and profiling.
+
+---
+
+### Task Instructions
+Translate the relevant assumptions into appropriate PyDeequ constraints.
+
+1. **Output Format**:
+Return valid JSON adhering to the following schema:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": "<PyDeequ constraint call starting with .>",
+      "level": "error" | "warning",
+      "linked assumptions": [<0-based integer indices of linked assumptions>]
+    }
+  ]
+}
+```
+
+2. **Severity Levels (`error` vs. `warning`)**:
+- **`error`**: Use if data violating this check would cause the downstream code to **crash** (throw an unhandled exception, e.g., `KeyError`, `ZeroDivisionError`, `ValueError`, `.astype(int)` failing on non-digits, unhandled `None` / `NaN` in required indexing).
+  - *Example*: Direct column access (`df['col']`) without a column existence check (`if 'col' in df:`) will raise a `KeyError` if missing or absent. Use `.isComplete('col')` with level `"error"`.
+  - *Example*: Strict regex conversion or type cast like `df['bp_sys'] = bp_parts[0].astype(int)` will crash if non-numeric/null values are present.
+- **`warning`**: Use if the downstream script handles bad data gracefully without crashing, but the data quality or semantics are compromised.
+  - *Example*: Handled missing values via `errors='coerce'`, `.fillna(...)`, `.get()`, or `df.columns` checks.
+  - *Example*: Categorical `.map()` followed by `.fillna(0)`.
+  - *Example*: Value domain boundaries (non-negative, expected ranges) where the script uses `.clip()` or graceful fallbacks.
+
+3. **Translating Column Existence & Completeness**:
+- PyDeequ does not have an explicit `hasColumn` check. To validate that a column exists and does not contain unexpected null values required by the script, use `.isComplete(column)` or `.hasCompleteness(column, ...)`.
+- **Do not ignore assumptions stating that a column must exist!** If an assumption states that the target column must exist in the input dataset and the code directly accesses `df[col]`, generate `.isComplete(col)` with level `"error"`.
+
+4. **PyDeequ Function Usage & Syntax Rules**:
+- Every constraint suggestion must start with a dot `.` (e.g., `.isComplete('col')`).
+- Data type constraints: Use `ConstrainableDataTypes` from `pydeequ.checks.ConstrainableDataTypes` (`Numeric`, `Integral`, `Fractional`, `String`, `Boolean`).
+  - *Example*: `.hasDataType('col', ConstrainableDataTypes.Numeric)`
+- Categorical membership: Use `.isContainedIn('col', ['val1', 'val2', ...])`.
+  - If the downstream code allows or defaults missing/unmapped values, or if the profiling indicates slight variance, add an assertion threshold lambda if appropriate, or keep it as a `warning`.
+- Range and domain constraints:
+  - Non-negative numbers: `.isNonNegative('col')`
+  - Strictly positive numbers: `.isPositive('col')`
+  - Relative comparisons: `.isLessThan`, `.isLessThanOrEqualTo`, etc.
+  - Custom SQL conditions: `.satisfies('`col` >= 0 AND `col` <= 100', 'name')`
+- Regex patterns: Always use raw string notation `r"..."` in `.hasPattern(column, pattern)`.
+
+5. **Assumption Linking**:
+- Populate `"linked assumptions"` with the exact list of 0-based indices corresponding to the assumptions verified by that check.
+- Every assumption that can be mapped to an available PyDeequ function should be covered.
+
+================================================================================
+

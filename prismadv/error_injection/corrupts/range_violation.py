@@ -1,6 +1,7 @@
+import math
 import random
+import warnings
 
-import numpy as np
 import pandas as pd
 
 from prismadv.error_injection.abstract_corruption import TabularCorruption
@@ -28,15 +29,12 @@ class RangeViolation(TabularCorruption):
     def __init__(self, columns=None, severity=None, sampling=None,
                  min_value=None, max_value=None, strategy="random",
                  violation_factor=1.5, random_state=None, **kwargs):
-        super().__init__(columns=columns, severity=severity, sampling=sampling, **kwargs)
+        super().__init__(columns=columns, severity=severity, sampling=sampling,
+                         random_state=random_state, **kwargs)
         self.min_value = min_value
         self.max_value = max_value
         self.strategy = strategy
         self.violation_factor = violation_factor  # How far outside range to go
-        self.random_state = random_state
-        if random_state is not None:
-            random.seed(random_state)
-            np.random.seed(random_state)
 
         valid_strategies = ["below_min", "above_max", "random"]
         if self.strategy not in valid_strategies:
@@ -72,20 +70,34 @@ class RangeViolation(TabularCorruption):
 
         for col in self.columns:
             if col not in df.columns:
-                continue
+                raise ValueError(f"column '{col}' not in the data")
 
             # Determine range if not specified
             col_min = self.min_value if self.min_value is not None else df[col].min()
             col_max = self.max_value if self.max_value is not None else df[col].max()
+            observed_min, observed_max = df[col].min(), df[col].max()
+            if self.strategy != "below_min" and col_max < observed_max:
+                warnings.warn(
+                    f"RangeViolation on '{col}': max_value={col_max} is below the observed "
+                    f"maximum {observed_max}, so injected values can fall inside the data's range"
+                )
+            if self.strategy != "above_max" and col_min > observed_min:
+                warnings.warn(
+                    f"RangeViolation on '{col}': min_value={col_min} is above the observed "
+                    f"minimum {observed_min}, so injected values can fall inside the data's range"
+                )
 
-            # Apply range violation to sampled rows
+            # Apply range violation to sampled rows. Integer columns receive
+            # integers strictly outside the range so the column keeps its dtype
+            # (a float upcast rewrites every untouched row as `x.0` on disk).
+            integer_column = self.is_integer_column(df[col])
             df.loc[rows, col] = df.loc[rows, col].apply(
-                lambda x: self._violate_range(x, col_min, col_max)
+                lambda x: self._violate_range(x, col_min, col_max, integer_column)
             )
 
         return df
 
-    def _violate_range(self, value, col_min, col_max):
+    def _violate_range(self, value, col_min, col_max, integer_column=False):
         """Generate a value that violates the range."""
         if pd.isna(value):
             return value
@@ -105,13 +117,16 @@ class RangeViolation(TabularCorruption):
         else:  # random
             violation_side = "below" if random.random() < 0.5 else "above"
 
+        violation_amount = range_span * self.violation_factor * random.uniform(0.1, 1.0)
         if violation_side == "below":
             # Generate value below minimum
-            violation_amount = range_span * self.violation_factor * random.uniform(0.1, 1.0)
             violated_value = col_min - violation_amount
+            if integer_column:
+                violated_value = min(math.floor(violated_value), math.ceil(col_min) - 1)
         else:
             # Generate value above maximum
-            violation_amount = range_span * self.violation_factor * random.uniform(0.1, 1.0)
             violated_value = col_max + violation_amount
+            if integer_column:
+                violated_value = max(math.ceil(violated_value), math.floor(col_max) + 1)
 
         return violated_value

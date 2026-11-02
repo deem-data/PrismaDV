@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,10 +19,17 @@ from prismadv.data_models.constraints_v2 import (
 )
 from prismadv.dq_manager import DeequDataQualityManager
 from prismadv.loader import MultiTableLoader
+from prismadv.llm.langchain.models.prismadv.costs import run_with_cost
 from prismadv.llm_backend.entry import get_langchain_model
 from prismadv.project_manager import MultiTableProjectManager
 from workflow_prismadv.eid_bench_real_experiments import _3_0_prepare_prismadv_inputs as input_prep
 from workflow_prismadv.eid_bench_real_experiments import utils
+from workflow_prismadv.utils.replicates import (
+    add_replicate_argument,
+    artifact_filename,
+    existing_artifacts,
+    normalize_replicate,
+)
 from workflow_prismadv.eid_bench_real_experiments._3_1_constraints_generation import (
     build_downstream_task_description,
 )
@@ -37,7 +43,7 @@ DEFAULT_EXAMPLE_ID = "omop_cdm_synthea"
 PROJECT_SCRIPT_ID = "project"
 DEFAULT_MODEL_NAME = "gpt-5-mini"
 MAX_RETRIES = 3
-BASELINE_METHOD = "few_shot_real_etl"
+BASELINE_METHOD = "few_shot"
 
 
 FEW_SHOT_REAL_ETL_PROMPT = """
@@ -172,6 +178,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--sample-rows", type=int, default=3)
     parser.add_argument("--overwrite", action="store_true")
+    add_replicate_argument(parser)
     return parser.parse_args(argv)
 
 
@@ -203,10 +210,13 @@ def load_or_prepare_project_inputs(
     if input_path.exists() and not overwrite:
         return load_yaml(input_path), input_path
 
+    # Profiles, row samples and constraint compilation all read the observed
+    # bundle, never one this row is scored against: `clean` is an evaluation
+    # target and every corrupted bundle is that same clean data corrupted.
     prismadv_inputs = input_prep.build_prismadv_inputs(
         project_manager,
         PROJECT_SCRIPT_ID,
-        variant="clean",
+        variant="observed",
     )
     input_prep.write_prismadv_input_artifacts(
         input_path.parent,
@@ -216,13 +226,13 @@ def load_or_prepare_project_inputs(
     return prismadv_inputs, input_path
 
 
-def make_output_filename(model_name: str) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{BASELINE_METHOD}--{model_name}--{timestamp}.yaml"
+def make_output_filename(model_name: str, replicate=None) -> str:
+    return artifact_filename(BASELINE_METHOD, model_name, replicate)
 
 
-def existing_output_for_model(output_dir: Path, model_name: str) -> Path | None:
-    candidates = sorted(output_dir.glob(f"{BASELINE_METHOD}--{model_name}--*.yaml"))
+def existing_output_for_model(output_dir: Path, model_name: str, replicate=None) -> Path | None:
+    """The newest artifact for this model *and* replicate; another replicate is a new sample."""
+    candidates = existing_artifacts(output_dir, BASELINE_METHOD, model_name, replicate)
     return candidates[-1] if candidates else None
 
 
@@ -233,7 +243,7 @@ def sample_rows_by_table(
     sample_rows: int,
 ) -> dict[str, list[dict[str, Any]]]:
     bundle = MultiTableLoader(project_manager).load_pandas(
-        variant="clean",
+        variant="observed",
         table_names=table_names,
     )
     samples = {}
@@ -332,7 +342,7 @@ def constraints_with_validation(
     constraints_by_table = normalize_raw_constraints(raw_constraints, prismadv_inputs["table_profiles"])
     table_names = sorted(constraints_by_table)
     bundle = MultiTableLoader(project_manager).load_pandas(
-        variant="clean",
+        variant="observed",
         table_names=table_names,
     )
     result = ConstraintsWithSources()
@@ -383,15 +393,18 @@ def generate_few_shot_constraints(
     temperature: float = 0.6,
     sample_rows: int = 3,
     overwrite: bool = False,
+    replicate=None,
     constraint_inferer: ConstraintInferer | None = None,
     dq_manager: DeequDataQualityManager | None = None,
 ) -> Path:
+    replicate = normalize_replicate(replicate)
     project_root = project_root.resolve()
     project_manager = MultiTableProjectManager(project_root=project_root, example_id=example_id)
     output_dir = utils.constraints_dir(example_id, PROJECT_SCRIPT_ID, project_root, create=True)
-    existing_output = existing_output_for_model(output_dir, model_name)
+    existing_output = existing_output_for_model(output_dir, model_name, replicate)
     if existing_output is not None and not overwrite:
-        print(f"Few-shot EIDBench-real baseline already exists. Skipping: {existing_output}")
+        print(f"Few-shot EIDBench-real baseline (replicate {replicate}) already exists. "
+              f"Skipping: {existing_output}")
         return existing_output
 
     prismadv_inputs, resolved_input_path = load_or_prepare_project_inputs(
@@ -411,7 +424,10 @@ def generate_few_shot_constraints(
             temperature=temperature,
         )
     )
-    raw_constraints = inferer(input_variables)
+    cost_summary = {}
+    raw_constraints = run_with_cost(
+        "constraint_generation", lambda: inferer(input_variables), cost_summary
+    )
     constraints = constraints_with_validation(
         project_manager,
         raw_constraints,
@@ -419,14 +435,16 @@ def generate_few_shot_constraints(
         dq_manager=dq_manager,
     )
 
-    output_path = output_dir / make_output_filename(model_name)
+    output_path = output_dir / make_output_filename(model_name, replicate)
     result = {
         "baseline_method": BASELINE_METHOD,
         "model_name": model_name,
         "temperature": temperature,
+        "replicate": replicate,
         "input_artifact": str(resolved_input_path),
         "raw_constraints": raw_constraints,
         "constraints": constraints.to_dict()["constraints"],
+        "cost_summary": cost_summary,
     }
     write_yaml(output_path, result)
     return output_path
@@ -443,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         temperature=args.temperature,
         sample_rows=args.sample_rows,
         overwrite=args.overwrite,
+        replicate=args.replicate,
     )
     print(
         yaml.safe_dump(

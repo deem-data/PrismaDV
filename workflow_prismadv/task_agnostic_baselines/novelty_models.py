@@ -245,7 +245,9 @@ def should_be_rejected_stats_novelty(
     n_permutations: int = STATS_NOVELTY_N_PERMUTATIONS,
 ) -> bool:
     """Reject ``test`` if its column-stats distribution differs from ``reference``."""
-    x = compute_column_stats(reference)
-    y = compute_column_stats(test)
+    # Every row has NaN cells (numeric columns have no index of peculiarity, text columns no
+    # min/mean/max/std). A NaN makes the MMD NaN and the p-value 0, which rejects every batch.
+    x = np.nan_to_num(compute_column_stats(reference), nan=0.0)
+    y = np.nan_to_num(compute_column_stats(test), nan=0.0)
     _, p_value = mmd(x, y, n_permutations=n_permutations)
     return bool(p_value < alpha)

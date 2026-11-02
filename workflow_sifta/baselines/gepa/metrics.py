@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import random
 from typing import Any, Dict, List
 
@@ -12,14 +11,7 @@ from workflow_sifta.optimization_fns import OptimizationWorkflow
 from prismadv.data_models.constraints_v2 import ConstraintsWithSources, ser_column_group_key
 from prismadv.data_models.validated_results import ValidationResults
 from sifta.dspy_sifta.teleprompt.sifta.sifta_utils import ScoreWithFeedback
-
-
-def _compute_f1(tp: int, fp: int, fn: int) -> float:
-    precision = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
-    recall = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
-    if math.isfinite(precision) and math.isfinite(recall) and (precision + recall) > 0:
-        return 2 * precision * recall / (precision + recall)
-    return float("nan")
+from workflow_prismadv.results.metrics import macro_scores
 
 
 def _sample_validation_entries(
@@ -46,55 +38,48 @@ def _sample_validation_entries(
     return entries[:sample_size]
 
 
-def create_script_level_metric(
-        workflow: OptimizationWorkflow,
-        convert_nan_to_zero: bool = True,
-):
-    """Metric returning per-script F1 score across labels."""
+def _validate_on_labels(workflow: OptimizationWorkflow, example, pred: ConstraintsWithSources):
+    """Validation results per label and the (safe, predicted safe) pairs of the script's labels."""
+    dataset_name = example["dataset_name"]
+    subtask_name = example["subtask_name"]
+    constraints_with_sources = workflow.validate_constraints_on_training_data(
+        dataset_name=dataset_name,
+        subtask_name=subtask_name,
+        constraints_with_sources=pred,
+    )
+    validation_results_by_label: Dict[str, ValidationResults] = {}
+    safe, predicted_safe = [], []
+    for processed_data_label, is_safe in example["new_data_safety"].items():
+        validation_results = workflow.validate_constraints_on_test_data(
+            dataset_name=dataset_name,
+            subtask_name=subtask_name,
+            constraints_with_sources=constraints_with_sources,
+            processed_data_label=processed_data_label,
+            clean=False,
+        )
+        validation_results_by_label[processed_data_label] = validation_results
+        safe.append(bool(is_safe))
+        predicted_safe.append(validation_results.check_result()[2] == 0)
+    return validation_results_by_label, safe, predicted_safe
+
+
+def _outcome_lines(safe: List[bool], predicted_safe: List[bool]) -> str:
+    caught = sum(not s and not p for s, p in zip(safe, predicted_safe))
+    false_alarms = sum(s and not p for s, p in zip(safe, predicted_safe))
+    return (f"- Unsafe batches flagged (errors caught): {caught} of {safe.count(False)}\n"
+            f"- Safe batches flagged (false alarms): {false_alarms} of {safe.count(True)}\n")
+
+
+def create_script_level_metric(workflow: OptimizationWorkflow):
+    """Metric returning the per-script macro F1 across labels."""
 
     def metric(example, pred, trace=None, pred_name=None, pred_trace=None):
         if not isinstance(pred, ConstraintsWithSources):
             return 0.0
-
-        dataset_name = example["dataset_name"]
-        subtask_name = example["subtask_name"]
-        new_data_safety = example.get("new_data_safety", {})
-        if not new_data_safety:
+        if not example.get("new_data_safety", {}):
             return 0.0
-
-        constraints_with_sources = workflow.validate_constraints_on_training_data(
-            dataset_name=dataset_name,
-            subtask_name=subtask_name,
-            constraints_with_sources=pred,
-        )
-
-        tp = fp = tn = fn = 0
-        for processed_data_label, is_safe in new_data_safety.items():
-            validation_results = workflow.validate_constraints_on_test_data(
-                dataset_name=dataset_name,
-                subtask_name=subtask_name,
-                constraints_with_sources=constraints_with_sources,
-                processed_data_label=processed_data_label,
-                clean=False,
-            )
-            num_failed_error = validation_results.check_result()[2]
-            predicted_safe = num_failed_error == 0
-
-            # Positive class = "unsafe/error" (standard for anomaly detection)
-            # TP = correctly detected error, TN = correctly accepted safe data
-            if not is_safe and not predicted_safe:
-                tp += 1  # TP: error detected correctly
-            elif not is_safe and predicted_safe:
-                fn += 1  # FN: error missed (BAD!)
-            elif is_safe and not predicted_safe:
-                fp += 1  # FP: false alarm
-            else:  # is_safe and predicted_safe
-                tn += 1  # TN: safe data accepted correctly
-
-        f1 = _compute_f1(tp, fp, fn)
-        if convert_nan_to_zero and not math.isfinite(f1):
-            f1 = 0.0
-        return f1
+        _, safe, predicted_safe = _validate_on_labels(workflow, example, pred)
+        return macro_scores(safe, predicted_safe)["f1"]
 
     return metric
 
@@ -103,7 +88,6 @@ def create_script_level_metric_with_feedback(
         workflow: OptimizationWorkflow,
         feedback_sample_size: int = 5,
         feedback_seed: int = 0,
-        convert_nan_to_zero: bool = True,
 ):
     """Metric with sampled validation feedback for SIFTA."""
 
@@ -112,47 +96,11 @@ def create_script_level_metric_with_feedback(
     def metric_with_feedback(example, pred, trace=None, pred_name=None, pred_trace=None):
         if not isinstance(pred, ConstraintsWithSources):
             return ScoreWithFeedback(score=0.0, feedback="No constraints were generated.")
-
-        dataset_name = example["dataset_name"]
-        subtask_name = example["subtask_name"]
-        new_data_safety = example.get("new_data_safety", {})
-        if not new_data_safety:
+        if not example.get("new_data_safety", {}):
             return ScoreWithFeedback(score=0.0, feedback="No safety labels available for this script.")
 
-        constraints_with_sources = workflow.validate_constraints_on_training_data(
-            dataset_name=dataset_name,
-            subtask_name=subtask_name,
-            constraints_with_sources=pred,
-        )
-
-        validation_results_by_label: Dict[str, ValidationResults] = {}
-        tp = fp = tn = fn = 0
-        for processed_data_label, is_safe in new_data_safety.items():
-            validation_results = workflow.validate_constraints_on_test_data(
-                dataset_name=dataset_name,
-                subtask_name=subtask_name,
-                constraints_with_sources=constraints_with_sources,
-                processed_data_label=processed_data_label,
-                clean=False,
-            )
-            validation_results_by_label[processed_data_label] = validation_results
-            num_failed_error = validation_results.check_result()[2]
-            predicted_safe = num_failed_error == 0
-
-            # Positive class = "unsafe/error" (standard for anomaly detection)
-            # TP = correctly detected error, TN = correctly accepted safe data
-            if not is_safe and not predicted_safe:
-                tp += 1  # TP: error detected correctly
-            elif not is_safe and predicted_safe:
-                fn += 1  # FN: error missed (BAD!)
-            elif is_safe and not predicted_safe:
-                fp += 1  # FP: false alarm
-            else:  # is_safe and predicted_safe
-                tn += 1  # TN: safe data accepted correctly
-
-        f1 = _compute_f1(tp, fp, fn)
-        if convert_nan_to_zero and not math.isfinite(f1):
-            f1 = 0.0
+        validation_results_by_label, safe, predicted_safe = _validate_on_labels(workflow, example, pred)
+        f1 = macro_scores(safe, predicted_safe)["f1"]
 
         samples = _sample_validation_entries(validation_results_by_label, feedback_sample_size, rng)
         samples_text = "(no validation entries)"
@@ -160,10 +108,10 @@ def create_script_level_metric_with_feedback(
             samples_text = yaml.dump(samples, sort_keys=False)
 
         feedback = (
-            "Script-level F1 feedback:\n"
-            f"- F1: {f1:.4f}\n"
-            f"- Confusion: TP={tp}, FP={fp}, TN={tn}, FN={fn}\n"
-            f"- Validation samples (max {feedback_sample_size}):\n{samples_text}"
+            "Script-level feedback:\n"
+            f"- Macro F1: {f1:.4f}\n"
+            + _outcome_lines(safe, predicted_safe)
+            + f"- Validation samples (max {feedback_sample_size}):\n{samples_text}"
         )
 
         return ScoreWithFeedback(score=f1, feedback=feedback)

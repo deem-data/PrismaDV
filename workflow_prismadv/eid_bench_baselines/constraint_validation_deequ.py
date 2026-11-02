@@ -8,6 +8,7 @@ from prismadv.data_models import ValidationResults
 from prismadv.dq_manager import DeequDataQualityManager
 from prismadv.loader import FileLoader
 from prismadv.post_processing.individual_constraint import determine_validity
+from prismadv.project_manager import is_clean_label
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
 
@@ -20,26 +21,21 @@ for dataset_name in dataset_name_options:
     for subtask_name in subtask_names:
         processed_data_labels = project_manager.get_available_processed_data_labels_for_subtask(subtask_name)
         for processed_data_label in processed_data_labels:
-            if int(processed_data_label) == 0:
+            if is_clean_label(processed_data_label):
                 continue
-            suggestion_file_path = project_manager.get_task_agnostic_constraint_path(
-                subtask_name, processed_data_label,
-            ) / "deequ_constraints.yaml"
+            # One artifact per dataset, shared by every label (no per-label copies).
+            suggestion_file_path = project_manager.get_task_agnostic_constraint_path(subtask_name) / "deequ_constraints.yaml"
             validation_results_dir = project_manager.get_task_agnostic_constraints_validation_path(
                 subtask_name, processed_data_label,
             )
-            if int(processed_data_label) == 0:
-                clean = True
-            else:
-                clean = False
+            # Label 0 is skipped above, so only the error-injected side is ever
+            # scored.
+            clean = False
             test_data_path = project_manager.get_new_test_data_path(
                 subtask_name, processed_data_label, clean=clean
             )
             test_data = FileLoader.load_csv(test_data_path)
-            if clean:
-                validation_results_path = validation_results_dir / f"validation_results_on_clean_test_data__{suggestion_file_path.stem}.yaml"
-            else:
-                validation_results_path = validation_results_dir / f"validation_results_on_corrupted_test_data__{suggestion_file_path.stem}.yaml"
+            validation_results_path = validation_results_dir / f"validation_results_on_corrupted_test_data__{suggestion_file_path.stem}.yaml"
             validation_results_path.parent.mkdir(parents=True, exist_ok=True)
             if validation_results_path.exists():
                 print(f"Validation results file {validation_results_path} already exists. Skipping...")
@@ -54,12 +50,12 @@ for dataset_name in dataset_name_options:
                 continue
             valid_code_column_map = constraints.get_suggestions_code_column_map(valid_only=False)
             code_list_for_constraints = [item for item in valid_code_column_map.keys()]
+            setup_start = time.time()
             spark_test_data, spark_test = dq_manager.spark_df_from_pandas_df(test_data)
+            spark_setup_s = time.time() - setup_start
             time_start = time.time()
             status_on_test_data = dq_manager.validate_on_spark_df(
                 spark_test, spark_test_data, code_list_for_constraints)
-            time_end = time.time()
-            print("*" * 3, f"takes {time_end - time_start}")
             result_dict = defaultdict(lambda: {"code": []})
             for code, code_info in valid_code_column_map.items():
                 status, reason_if_failed = determine_validity(
@@ -72,7 +68,15 @@ for dataset_name in dataset_name_options:
                     "reason_if_failed": reason_if_failed,
                     "level": code_info['level']
                 })
+            elapsed_time = time.time() - time_start
+            print("*" * 3, f"takes {elapsed_time}")
             validation_results = ValidationResults.from_dict(result_dict)
+            validation_results.validation_summary = {
+                "elapsed_s": round(elapsed_time, 3),
+                "num_constraints": len(code_list_for_constraints),
+                # Spark session start + DataFrame conversion, outside elapsed_s.
+                "spark_setup_s": round(spark_setup_s, 3),
+            }
             validation_results.save_to_yaml(validation_results_path)
 
             spark_test.sparkContext._gateway.shutdown_callback_server()

@@ -6,6 +6,7 @@ import dspy
 import oyaml as yaml
 
 from prismadv.project_manager.manager.base import ProjectManager
+from workflow_sifta.optimization_fns.optimization_labels import optimization_is_safe
 
 
 def prepare_single_column_training_dataset(
@@ -14,6 +15,8 @@ def prepare_single_column_training_dataset(
         script_name_list: Union[List[str], Dict[str, List[str]]],
         processed_data_label: Union[str, Dict[str, str]] = "0",
         new_processed_data_label_list: Union[List[str], Dict[str, List[str]], None] = None,
+        missing_execution_is_safe: bool = False,
+        relabelled: frozenset = frozenset(),
 ) -> List[dspy.Example]:
     """
     Prepare training dataset for single-column constraint generation.
@@ -32,7 +35,9 @@ def prepare_single_column_training_dataset(
         new_processed_data_label_list: List of new processed data labels to check safety for.
             Can be a list (applied to all datasets) or dict mapping dataset_name to list of labels.
             If None, no safety information is recorded.
-        
+        relabelled: units (dataset, label, script) the optimization sees as safe
+            (workflow_sifta.optimization_fns.optimization_labels)
+
     Returns:
         List of dicts, each containing:
             - "dataset_name": str
@@ -47,6 +52,8 @@ def prepare_single_column_training_dataset(
     from workflow_sifta.optimization_fns.column_discovery import discover_columns_and_groups
 
     training_dataset = []
+    skipped = []
+    attempted = 0
 
     # Iterate over all dataset/subtask/script combinations
     for dataset_name, subtask_list in dataset_subtasks.items():
@@ -67,6 +74,7 @@ def prepare_single_column_training_dataset(
 
         for subtask_name in subtask_list:
             for script_name in scripts_to_use:
+                attempted += 1
                 try:
                     # Discover columns and groups for this script
                     discovery_result = discover_columns_and_groups(
@@ -88,21 +96,32 @@ def prepare_single_column_training_dataset(
                         else:
                             labels_to_check = new_processed_data_label_list
 
-                        # Read safety information for each label
+                        # Read safety information for each label. is_safe is ground
+                        # truth, so a missing or malformed file must not quietly become
+                        # "safe" - that mislabels corrupted data as clean and turns
+                        # correct constraint failures into false alarms.
                         new_data_safety = {}
                         for new_label in labels_to_check:
+                            exec_path = pm.get_execution_output_validation_path(
+                                subtask_name, new_label, script_name
+                            ) / "basic_metrics_evaluation.json"
                             try:
-                                exec_path = pm.get_execution_output_validation_path(
-                                    subtask_name, new_label, script_name
-                                ) / "basic_metrics_evaluation.json"
-
                                 with open(exec_path, "r") as f:
                                     exec_results = yaml.load(f, Loader=yaml.FullLoader)
                                 # Use corrupted_data_is_safe for new test data (not clean)
-                                is_safe = exec_results.get('corrupted_data_is_safe', True)
-                                new_data_safety[new_label] = is_safe
+                                new_data_safety[new_label] = optimization_is_safe(
+                                    dataset_name, new_label, script_name, exec_results['corrupted_data_is_safe'],
+                                    relabelled)
                             except (FileNotFoundError, KeyError) as e:
-                                # Default to True if execution results not found
+                                if not missing_execution_is_safe:
+                                    raise type(e)(
+                                        f"Cannot read ground truth (corrupted_data_is_safe) for "
+                                        f"{dataset_name}/{subtask_name}/{script_name} at label "
+                                        f"'{new_label}': {exec_path} ({e}).\n"
+                                        f"Generate the execution results, or pass "
+                                        f"missing_execution_is_safe=True if 'not executed' means "
+                                        f"'safe' here."
+                                    ) from e
                                 new_data_safety[new_label] = True
                     else:
                         new_data_safety = {}
@@ -138,9 +157,18 @@ def prepare_single_column_training_dataset(
                         )
                         training_dataset.append(training_example)
 
-                except Exception as e:
-                    # Skip scripts that don't exist or have errors
+                # Only a genuinely absent script or subtask is a skip: the managers
+                # raise ValueError for those and FileLoader raises FileNotFoundError.
+                # Anything else -- a Spark failure, a column missing from the
+                # description dict -- shrinks the training set for a reason that is
+                # not "this script does not exist here", so it propagates.
+                except (FileNotFoundError, ValueError) as e:
+                    skipped.append(f"{dataset_name}/{subtask_name}/{script_name}: {e}")
                     print(f"Warning: Skipping {dataset_name}/{subtask_name}/{script_name}: {e}")
                     continue
+
+    if skipped:
+        print(f"Warning: {len(skipped)} of {attempted} script(s) skipped, "
+              f"so the training set is smaller than the split asked for.")
 
     return training_dataset

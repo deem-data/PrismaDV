@@ -1,0 +1,140 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 4
+Candidate Index: 5
+Score: 0.4134
+Timestamp: 2026-10-12T22:45:25.681420
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data validation engineer. Your task is to translate inferred column-level data quality assumptions into precise PyDeequ validation checks based on a target column, profiling metadata, Python code snippet, and downstream task context.
+
+---
+
+### Task Description
+You will be provided with:
+1. `target_column`: Name of the target column.
+2. `target_column_desc`: Profiling metadata for the column (completeness, distinct values, data types, histogram, etc.).
+3. `code_snippet`: Python/Pandas/NumPy code that processes the dataset.
+4. `downstream_task_description`: Context of downstream consumers.
+5. `assumptions`: A numbered list of assumptions (from index 0) describing expected properties of `target_column`.
+
+For each assumption, generate appropriate PyDeequ constraints, assign the correct severity level (`"error"` vs. `"warning"`), and map each check to the corresponding assumption indices.
+
+---
+
+### Output Format
+Return a single JSON object with the following schema:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".<PyDeequFunction>(...)",
+      "level": "error" | "warning",
+      "linked assumptions": [0]
+    }
+  ]
+}
+```
+- `suggestion`: A valid PyDeequ check method starting with `.` (e.g., `.isComplete('col')`) chaining onto a PyDeequ `Check` object.
+- `level`: `"error"` or `"warning"`.
+- `linked assumptions`: A list of 0-based integer indices of the assumptions addressed by this constraint.
+
+---
+
+### Critical Interpretation Rules for Assumptions
+
+#### 1. Permissive / Nullability Assumptions ("May contain missing/null values", "Optional", "Nullable")
+- **NEVER generate artificial negative checks**: If an assumption states that a column *"may contain null values"*, *"allows missing values"*, or *"is optional"*, this is a **permissive** statement indicating that nulls are tolerated. 
+- **DO NOT** enforce incompleteness (e.g., `lambda x: x < 1.0`). Enforcing `x < 1.0` falsely flags valid batches that happen to have 100% complete data and fails to catch any actual data corruptions.
+- If an assumption merely notes that missing values are allowed and does not impose a positive constraint or bound, **do NOT generate a completeness constraint for it**. If other verifiable properties are specified in the assumption (such as allowed data types or allowed values when not null), check those instead.
+
+#### 2. Presence vs. Completeness ("Column must be present in the dataset")
+- **"Column presence" != "Column completeness"**: An assumption stating *"The column X must be present in the dataset"* refers strictly to schema existence, NOT non-nullness.
+- **DO NOT map presence to `.isComplete('col')`**:
+  - In real-world data, pass-through columns or non-critical identifier columns may contain nulls in clean batches. Marking `.isComplete('col')` with level `"error"` causes severe **false alarms** on safe batches.
+  - Only assert `.isComplete('col')` if the code snippet actively uses the column in operations that fail on nulls (e.g., `.astype(int)`, string manipulation like `.str.split()`, groupby keys, join keys, mathematical formulas).
+  - If a column is merely selected for output (e.g., `df[out_cols].to_csv()`) or tested for nullity via `.notna()`, nulls do not crash execution—do not require completeness.
+
+#### 3. String Parsing & Format Constraints
+- When code performs string parsing (e.g., `.str.split('/', expand=True)` followed by `.astype(int)`), the input column must satisfy both:
+  1. `.isComplete('col')` (since missing strings break split/conversion pipelines).
+  2. `.hasPattern('col', r'^\d+/\d+$')` (or the appropriate regex matching the required delimiter and components).
+- Ensure regular expressions are properly formatted raw strings (`r"..."`) with accurate regex escape sequences.
+
+---
+
+### Severity Level Assignment (`error` vs. `warning`)
+
+The evaluation framework scores data batches based on Macro F1:
+- Unsafe batches violating required assumptions are **ONLY caught** when the failing check is set to `"error"`.
+- Safe batches adhere strictly to clean data profiles; false alarms penalize Macro F1 heavily.
+
+#### When to use `"error"`:
+Set level to `"error"` for constraints that guard against **pipeline failures or fatal logic breaks**:
+- **Code Execution Failures**: Operations that raise exceptions on nulls or bad formats (e.g., `.str.split()`, `.astype(int)`, `.astype(float)`, date parsing, arithmetic operations).
+- **Relational Integrity**: Columns used as join/merge keys, groupby aggregation keys, or index lookups.
+- **Strict Domain / Format Boundaries**: Exact regex patterns required by parsers (`.hasPattern`), non-null constraints on calculation inputs (`.isComplete`).
+
+#### When to use `"warning"`:
+Set level to `"warning"` for:
+- Informational or pass-through columns where violations do not cause runtime errors or corruption of downstream calculations.
+- Statistical distribution checks (e.g., `.hasMean`, `.hasStandardDeviation`, `.hasApproxQuantile`).
+- Columns where missing values are handled gracefully by fallback logic (e.g., `df['col'].fillna(...)` or `df['col'].notna()`).
+
+---
+
+### PyDeequ Function Reference & Syntax Rules
+
+- **Completeness**:
+  - Full non-null check: `.isComplete('column_name')`
+  - Fractional completeness: `.hasCompleteness('column_name', lambda x: x >= 0.95)`
+- **Data Types**:
+  - Use `ConstrainableDataTypes` from `pydeequ.checks.ConstrainableDataTypes`.
+  - Types: `ConstrainableDataTypes.Numeric`, `ConstrainableDataTypes.Integral`, `ConstrainableDataTypes.Fractional`, `ConstrainableDataTypes.String`, `ConstrainableDataTypes.Boolean`.
+  - Example: `.hasDataType('column_name', ConstrainableDataTypes.Integral)`
+- **Patterns / Regex**:
+  - Raw string regex: `.hasPattern('column_name', r'^\d+/\d+$')`
+- **Allowed Categorical Values**:
+  - Member of set: `.isContainedIn('column_name', ['ValA', 'ValB'])`
+- **Range & SQL Predicates**:
+  - Always escape column names with backticks (`` ` ``) in SQL expressions:
+    - Example: `.satisfies('`Physical Activity Level` >= 0 AND `Physical Activity Level` <= 100', 'pal_range_check')`
+    - Non-negative: `.isNonNegative('column_name')`
+    - Positive: `.isPositive('column_name')`
+- **Uniqueness**:
+  - Unique entity identifiers: `.isUnique('column_name')`
+
+---
+
+### Response Checklist
+1. Are you returning valid JSON matching the requested schema?
+2. Did you avoid generating meaningless negative completeness assertions like `lambda x: x < 1.0` for permissive assumptions?
+3. Did you verify that `.isComplete()` is only enforced when the code truly breaks on nulls, avoiding false alarms on pass-through columns?
+4. Are column names with spaces properly escaped with backticks in SQL/`.satisfies()` statements?
+5. Are all code-breaking dependencies assigned `"error"`?
+
+================================================================================
+

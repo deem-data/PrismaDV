@@ -1,3 +1,4 @@
+import math
 import random
 
 import numpy as np
@@ -18,14 +19,11 @@ class OutlierInjection(TabularCorruption):
     
     def __init__(self, columns=None, severity=None, sampling=None, 
                  strategy="iqr_based", factor=3.0, random_state=None, **kwargs):
-        super().__init__(columns=columns, severity=severity, sampling=sampling, **kwargs)
+        super().__init__(columns=columns, severity=severity, sampling=sampling,
+                         random_state=random_state, **kwargs)
         self.strategy = strategy
         self.factor = factor
-        self.random_state = random_state
-        if random_state is not None:
-            random.seed(random_state)
-            np.random.seed(random_state)
-        
+
         valid_strategies = ["iqr_based", "zscore_based", "extreme_values"]
         if self.strategy not in valid_strategies:
             raise ValueError(f"strategy must be one of {valid_strategies}")
@@ -48,37 +46,72 @@ class OutlierInjection(TabularCorruption):
         self.columns = numerical_cols
         return numerical_cols
     
+    def sample_mutable_rows(self, dataframe: pd.DataFrame):
+        """Sample rows an outlier can actually land in.
+
+        Every injector below returns NaN unchanged, but `sample_rows` draws from
+        the whole frame, so on a sparse column the draw can miss every populated
+        row and the corruption silently becomes a no-op. It bites harder the
+        smaller the table: price_of_healthy_diet is 12% populated in some cost
+        columns, where a 0.01 severity draw hit one or two live rows at 1379 rows
+        and none at all at 537.
+
+        The count still comes from the full row count, so `severity` keeps
+        meaning the same share of the table; only the pool it is drawn from
+        narrows. Sampling modes other than CAR order rows by value or by a
+        companion column, which this cannot preserve, so they keep the inherited
+        behaviour.
+        """
+        if not str(self.sampling).endswith("CAR"):
+            return self.sample_rows(dataframe)
+        columns = [column for column in self.columns if column in dataframe.columns]
+        if not columns:
+            return dataframe.index[:0]
+        eligible = dataframe.index[dataframe[columns].notna().any(axis=1)]
+        count = int(len(dataframe) * min(self.severity, 1.0))
+        if len(eligible) <= count:
+            return eligible
+        return pd.Index(np.random.permutation(eligible)[:count])
+
     def transform(self, dataframe: pd.DataFrame):
         self.validate_data(dataframe)
-        
+
         if not self.columns:
             self.identify_columns(dataframe)
-        
+
         if self.severity is None or self.severity <= 0:
             return dataframe
-        
+
         df = dataframe.copy(deep=True)
-        rows = self.sample_rows(df)
+        rows = self.sample_mutable_rows(df)
         
         for col in self.columns:
             if col not in df.columns:
-                continue
-            
-            # Apply outlier injection to sampled rows
+                raise ValueError(f"column '{col}' not in the data")
+
             if self.strategy == "iqr_based":
-                df.loc[rows, col] = df.loc[rows, col].apply(
-                    lambda x: self._inject_iqr_outlier(df[col], x)
-                )
+                inject = self._inject_iqr_outlier
             elif self.strategy == "zscore_based":
-                df.loc[rows, col] = df.loc[rows, col].apply(
-                    lambda x: self._inject_zscore_outlier(df[col], x)
-                )
-            elif self.strategy == "extreme_values":
-                df.loc[rows, col] = df.loc[rows, col].apply(
-                    lambda x: self._inject_extreme_value(df[col], x)
-                )
-        
+                inject = self._inject_zscore_outlier
+            else:
+                inject = self._inject_extreme_value
+
+            # Statistics come from the clean column, not from the one being
+            # rewritten, and integer columns receive integers rounded away
+            # from the data so the column keeps its dtype on disk.
+            reference = dataframe[col]
+            integer_column = self.is_integer_column(reference)
+            df.loc[rows, col] = df.loc[rows, col].apply(
+                lambda x: self._as_column_type(inject(reference, x), x, integer_column)
+            )
+
         return df
+
+    @staticmethod
+    def _as_column_type(outlier, original, integer_column):
+        if not integer_column or pd.isna(outlier) or outlier == original:
+            return outlier
+        return math.ceil(outlier) if outlier > original else math.floor(outlier)
     
     def _inject_iqr_outlier(self, series: pd.Series, value):
         """Inject outlier based on IQR method."""

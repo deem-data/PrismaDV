@@ -44,6 +44,7 @@ def optimize(
         llm_name: str | None = None,
         batch_sampler_temperature: float = 0.5,
         batch_sampler_strategy: str = "random",
+        budget_tracker: dict | None = None,
 ):
     """
     SIFTA can be applied to optimize any system that uses text components (e.g., prompts in a AI system, code snippets/code files/functions/classes in a codebase, etc.).
@@ -128,7 +129,11 @@ def optimize(
 
         reflection_lm_name = reflection_lm
         reflection_lm = (
-            lambda prompt: litellm.completion(model=reflection_lm_name, messages=[{"role": "user", "content": prompt}])
+            lambda prompt: litellm.completion(
+                model=reflection_lm_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+            )
             .choices[0]
             .message.content
         )
@@ -155,9 +160,14 @@ def optimize(
             minibatch_size=reflection_minibatch_size,
             rng=rng,
             seed_candidate=seed_candidate,
-            precompute_scores=True,
+            # Random sampling ignores the scores, so it does not pay for them.
+            precompute_scores=batch_sampler_strategy != "random",
             temperature=batch_sampler_temperature,
             sampling_strategy=batch_sampler_strategy,
+            budget_tracker=budget_tracker,
+            seed=seed,
+            # No scores from earlier runs: every run pays and counts its own precompute.
+            use_cache=False,
         )
     else:
         # Fallback to original sampler if workflow/llm_name not provided

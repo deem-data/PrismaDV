@@ -18,32 +18,36 @@ class ConstraintManager:
         """
         self._data_manager = data_manager
 
-    def get_task_agnostic_constraint_path(self, subtask_name: str, processed_data_label: str) -> Path:
-        """Get the base constraints directory path (task-agnostic).
-        
-        Args:
-            subtask_name: Name of the subtask.
-            processed_data_label: Label identifying the processed data version.
-            
-        Returns:
-            Path to the constraints directory.
-        """
-        return (self._data_manager.get_processed_data_path_for_subtask(subtask_name, processed_data_label) /
-                "constraints")
+    def get_task_agnostic_constraint_path(self, subtask_name: str) -> Path:
+        """Where the task-agnostic baselines (deequ, tfdv, AutoTest, novelty models) keep their artifacts.
 
-    def get_constraints_path(self, subtask_name: str, processed_data_label: str, script_name: str) -> Path:
-        """Get the constraints path for a specific script.
-        
+        Like get_source_constraints_path, one directory for every label at once: the artifacts are
+        inferred from the observed half and do not depend on the corruption applied downstream, so
+        they are written once instead of copied into each label.
+
         Args:
             subtask_name: Name of the subtask.
-            processed_data_label: Label identifying the processed data version.
-            script_name: Name of the script.
-            
+
         Returns:
-            Path to the script-specific constraints directory.
+            Path to the label-independent constraints directory.
         """
-        return (self._data_manager.get_processed_data_path_for_subtask(subtask_name, processed_data_label) /
-                "constraints" / f"{script_name}")
+        return self._data_manager.get_base_processed_data_path_for_subtask(subtask_name) / "constraints"
+
+    def get_source_constraints_path(self, subtask_name: str, script_name: str) -> Path:
+        """Where a script's generated constraints live, for every label at once.
+
+        A constraint set is a function of (dataset, subtask, script, method,
+        model): nothing about it depends on which corruption is applied
+        downstream, so it is stored once per script, not once per label.
+
+        Args:
+            subtask_name: Name of the subtask.
+            script_name: Name of the script.
+
+        Returns:
+            Path to the label-independent constraints directory.
+        """
+        return self._data_manager.get_base_processed_data_path_for_subtask(subtask_name) / "constraints" / f"{script_name}"
 
     def get_constraints_validation_path(self, subtask_name: str, processed_data_label: str,
                                         script_name: str) -> Path:

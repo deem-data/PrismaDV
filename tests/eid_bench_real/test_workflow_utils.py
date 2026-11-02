@@ -8,9 +8,10 @@ from workflow_prismadv.eid_bench_real_experiments import utils
 
 
 def write_error_config(example_root: Path, label: str, table: str = "patients") -> None:
-    errors_dir = example_root / "errors"
+    group, number = label.split("-")
+    errors_dir = example_root / "errors" / f"error-group-{group}"
     errors_dir.mkdir(parents=True, exist_ok=True)
-    (errors_dir / f"{label}.yaml").write_text(
+    (errors_dir / f"project_{number}.yaml").write_text(
         f"""
 label: {label}
 description: Test config for {label}.
@@ -18,8 +19,7 @@ table: {table}
 corruption:
   class: ColumnDropping
   columns: [name]
-expected_current_outcome:
-  patient_summary: execution_failure
+expected_current_outcome: unsafe
 """.lstrip(),
         encoding="utf-8",
     )
@@ -110,25 +110,29 @@ def test_variant_component_validates_corruption_labels():
 
 def test_load_error_configs_from_benchmark_local_errors(tmp_path):
     example_root = write_example(tmp_path)
-    write_error_config(example_root, "drop_patient_name")
-    write_error_config(example_root, "drop_encounter_name", table="encounters")
+    write_error_config(example_root, "10-1")
+    write_error_config(example_root, "2-1", table="encounters")
     manager = MultiTableProjectManager(project_root=tmp_path, example_id="example_a")
 
     configs = utils.load_error_configs(manager)
 
-    assert sorted(configs) == ["drop_encounter_name", "drop_patient_name"]
-    assert utils.corruption_labels(manager) == ["drop_encounter_name", "drop_patient_name"]
-    assert configs["drop_patient_name"]["expected_current_outcome"] == {
-        "patient_summary": "execution_failure",
-    }
+    assert sorted(configs) == ["10-1", "2-1"]
+    assert utils.corruption_labels(manager) == ["2-1", "10-1"]  # group order, not string order
+    assert configs["10-1"]["expected_current_outcome"] == "unsafe"
+
+
+def test_config_label_needs_the_error_group_layout(tmp_path):
+    assert utils.config_label(tmp_path / "errors" / "error-group-12" / "project_3.yaml") == "12-3"
+    with pytest.raises(ValueError, match="error-group"):
+        utils.config_label(tmp_path / "errors" / "project_3.yaml")
 
 
 def test_load_error_config_derives_label_from_filename(tmp_path):
-    # eid-synth id style: identity is the file stem, no internal label field.
+    # eid-synth id style: identity is the path, no internal label field.
     example_root = write_example(tmp_path)
-    errors_dir = example_root / "errors"
-    errors_dir.mkdir()
-    (errors_dir / "project_0.yaml").write_text(
+    errors_dir = example_root / "errors" / "error-group-4"
+    errors_dir.mkdir(parents=True)
+    (errors_dir / "project_1.yaml").write_text(
         """
 description: No internal label field.
 table: patients
@@ -142,5 +146,5 @@ corruption:
 
     configs = utils.load_error_configs(manager)
 
-    assert sorted(configs) == ["project_0"]
-    assert configs["project_0"]["label"] == "project_0"
+    assert sorted(configs) == ["4-1"]
+    assert configs["4-1"]["label"] == "4-1"

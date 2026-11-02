@@ -105,7 +105,6 @@ class GEPAEngine(Generic[DataInst, Trajectory, RolloutOutput]):
             valset_score=valset_score,
             new_program_idx=new_program_idx,
             valset_subscores=valset_subscores,
-            # new_instruction="Merged or Reflective program",
             use_wandb=self.use_wandb,
             linear_pareto_front_program_idx=linear_pareto_front_program_idx,
         )

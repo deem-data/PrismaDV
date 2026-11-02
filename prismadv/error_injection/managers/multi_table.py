@@ -53,6 +53,10 @@ class MultiTableErrorInjectionManager(AbstractErrorInjectionManager):
                 raise ValueError(f"unknown table for corruption: {table_spec.table_name}")
             table = post_corruption_tables[table_spec.table_name]
             for corruption in table_spec.corruptions:
+                # Re-seed right before the transform so the result does not
+                # depend on what else drew from the global RNGs earlier.
+                if hasattr(corruption, "seed"):
+                    corruption.seed(getattr(corruption, "random_state", None))
                 table = corruption.transform(table)
             post_corruption_tables[table_spec.table_name] = table
 

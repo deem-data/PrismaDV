@@ -2,8 +2,8 @@ import argparse
 
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
-from workflow.e2e_evaluation.code_execution.run_general_python_code import run_general_python_code
-from workflow.e2e_evaluation.code_execution.run_sql_code import run_general_sql_code
+from workflow_prismadv.eid_bench_experiments.code_execution.run_general_python_code import run_general_python_code
+from workflow_prismadv.eid_bench_experiments.code_execution.run_sql_code import run_general_sql_code
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run code execution on corrupted data")
@@ -12,6 +12,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Dataset name to process (e.g., 'imdb', 'students'). If not provided, processes all datasets."
+    )
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Only execute this processed-data label. Default: every label."
     )
     args = parser.parse_args()
 
@@ -24,6 +30,8 @@ if __name__ == "__main__":
         for subtask in available_subtasks:
             processed_data_labels = project_manager.get_available_processed_data_labels_for_subtask(subtask)
             for processed_data_label in processed_data_labels:
+                if args.label is not None and str(processed_data_label) != args.label:
+                    continue
                 if subtask == "general_task" or subtask == "info" or subtask in ["classification", "regression"]:
                     run_general_python_code(
                         dataset_name=dataset_name,

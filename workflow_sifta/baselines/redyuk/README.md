@@ -13,54 +13,30 @@ kNN novelty detector** (mean distance to `k=5` neighbours, `contamination=1%`,
 Euclidean, MinMax-scaled) on the statistics of previously-observed batches. A new
 batch is flagged **reject** if it is an outlier, **pass** otherwise.
 
-## Scope: New Data Batches only
+In the SIFTA table this is the **stats-novelty** row (program `stats_novelty`). It is
+not the MMD stats-novelty row of the EIDBench tables.
 
-This method is **purely task-agnostic** — it models the *data distribution* of past
-batches and never sees task code or task outcomes. It therefore requires
-previously-observed batches of the same dataset to define "acceptable", which only
-exists in the **New Data Batches** scenario (`test_1_cross_new_data`). It is
-**N/A** for *New Tasks* and *New Data Batches + New Tasks*.
+## Scope: tests 1 and 3
 
-The summary it writes populates only the `test_1_cross_new_data` block; the other
-two are marked `"N/A"`.
+The method is task-agnostic: it never sees task code or task outcomes. Its verdict on
+a batch counts for every task, so it is scored on test 1 (train + eval scripts, test
+labels) and test 3 (test scripts, test labels). Test 2 is N/A, because its labels are
+the batches the detector is fit on.
 
-## Protocol (mirrors the SIFTA `test_1` split)
+## Protocol (split file `benchmarks/EIDBench-synth/<dataset>/splits/split<N>.yaml`)
 
-- Batches (`processed_data_label`) are split 1:1 into **D_train** (observed) and
-  **D_new** (held-out). Reuse a SIFTA run's exact splits with
-  `--split_strategy_from`, or generate them with the SIFTA default seed/ratios.
-- **Train:** fit the detector on the feature vectors of the D_train batches' actually
-  ingested data (`files_with_corrupted_new_data/new_data.csv`), all treated as
-  "acceptable" (their safety labels are **not** used).
-- **Test:** one pass/reject decision per D_new batch.
-- The decision is broadcast across every task in (T_train ∪ T_val) =
-  `train_eval_script_name_list` to form the same `(task, batch)` cells SIFTA is
-  scored on (the decision is identical regardless of task).
-- **Metric:** F1 with positive class = "unsafe" (reject), against ground-truth
-  `corrupted_data_is_safe` per cell — identical to the other baselines.
+- **Fit:** on the profiles of the corrupted batches of the `train_eval_labels`
+  (`files_with_corrupted_new_data/new_data.csv`), all treated as acceptable. Safety
+  labels are **not** used. The clean batch is not in the fit set.
+- **Test:** one pass/reject verdict per `test_labels` batch, written per label as
+  `validation_results_on_corrupted_test_data__sifta_stats_novelty[--r<N>].yaml`.
+- **Metric:** stage 4 (`workflow_sifta._4_scoring`) scores the verdicts with the same
+  macro F1 as the other rows; split N is replicate N.
 
 ## Usage
 
 ```bash
-poetry install --with baseline   # pyod + hyperloglog (optional group)
-
-# Reuse a SIFTA reference run's splits (recommended for a fair comparison):
-poetry run python workflow_sifta/baselines/redyuk/run.py \
-    --dataset_name hr_analytics --split_strategy_from run_20260111_155751
-
-# Or generate splits from scratch with the SIFTA defaults (seed=1, 50/50 labels):
-poetry run python workflow_sifta/baselines/redyuk/run.py --dataset_name hr_analytics
+SPARK_VERSION=3.5 uv run python -m workflow_sifta.baselines.redyuk.run --datasets students --splits 1 2 3
 ```
 
-Results are written to `optimization_runs/baseline_redyuk_run_<timestamp>/summary.json`.
-
-## Implementation notes / deviations from the original `demo.py`
-
-- The statistics + kNN detector are vendored faithfully in
-  [`data_profiler.py`](data_profiler.py). `dabl` is dropped (computed but unused in
-  the original `compute_for`), and `nltk.util.ngrams` is replaced by an identical
-  inline helper.
-- The per-column metric set ("schema") is fixed from a clean reference batch so every
-  batch yields a constant-length vector even when pandas infers a corrupted column's
-  dtype differently. Numeric columns are coerced with `pd.to_numeric(errors="coerce")`
-  and aggregated with NaN-aware reducers.
+A summary per split is written to `optimization_runs/stats_novelty/<dataset>_split<N>.json`.

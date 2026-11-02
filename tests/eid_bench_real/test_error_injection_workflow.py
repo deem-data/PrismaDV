@@ -33,23 +33,22 @@ def write_error_config(
     table: str = "patients",
     columns: list[str] | None = None,
 ) -> None:
-    errors_dir = example_root / "errors"
+    group, number = label.split("-")
+    errors_dir = example_root / "errors" / f"error-group-{group}"
     errors_dir.mkdir(parents=True, exist_ok=True)
     columns = ["name"] if columns is None else columns
     config = {
-        "label": label,
         "description": f"Drop {columns} from {table}.",
         "table": table,
         "corruption": {
             "class": "ColumnDropping",
             "columns": columns,
+            "params": {"random_state": 42},
         },
         "report_metrics": ["missing_columns"],
-        "expected_current_outcome": {
-            "patient_summary": "execution_failure",
-        },
+        "expected_current_outcome": "unsafe",
     }
-    (errors_dir / f"{label}.yaml").write_text(yaml.dump(config, sort_keys=False), encoding="utf-8")
+    (errors_dir / f"project_{number}.yaml").write_text(yaml.dump(config, sort_keys=False), encoding="utf-8")
 
 
 def run_error_injection(tmp_path: Path, monkeypatch, *extra_args: str) -> None:
@@ -68,11 +67,11 @@ def run_error_injection(tmp_path: Path, monkeypatch, *extra_args: str) -> None:
 def test_error_injection_reads_benchmark_local_errors_by_default(tmp_path, monkeypatch):
     example_root = write_example(tmp_path)
     write_clean_tables(example_root)
-    write_error_config(example_root, "drop_patient_name")
+    write_error_config(example_root, "18-1")
 
-    run_error_injection(tmp_path, monkeypatch, "--label", "drop_patient_name")
+    run_error_injection(tmp_path, monkeypatch, "--label", "18-1")
 
-    output_root = example_root / "files" / "corrupted" / "drop_patient_name"
+    output_root = example_root / "files" / "corrupted" / "18-1"
     patients_table = pd.read_csv(output_root / "tables" / "patients.csv")
     patients_input = pd.read_csv(output_root / "input" / "patients.csv")
     encounters_table = pd.read_csv(output_root / "tables" / "encounters.csv")
@@ -82,35 +81,35 @@ def test_error_injection_reads_benchmark_local_errors_by_default(tmp_path, monke
     assert "name" not in patients_input.columns
     assert list(encounters_table.columns) == ["Id", "PATIENT"]
     assert (output_root / "corruption_source.yaml").exists()
-    assert report["label"] == "drop_patient_name"
+    assert report["label"] == "18-1"
     assert report["table"] == "patients"
     assert report["columns"] == ["name"]
     assert report["missing_columns"] == ["name"]
-    assert report["expected_current_outcome"] == {"patient_summary": "execution_failure"}
+    assert report["expected_current_outcome"] == "unsafe"
 
 
 def test_error_injection_label_filters_configs(tmp_path, monkeypatch):
     example_root = write_example(tmp_path)
     write_clean_tables(example_root)
-    write_error_config(example_root, "drop_patient_name")
-    write_error_config(example_root, "drop_encounter_patient", table="encounters", columns=["PATIENT"])
+    write_error_config(example_root, "18-1")
+    write_error_config(example_root, "18-2", table="encounters", columns=["PATIENT"])
 
-    run_error_injection(tmp_path, monkeypatch, "--label", "drop_encounter_patient")
+    run_error_injection(tmp_path, monkeypatch, "--label", "18-2")
 
     corrupted_root = example_root / "files" / "corrupted"
-    assert (corrupted_root / "drop_encounter_patient" / "tables" / "encounters.csv").exists()
-    assert not (corrupted_root / "drop_patient_name").exists()
+    assert (corrupted_root / "18-2" / "tables" / "encounters.csv").exists()
+    assert not (corrupted_root / "18-1").exists()
     report = json.loads(
-        (corrupted_root / "drop_encounter_patient" / "corruption_report.json").read_text(encoding="utf-8")
+        (corrupted_root / "18-2" / "corruption_report.json").read_text(encoding="utf-8")
     )
-    assert report["label"] == "drop_encounter_patient"
+    assert report["label"] == "18-2"
     assert report["missing_columns"] == ["PATIENT"]
 
 
 def test_error_injection_reports_unknown_label(tmp_path, monkeypatch):
     example_root = write_example(tmp_path)
     write_clean_tables(example_root)
-    write_error_config(example_root, "drop_patient_name")
+    write_error_config(example_root, "18-1")
 
     monkeypatch.setattr(
         sys,
@@ -122,7 +121,7 @@ def test_error_injection_reports_unknown_label(tmp_path, monkeypatch):
             "--example-id",
             "example_a",
             "--label",
-            "not_declared",
+            "9-9",
         ],
     )
 
@@ -133,10 +132,9 @@ def test_error_injection_reports_unknown_label(tmp_path, monkeypatch):
 def test_error_injection_reports_unexpected_value_tuples(tmp_path, monkeypatch):
     example_root = write_example(tmp_path)
     write_clean_tables(example_root)
-    errors_dir = example_root / "errors"
+    errors_dir = example_root / "errors" / "error-group-14"
     errors_dir.mkdir(parents=True, exist_ok=True)
     config = {
-        "label": "patient_id_name_mismatch",
         "description": "Pair valid patient IDs with the wrong names.",
         "table": "patients",
         "corruption": {
@@ -150,18 +148,16 @@ def test_error_injection_reports_unexpected_value_tuples(tmp_path, monkeypatch):
             },
         },
         "report_metrics": ["unexpected_value_tuple_rows"],
-        "expected_current_outcome": {
-            "patient_summary": "safe",
-        },
+        "expected_current_outcome": "safe",
     }
-    (errors_dir / "patient_id_name_mismatch.yaml").write_text(
+    (errors_dir / "project_1.yaml").write_text(
         yaml.dump(config, sort_keys=False),
         encoding="utf-8",
     )
 
-    run_error_injection(tmp_path, monkeypatch, "--label", "patient_id_name_mismatch")
+    run_error_injection(tmp_path, monkeypatch, "--label", "14-1")
 
-    output_root = example_root / "files" / "corrupted" / "patient_id_name_mismatch"
+    output_root = example_root / "files" / "corrupted" / "14-1"
     report = json.loads((output_root / "corruption_report.json").read_text(encoding="utf-8"))
     assert report["unexpected_value_tuple_rows"] == 2
 
@@ -170,7 +166,7 @@ def test_error_injection_fails_clearly_for_missing_clean_table(tmp_path, monkeyp
     example_root = write_example(tmp_path)
     write_clean_tables(example_root)
     (example_root / "files" / "clean" / "tables" / "encounters.csv").unlink()
-    write_error_config(example_root, "drop_patient_name")
+    write_error_config(example_root, "18-1")
 
     monkeypatch.setattr(
         sys,
@@ -182,7 +178,7 @@ def test_error_injection_fails_clearly_for_missing_clean_table(tmp_path, monkeyp
             "--example-id",
             "example_a",
             "--label",
-            "drop_patient_name",
+            "18-1",
         ],
     )
 

@@ -1,11 +1,12 @@
-"""Few-shot LLM constraint generation"""
-import oyaml as yaml
-import pandas as pd
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import ChatPromptTemplate
+"""Few-shot LLM constraint generation on ICDBench.
 
-from prismadv.llm_backend.entry import get_langchain_model
-from workflow_prismadv.icd_bench_experiments import ALL_EVALUATION_CASES, find_fewshot_prompt_constraints_output_path
+    python -m workflow_prismadv.icd_bench_experiments.generation_fewshot --model_name gpt-6-sol-medium
+"""
+import os
+import sys
+
+from workflow_prismadv.icd_bench_experiments import find_fewshot_prompt_constraints_output_path
+from workflow_prismadv.icd_bench_experiments.llm_baseline import run_generation
 
 FEW_SHOT_PROMPT = """
 Write a pydeequ data unit test for a dataset consumed by the following program.
@@ -88,37 +89,7 @@ Here is an example output:
 }}    
 """
 
-models = ["gpt-4.1-nano", "gpt-4o-mini", "gpt-4.1", "gpt-5-mini", "gpt-5", "gemini-2.5-flash", "gemini-2.5-pro"]
-
-for model_name in models:
-    for evaluation_case in ALL_EVALUATION_CASES:
-        constraints_output_path = find_fewshot_prompt_constraints_output_path(evaluation_case, model_name)
-
-        if constraints_output_path.exists():
-            print(f"Constraints already exist at {constraints_output_path}. Skipping generation.")
-            continue
-
-        prompt = ChatPromptTemplate.from_template(FEW_SHOT_PROMPT)
-        llm = get_langchain_model(model_name=model_name, temperature=0.6)
-        parser = JsonOutputParser()
-
-        chain = prompt | llm | parser
-
-        data_sample = pd.DataFrame(evaluation_case.sample_data()).head(20).to_string(index=False)
-
-        try:
-            result = chain.invoke({
-                "data_sample": data_sample,
-                "code": evaluation_case.downstream_code(),
-                "target_column": evaluation_case.target_column()
-            })
-        except Exception as e:
-            print(
-                f"Error generating constraints for {evaluation_case.__class__.__module__}.{evaluation_case.__class__.__name__}: {e}")
-            result = {"constraints": []}
-
-        print(result)
-
-        with open(constraints_output_path, "w") as f:
-            yaml.dump(result, f, default_flow_style=False, sort_keys=False)
-            print(f"... constraints saved to {constraints_output_path}")
+if __name__ == "__main__":
+    code = run_generation("fewshot_prompt", FEW_SHOT_PROMPT, find_fewshot_prompt_constraints_output_path)
+    sys.stdout.flush()
+    os._exit(code)

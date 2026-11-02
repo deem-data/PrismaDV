@@ -9,22 +9,36 @@ import dspy
 
 from prismadv.ir_translator.deequ_constraints.function_manager import DeequFunctionManager
 
+BASIC_INSTRUCTIONS = {
+    "dataflow_inspector": (
+        "List every line of the code that touches the target column: reads it, writes it, filters on it, "
+        "transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.\n\n"
+        'Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }'
+    ),
+    "assumption_generation": (
+        "Code makes assumptions about its input data, often without stating them. For example, fillna on a "
+        "column means the column may contain nulls, and an assert sets a bound the data must meet. From the "
+        "code that uses the target column and the task description, write these assumptions as statements "
+        "about the input data that a Deequ check can test.\n\n"
+        'Output only valid JSON (numbers without leading zeros): '
+        '{ "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }'
+    ),
+    "ir_generation": (
+        "Translate the assumptions into PyDeequ checks. Set level \"error\" if data that fails the check would "
+        "crash the code, and \"warning\" if the code still runs but the data quality is not ideal. Link each "
+        "check to the indices (from 0) of the assumptions it tests.\n\n"
+        'Output: {"constraint_code": [{"suggestion": PyDeequ code (starting with "." or a function), '
+        '"level": "warning"|"error", "linked assumptions": [indices]}, ...]}\n\n'
+        "Available Row-Level Functions:\n"
+        + "\n".join(DeequFunctionManager().get_constraints(is_row_level=True))
+        + "\n\nAvailable Aggregate-Level Functions:\n"
+        + "\n".join(DeequFunctionManager().get_constraints(is_row_level=False))
+    ),
+}
+
 
 class SingleColumnCodeDataFlowInspectorSig(dspy.Signature):
-    """Identify lines where a target column is used in a code snippet.
-
-    Inputs:
-    - code_script: The code snippet to analyze.
-    - target_column: The column name to track.
-    - sink_variable: Optional sink variable to focus on. If empty, consider the whole snippet.
-
-    Output:
-    - sources: Return only valid JSON: { "sources": [{ "start_line": int, "end_line": int }, ... ] }.
-      Use exact 1-based line numbers from the snippet.
-      Include every line that reads, writes, filters, transforms, merges, or passes through the target column.
-      Merge adjacent lines into one range; non-adjacent lines must be separate ranges.
-      If sink_variable is not empty, include only lines that ultimately affect that sink.
-    """
+    __doc__ = BASIC_INSTRUCTIONS["dataflow_inspector"]
     code_script: str = dspy.InputField()
     target_column: str = dspy.InputField()
     sink_variable: str = dspy.InputField()
@@ -32,19 +46,7 @@ class SingleColumnCodeDataFlowInspectorSig(dspy.Signature):
 
 
 class AssumptionGenerationSig(dspy.Signature):
-    """Generate assumptions for the target column.
-
-    Inputs:
-    - target_column: The name of the target column.
-    - target_column_desc: Description of the target column.
-    - focused_code: The relevant code snippet focusing on the target column.
-    - downstream_task_description: Description of the downstream task.
-
-    Output:
-    - assumptions: List of assumption objects: { "text": str, "sources": [{ "start_line": int, "end_line": int }] }.
-      Returned inside: { "assumptions": [...] }.
-      JSON numbers must not have leading zeros.
-    """
+    __doc__ = BASIC_INSTRUCTIONS["assumption_generation"]
     target_column: str = dspy.InputField()
     target_column_desc: str = dspy.InputField()
     focused_code: str = dspy.InputField()
@@ -54,24 +56,7 @@ class AssumptionGenerationSig(dspy.Signature):
 
 
 class IRGenerationSig(dspy.Signature):
-    __doc__ = f"""Generate PyDeequ validation code from assumptions and requirements.
-
-    Inputs:
-    - target_column: The name of the target column.
-    - target_column_desc: Description of the target column.
-    - code_snippet: The code snippet containing column usage.
-    - downstream_task_description: Description of the downstream task.
-    - assumptions: The assumptions generated for this column.
-
-    Output:
-    - constraint_code: List of constraint objects: {{"suggestion": PyDeequ code (starting with "." or a function), "level": "warning"|"error", "linked assumptions": [indices]}}.
-
-    Available Row-Level Functions:
-    {chr(10).join(DeequFunctionManager().get_constraints(is_row_level=True))}
-
-    Available Aggregate-Level Functions:
-    {chr(10).join(DeequFunctionManager().get_constraints(is_row_level=False))}
-    """
+    __doc__ = BASIC_INSTRUCTIONS["ir_generation"]
     target_column: str = dspy.InputField()
     target_column_desc: str = dspy.InputField()
     code_snippet: str = dspy.InputField()

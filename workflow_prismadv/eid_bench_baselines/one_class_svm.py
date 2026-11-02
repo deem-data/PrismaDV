@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 import oyaml as yaml
 
 from prismadv.data_models import Constraints, ValidationResults
 from prismadv.loader import FileLoader
+from prismadv.project_manager import is_clean_label
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.utils import get_project_root
 from workflow_prismadv.task_agnostic_baselines.novelty_models import (
@@ -57,18 +59,25 @@ def run_dataset(dataset_name: str, *, overwrite: bool = False) -> None:
             print(f"Skipping invalid subtask '{subtask_name}' for '{dataset_name}': {exc}")
             continue
 
+        # The detector is fitted on the observed half, never on the batch it will
+        # be scored against. `new_data` is the evaluation set: fitting on its
+        # clean version would hand this row the pre-corruption distribution of
+        # its own test data, which no other baseline gets.
+        fit_started = time.perf_counter()
         train_data = FileLoader.load_csv(
-            project_manager.get_new_test_data_path(subtask_name, CLEAN_LABEL, clean=True)
+            project_manager.get_observed_data_path(subtask_name, CLEAN_LABEL)
         )
         detector = learn_one_class_svm(train_data)
+        fit_s = time.perf_counter() - fit_started
+        # One marker per dataset: the model lives in memory, the verdicts in the validation results.
+        constraint_path = project_manager.get_task_agnostic_constraint_path(subtask_name) / CONSTRAINT_FILENAME
+        constraint_path.parent.mkdir(parents=True, exist_ok=True)
+        Constraints().save_to_yaml(constraint_path)
 
         for processed_data_label in project_manager.get_available_processed_data_labels_for_subtask(subtask_name):
-            if int(processed_data_label) == 0:
+            if is_clean_label(processed_data_label):
                 continue
 
-            constraint_path = project_manager.get_task_agnostic_constraint_path(
-                subtask_name, processed_data_label
-            ) / CONSTRAINT_FILENAME
             validation_dir = project_manager.get_task_agnostic_constraints_validation_path(
                 subtask_name, processed_data_label
             )
@@ -80,15 +89,18 @@ def run_dataset(dataset_name: str, *, overwrite: bool = False) -> None:
                 print(f"  [{dataset_name}/{subtask_name}/{processed_data_label}] exists, skipping.")
                 continue
 
+            started = time.perf_counter()
             test_data = FileLoader.load_csv(
                 project_manager.get_new_test_data_path(subtask_name, processed_data_label, clean=False)
             )
             rejected = should_be_rejected(detector, test_data)
+            result = _validation_result(rejected)
+            # fit_s is the one-off fit on the observed half, shared by every label of the dataset.
+            result.validation_summary = {"elapsed_s": round(time.perf_counter() - started, 3),
+                                         "fit_s": round(fit_s, 3)}
 
-            constraint_path.parent.mkdir(parents=True, exist_ok=True)
-            Constraints().save_to_yaml(constraint_path)
             validation_dir.mkdir(parents=True, exist_ok=True)
-            _validation_result(rejected).save_to_yaml(validation_path)
+            result.save_to_yaml(validation_path)
             print(
                 f"  [{dataset_name}/{subtask_name}/{processed_data_label}] "
                 f"rejected={rejected} -> {validation_path}"

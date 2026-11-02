@@ -82,7 +82,7 @@ class ConstraintGenerationModule(dspy.Module):
 
         # Convert assumption dicts to AssumptionEntry objects
         assumption_entries = []
-        for assumption_dict in assumption_result.assumptions:
+        for assumption_dict in assumption_result.assumptions or []:     # the LLM can answer null: no assumptions
             if not isinstance(assumption_dict, dict) or not assumption_dict or 'text' not in assumption_dict:
                 continue
             try:
@@ -101,10 +101,10 @@ class ConstraintGenerationModule(dspy.Module):
 
         # 6) Process constraint_code and link assumptions
         constraint_code = constraint_result.constraint_code
-        raw_constraints = [d for d in constraint_code if "suggestion" in d.keys()]
+        raw_constraints = [d for d in constraint_code or [] if isinstance(d, dict) and "suggestion" in d]
         code_entries = []
         for constraint_dict in raw_constraints:
-            linked_indices = constraint_dict.get("linked assumptions", [])
+            linked_indices = constraint_dict.get("linked assumptions") or []
             source_assumptions = [
                 assumption_entries[j].uid for j in linked_indices
                 if 0 <= j < len(assumption_entries)
@@ -186,7 +186,7 @@ class HumanDesignedConstraintGenerationModule(dspy.Module):
 
         # Convert assumption dicts to AssumptionEntry objects
         assumption_entries = []
-        for assumption_dict in assumption_result.assumptions:
+        for assumption_dict in assumption_result.assumptions or []:     # the LLM can answer null: no assumptions
             if not isinstance(assumption_dict, dict) or not assumption_dict or 'text' not in assumption_dict:
                 continue
             try:
@@ -205,10 +205,10 @@ class HumanDesignedConstraintGenerationModule(dspy.Module):
 
         # 6) Process constraint_code and link assumptions
         constraint_code = constraint_result.constraint_code
-        raw_constraints = [d for d in constraint_code if "suggestion" in d.keys()]
+        raw_constraints = [d for d in constraint_code or [] if isinstance(d, dict) and "suggestion" in d]
         code_entries = []
         for constraint_dict in raw_constraints:
-            linked_indices = constraint_dict.get("linked assumptions", [])
+            linked_indices = constraint_dict.get("linked assumptions") or []
             source_assumptions = [
                 assumption_entries[j].uid for j in linked_indices
                 if 0 <= j < len(assumption_entries)

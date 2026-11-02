@@ -163,13 +163,13 @@ class AbstractProjectManager(ABC):
 
     # ========== Constraint Methods (delegated to ConstraintManager) ==========
     
-    def get_task_agnostic_constraint_path(self, subtask_name: str, processed_data_label: str) -> Path:
-        """Get the base constraints directory path (task-agnostic)."""
-        return self._constraint_manager.get_task_agnostic_constraint_path(subtask_name, processed_data_label)
+    def get_task_agnostic_constraint_path(self, subtask_name: str) -> Path:
+        """Label-independent directory holding the task-agnostic baselines' artifacts."""
+        return self._constraint_manager.get_task_agnostic_constraint_path(subtask_name)
 
-    def get_constraints_path(self, subtask_name: str, processed_data_label: str, script_name: str) -> Path:
-        """Get the constraints path for a specific script."""
-        return self._constraint_manager.get_constraints_path(subtask_name, processed_data_label, script_name)
+    def get_source_constraints_path(self, subtask_name: str, script_name: str) -> Path:
+        """Label-independent directory holding a script's generated constraints."""
+        return self._constraint_manager.get_source_constraints_path(subtask_name, script_name)
 
     def get_constraints_validation_path(self, subtask_name: str, processed_data_label: str, 
                                        script_name: str) -> Path:

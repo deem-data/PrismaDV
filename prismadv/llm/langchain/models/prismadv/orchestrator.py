@@ -66,7 +66,7 @@ class PrismaLangChainDV(AbstractPrismaLangChainDV):
         column_correlation_data_flow_locations = {}
         column_desc_dict = input_variables["column_desc_dict"]
         input_variables[
-            "downstream_task_description"] = self.downstream_task_description  # TODO: generate it before invoke
+            "downstream_task_description"] = self.downstream_task_description
         columns_to_consider = run_with_cost(
             "column_access_detection",
             lambda: column_access.basic_column_access_detection(self.runtime, input_variables),
@@ -153,7 +153,7 @@ class PrismaLangChainDV(AbstractPrismaLangChainDV):
         all_codes = {}
         column_correlation_data_flow_locations = {}
         input_variables[
-            "downstream_task_description"] = self.downstream_task_description  # TODO: generate it before invoke
+            "downstream_task_description"] = self.downstream_task_description
         column_desc_dict = input_variables["column_desc_dict"]
         columns_to_consider = run_with_cost(
             "column_access_detection",

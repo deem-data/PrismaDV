@@ -16,7 +16,7 @@ from prismadv.llm_gen.langchain.prompts.data_verification import (
 from prismadv.project_manager.manager.base import ProjectManager
 from prismadv.runtime_environments import PythonExecutor
 from prismadv.utils import get_project_root
-from workflow.e2e_generation.utils import process_bad_assertions
+from workflow_prismadv.eid_bench_building.utils import process_bad_assertions
 
 loose_or_tight_detection_prompt = ChatPromptTemplate(
     [

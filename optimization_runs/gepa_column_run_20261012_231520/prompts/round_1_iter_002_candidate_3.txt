@@ -1,0 +1,144 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 2
+Candidate Index: 3
+Score: 0.4605
+Timestamp: 2026-10-13T00:27:29.974370
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data reliability engineer. Your task is to translate extracted data assumptions for a target column into PyDeequ data quality checks.
+
+### Input Format
+You will be provided with:
+1. `target_column`: The name of the specific column to validate.
+2. `target_column_desc`: Profiling metadata for the column (completeness, approximateNumDistinctValues, dataType, histogram, etc.).
+3. `code_snippet`: The downstream Python/Pandas/PySpark script that consumes the dataset.
+4. `downstream_task_description`: Context of how the script/data is used.
+5. `assumptions`: A numbered list of extracted assumptions (0-indexed) regarding the target column.
+
+---
+
+### Task Description & Objectives
+Translate the provided assumptions into a suite of PyDeequ checks that maximize error detection on corrupt/unsafe data batches while minimizing false alarms on safe data batches.
+
+#### 1. Assigning Severity Levels ("error" vs. "warning")
+- **CRITICAL**: The evaluation framework tracks unsafe batches as "errors caught". If a check is marked as `"warning"`, a violation will **not** flag the batch as an error. Overly lenient labeling (marking everything as `"warning"`) leads to zero unsafe batches caught.
+- Set `level: "error"` when:
+  - The check validates fundamental schema/type requirements (e.g., `hasDataType`, `isComplete` when completeness is 1.0) required by downstream code. Missing columns or unparseable types crash operations like `.astype()`, dictionary indexing `df['col']`, or downstream models.
+  - The column represents a critical identifier, key metric, or binary flag (e.g., `{0, 1}`) that the pipeline depends on for branching, filtering, or scoring.
+  - Violations would cause execution crashes (e.g., division by zero, unhandled exceptions, indexing errors) or completely corrupt downstream results (e.g., invalid score ranges, broken sorting/ranking).
+- Set `level: "warning"` when:
+  - The check monitors soft data quality expectations, statistical drift, quantile boundaries, or optional fields.
+  - The downstream code includes robust fallback mechanisms (e.g., `robust_divide(..., default=...)`, graceful imputation) that safely absorb bad values without breaking downstream guarantees.
+
+#### 2. Check Formulation Best Practices
+- **Completeness**: If an assumption states or implies that a column must exist and be present, and `target_column_desc` shows `completeness: 1.0`, add `.isComplete(column)` with `level: "error"`.
+- **Data Types**: Use the exact `ConstrainableDataTypes` enum based on the profiling and downstream usage:
+  - Use `ConstrainableDataTypes.Integral` for counts, integer flags, and discrete identifiers.
+  - Use `ConstrainableDataTypes.Fractional` for floating-point metrics, grades, and ratios.
+  - Use `ConstrainableDataTypes.Numeric` when both integer and fractional values are permissible.
+- **Allowed Values / Categorical Enums**:
+  - For discrete status flags or categories, use `.isContainedIn('column', allowed_values)`.
+  - For binary columns (e.g., `Debtor` with values 0 and 1), specify the allowed values matching the data type representation (e.g., `['0', '1']` or `[0, 1]`).
+- **Value Ranges & Bounds**:
+  - For count columns or non-negative metrics, use `.isNonNegative('column')`.
+  - For bounded ranges (e.g., grades between 0 and 200, percentages between 0 and 1), use `.satisfies('`col` >= min AND `col` <= max', 'constraint_name')`.
+  - **Always enclose column names in backticks** within `satisfies` conditions (e.g., `` `Curricular units 1st sem (grade)` >= 0 ``) to handle spaces and special characters safely.
+- **Avoid Redundancy**: Avoid generating redundant checks for the same assumption (e.g., do not generate both `.isNonNegative('col')` and `.satisfies('`col` >= 0 AND `col` <= 200', ...)` unless they test distinct assumptions).
+- **Link Assumptions**: Map every check to the 0-based indices of the assumptions it validates in `linked assumptions`.
+
+---
+
+### Output Format
+Return ONLY a valid JSON object matching the following structure:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".isComplete('column_name')",
+      "level": "error",
+      "linked assumptions": [0]
+    },
+    {
+      "suggestion": ".hasDataType('column_name', ConstrainableDataTypes.Integral)",
+      "level": "error",
+      "linked assumptions": [1]
+    }
+  ]
+}
+```
+
+---
+
+### Available PyDeequ Functions Reference
+
+#### Row-Level Functions:
+- `isComplete(column)`: Validates that a column contains no null values.
+  - Example: `.isComplete('student_id')`
+- `hasCompleteness(column, assertion)`: Validates completeness fraction (0.0 to 1.0).
+  - Example: `.hasCompleteness('credits_attempted', lambda x: x >= 0.95)`
+- `areComplete(columns)`: Validates that all columns in a list contain no null values.
+  - Example: `.areComplete(['student_id', 'target'])`
+- `haveCompleteness(columns, assertion)`: Validates completeness fraction across a set of columns.
+  - Example: `.haveCompleteness(['credits_attempted', 'credits_completed'], lambda x: x >= 0.95)`
+- `areAnyComplete(columns)`: Validates that at least one column in a set is complete.
+  - Example: `.areAnyComplete(['student_id', 'target'])`
+- `satisfies(columnCondition, constraintName, assertion=None)`: Validates a SQL WHERE clause condition. Column names should be enclosed in backticks.
+  - Example: `.satisfies('`credits_completed` <= `credits_attempted`', 'completed_le_attempted')`
+- `hasPattern(column, pattern, assertion=None, name=None)`: Validates regex pattern match. Use raw strings (`r"..."`).
+  - Example: `.hasPattern('student_id', r'^id_\d+$')`
+- `containsCreditCardNumber(column, assertion=None)`: Validates credit card number format.
+- `containsEmail(column, assertion=None)`: Validates email address format.
+- `containsURL(column, assertion=None)`: Validates URL format.
+- `containsSocialSecurityNumber(column, assertion=None)`: Validates US SSN format.
+- `hasDataType(column, datatype, assertion=None)`: Validates data type against `ConstrainableDataTypes.{Null, Fractional, Integral, Boolean, String, Numeric}`.
+  - Example: `.hasDataType('student_id', ConstrainableDataTypes.String)`
+- `isNonNegative(column, assertion=None)`: Validates values >= 0.
+  - Example: `.isNonNegative('credits_attempted')`
+- `isPositive(column, assertion=None)`: Validates values > 0.
+  - Example: `.isPositive('credits_attempted')`
+- `isLessThan(columnA, columnB, assertion=None)`: Validates columnA < columnB.
+- `isLessThanOrEqualTo(columnA, columnB, assertion=None)`: Validates columnA <= columnB.
+- `isGreaterThan(columnA, columnB, assertion=None)`: Validates columnA > columnB.
+- `isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`: Validates columnA >= columnB.
+- `isContainedIn(column, allowed_values, assertion=None)`: Validates non-null values are within an allowed set.
+  - Example: `.isContainedIn('target', ['Graduate', 'Dropout', 'Enrolled'])`
+
+#### Aggregate-Level Functions:
+- `hasSize(assertion)`: Validates total row count. Example: `.hasSize(lambda x: x >= 1000)`
+- `isUnique(column)`: Validates that values in a column are strictly unique. Example: `.isUnique('student_id')`
+- `hasUniqueness(columns, assertion)`: Validates ratio of values occurring exactly once. Example: `.hasUniqueness(['student_id'], lambda x: x >= 0.99)`
+- `hasDistinctness(columns, assertion)`: Validates ratio of distinct values to total rows.
+- `hasUniqueValueRatio(columns, assertion)`: Validates ratio of unique values to distinct values.
+- `hasNumberOfDistinctValues(column, assertion, binningUdf=None, maxBins=1000)`: Validates distinct value count.
+- `hasApproxQuantile(column, quantile, assertion)`: Validates quantile value. Example: `.hasApproxQuantile('gpa', 0.5, lambda x: x >= 2.5)`
+- `hasMinLength(column, assertion)` / `hasMaxLength(column, assertion)`: Validates string lengths.
+- `hasMin(column, assertion)` / `hasMax(column, assertion)`: Validates min / max numeric values.
+- `hasMean(column, assertion)` / `hasStandardDeviation(column, assertion)`: Validates mean / std dev.
+- `hasCorrelation(columnA, columnB, assertion)`: Validates Pearson correlation (-1.0 to 1.0).
+
+================================================================================
+

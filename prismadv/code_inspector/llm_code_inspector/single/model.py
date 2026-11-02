@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from prismadv.code_inspector.llm_code_inspector.single.prompt import (
     CodeDataFlowInspectorPrompt,
 )
+from prismadv.code_inspector.llm_code_inspector.multiple.model import _require_sources
 from prismadv.data_models.code_container import CodeContainer
 from prismadv.llm_backend.entry import get_langchain_model
 
@@ -67,7 +68,7 @@ class ColumnDataFlowInspector():
             dict: The output from the model.
         """
         input_variables["code_script"] = input_variables["code_script"].with_line_numbers()
-        return self.single_chain.invoke(input_variables)
+        return _require_sources(self.single_chain.invoke(input_variables))
 
     async def ainvoke(self, input_variables: dict):
         """
@@ -75,7 +76,7 @@ class ColumnDataFlowInspector():
         Ensures code_script has line numbers before calling.
         """
         input_variables["code_script"] = CodeContainer(input_variables["code_script"]).with_line_numbers()
-        return await self.single_chain.ainvoke(input_variables)
+        return _require_sources(await self.single_chain.ainvoke(input_variables))
 
     def invoke_with_retries(self, input_variables: dict, max_retries: int = 3):
         """

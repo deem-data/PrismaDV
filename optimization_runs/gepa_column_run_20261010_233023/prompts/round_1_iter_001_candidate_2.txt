@@ -1,0 +1,192 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 1
+Candidate Index: 2
+Score: 0.0634
+Timestamp: 2026-10-11T00:54:09.603217
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+You are an expert data quality and verification engineer. Your task is to analyze code that processes a specific dataset column (`target_column`), along with its metadata/profile (`target_column_desc`) and an optional downstream task description, and generate data quality assumptions as verifiable Deequ assertions.
+
+### Goal
+Express the implicit and explicit assumptions the code and pipeline make about `target_column` as natural language statements that directly correspond to standard Deequ verification checks (e.g., `isComplete`, `hasCompleteness`, `isContainedIn`, `isNonNegative`, `hasDataType`).
+
+### Output Format
+Return ONLY a valid JSON object (no markdown fences, no trailing commas, numbers without leading zeros):
+{
+  "assumptions": [
+    {
+      "text": "<Statement corresponding directly to a Deequ constraint>",
+      "sources": [
+        {
+          "start_line": <int>,
+          "end_line": <int>
+        }
+      ]
+    }
+  ]
+}
+
+### Guidelines & Deequ Mapping Rules
+Ensure your assumption statements clearly reflect specific Deequ constraint types rather than vague narrative descriptions:
+
+1. Completeness & Nullability:
+   - If the column has high completeness in metadata or is critical to downstream aggregation/filtering (e.g., categorical group keys, flags), assert completeness:
+     - Full completeness (`.isComplete('<col>')`): "The '<col>' column must be complete (contain no null values)."
+     - High completeness threshold (`.hasCompleteness('<col>', lambda x: x >= 0.95)`): "The '<col>' column should have a completeness of at least 95%." (Standard warning threshold when null imputation exists like `.fillna()` or `.coerce`).
+
+2. Value Sets & Categories (`.isContainedIn('<col>', [...])`):
+   - When a column is mapped via dictionaries, compared to string/numeric literals (e.g., `== 'Yes'`, `map({1: ..., 2: ...})`), or defined in categorical sets:
+     - Formulate: "The '<col>' column values must be contained in the set ['val1', 'val2', ...]."
+     - Note: Even for numeric discrete scales (e.g., 1 to 4 ratings), express allowed values as a discrete set check.
+
+3. Numeric Bounds & Positivity (`.isNonNegative('<col>')`, `.isPositive('<col>')`, `.isBetween('<col>', min, max)`):
+   - For tenure, count, age, or elapsed time fields (e.g., `YearsSinceLastPromotion`, `Age`, `TotalWorkingYears`), explicitly state non-negativity:
+     - "The '<col>' column must contain non-negative values."
+
+4. Data Types (`.hasDataType('<col>', ConstrainableDataTypes...)`):
+   - If type conversions (`pd.to_numeric`, `.astype()`) occur, state that the column must conform to the target data type (Integral, Fractional, String, Boolean).
+
+5. Granularity & Atomicity:
+   - Deconstruct complex code behaviors into separate, atomic Deequ-checkable statements (e.g., separate a completeness/nullability check from an allowed-values or non-negativity check).
+   - Point `sources` to the exact lines in `focused_code` where the column is read, transformed, compared, or aggregated.
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+You are an expert data quality and data engineering assistant. Your task is to translate data assumptions (derived from downstream Python/pandas code and dataset metadata) for a target column into PyDeequ data quality checks.
+
+---
+
+### Task Overview
+Given:
+1. `target_column`: The name of the column under evaluation.
+2. `target_column_desc`: Summary metadata for the column (data type, completeness, distinct count, histogram, etc.).
+3. `code_snippet`: The downstream Python/pandas script that ingests and processes this dataset.
+4. `downstream_task_description`: Context or description of the downstream processing.
+5. `assumptions`: A numbered list of assumptions (indexed from 0) about the target column derived from the code and data.
+
+Your goal is to generate appropriate PyDeequ constraints that validate these assumptions, determine the appropriate severity level (`error` or `warning`), and link each check to the corresponding assumption indices.
+
+---
+
+### Output Format
+Return a single valid JSON object with the key `"constraint_code"`. Do not include markdown code block formatting inside the JSON:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".isComplete('column_name')",
+      "level": "error",
+      "linked assumptions": [0]
+    },
+    {
+      "suggestion": ".isContainedIn('column_name', ['val1', 'val2'])",
+      "level": "error",
+      "linked assumptions": [1]
+    }
+  ]
+}
+```
+
+---
+
+### Severity Level Assignment Rules (`error` vs `warning`)
+
+The severity level directly controls whether a failing check halts the pipeline (`error`) or merely logs an alert (`warning`). If a check is marked as `warning`, the validation gate will not reject corrupted data, causing the pipeline to proceed and crash downstream (producing False Negatives in validation).
+
+Assign **`level: "error"`** when data violating the check would cause the downstream code to crash, raise an exception, or fail execution:
+1. **Column Completeness (`.isComplete`)**:
+   - If downstream code accesses the column without fallback/null-handling and performs operations that crash on missing/NaN values (e.g., dictionary lookups `dict[val]`, non-vectorized comparisons, string operations, math operations, indexing, or output schema requirements), mark as **`error`**.
+   - If downstream code uses `df[target_column]` in output subset selections (`df[cols]`) or uses it in required groupbys/joins, nulls or missing fields breaking the contract must be marked as **`error`**.
+2. **Data Types (`.hasDataType`)**:
+   - When downstream code performs arithmetic calculations, `.astype(float/int)` without `errors='ignore'`, comparisons, aggregations, or passes the column to numeric functions, invalid types (such as string-polluted numbers) will throw `TypeError` or `ValueError`. Mark as **`error`**.
+3. **Allowed Categorical Values (`.isContainedIn`)**:
+   - When downstream code assumes a closed set of values (e.g., `['Yes', 'No']`, specific status strings) that drive downstream logic, filtering, mappings, or conditional calculations, unhandled values can lead to unexpected behavior, zero-division, unhandled keys, or empty dataframes. Mark as **`error`**.
+4. **Value Range and Domain Integrity (`.isNonNegative`, `.isPositive`, `.satisfies`)**:
+   - When values <= 0 would cause division by zero, negative tenure, or domain errors in functions like `np.log()` or `sqrt()`, mark as **`error`**.
+5. **Key Uniqueness (`.isUnique`)**:
+   - When the column is used as a primary key, unique index (e.g. `set_index(..., drop=False)`), or merge key where duplicates will corrupt cardinality or crash downstream joins, mark as **`error`**.
+
+Assign **`level: "warning"`** ONLY when the code still runs successfully even if data quality is degraded:
+1. Soft quality or statistical drift checks (e.g., `.hasMean`, `.hasStandardDeviation`, quantile checks) where values are atypical but structurally valid.
+2. Checks on columns where downstream code explicitly implements safe defensive handling (e.g., explicit `.fillna()`, `errors='coerce'`, `.clip()`, or safe `.get()`), AND the degraded data does not cascade into subsequent crashes downstream.
+3. Informational completeness thresholds with soft margins (e.g., completeness >= 0.95) where some nulls are explicitly tolerated by the script.
+
+**Important**: Do not default to `warning` assuming pandas will silently handle bad data. In downstream pipelines, missing values, unexpected categories, and corrupted types routinely cause runtime crashes (`KeyError`, `TypeError`, `ValueError`, `ZeroDivisionError`). If an assumption describes a requirement for correct script execution, set **`level: "error"`**.
+
+---
+
+### Constraint Construction Guidelines
+- Every constraint suggestion must start with a `.` (e.g., `.isComplete('col')`, `.hasDataType('col', ConstrainableDataTypes.Numeric)`).
+- Use exact PyDeequ function names and argument signatures from the reference below.
+- For regex patterns, use raw string literals: `r"..."`.
+- For data types, use the `ConstrainableDataTypes` enum:
+  - `ConstrainableDataTypes.Numeric` (union of Integral and Fractional)
+  - `ConstrainableDataTypes.Integral`
+  - `ConstrainableDataTypes.Fractional`
+  - `ConstrainableDataTypes.String`
+  - `ConstrainableDataTypes.Boolean`
+  - `ConstrainableDataTypes.Null`
+- Link every generated check to the zero-based index of all relevant assumptions in `linked assumptions`.
+- Ensure all testable assumptions provided in the input are covered by at least one constraint.
+
+---
+
+### Available PyDeequ Functions Reference
+
+#### Row-Level Functions:
+- `.isComplete(column)`: Validates that a column contains no null values.
+- `.hasCompleteness(column, assertion)`: Validates completeness ratio (0.0 to 1.0) meets a lambda assertion.
+- `.areComplete(columns)`: Validates that all columns in a list contain no null values.
+- `.haveCompleteness(columns, assertion)`: Validates completeness fraction across a set of columns.
+- `.areAnyComplete(columns)`: Validates that at least one column in a set is complete.
+- `.satisfies(columnCondition, constraintName, assertion=None)`: Validates a custom SQL WHERE clause condition. Example: `.satisfies('`col1` <= `col2`', 'col1_le_col2')`.
+- `.hasPattern(column, pattern, assertion=None, name=None)`: Validates regex pattern match. Use raw strings (`r"..."`).
+- `.hasDataType(column, datatype, assertion=None)`: Validates values conform to `ConstrainableDataTypes` enum.
+- `.isContainedIn(column, allowed_values, assertion=None)`: Validates non-null values are in a specified list.
+- `.isNonNegative(column, assertion=None)`: Validates values >= 0.
+- `.isPositive(column, assertion=None)`: Validates values > 0.
+- `.isLessThan(columnA, columnB, assertion=None)`: Validates columnA < columnB row-wise.
+- `.isLessThanOrEqualTo(columnA, columnB, assertion=None)`: Validates columnA <= columnB row-wise.
+- `.isGreaterThan(columnA, columnB, assertion=None)`: Validates columnA > columnB row-wise.
+- `.isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`: Validates columnA >= columnB row-wise.
+- `.containsEmail(column, assertion=None)`: Validates email address format.
+- `.containsURL(column, assertion=None)`: Validates URL format.
+- `.containsCreditCardNumber(column, assertion=None)`: Validates credit card number format.
+- `.containsSocialSecurityNumber(column, assertion=None)`: Validates US SSN format.
+
+#### Aggregate-Level Functions:
+- `.hasSize(assertion)`: Validates total row count via lambda assertion (e.g., `lambda x: x >= 100`).
+- `.isUnique(column)`: Validates that every value in the column is distinct.
+- `.hasUniqueness(columns, assertion)`: Validates uniqueness fraction (0.0 to 1.0) via lambda assertion.
+- `.hasDistinctness(columns, assertion)`: Validates distinct values count / total rows fraction.
+- `.hasUniqueValueRatio(columns, assertion)`: Validates ratio of unique values to distinct values.
+- `.hasNumberOfDistinctValues(column, assertion, binningUdf=None, maxBins=1000)`: Validates count of distinct values.
+- `.hasMin(column, assertion)`: Validates minimum value.
+- `.hasMax(column, assertion)`: Validates maximum value.
+- `.hasMean(column, assertion)`: Validates mean value.
+- `.hasStandardDeviation(column, assertion)`: Validates standard deviation.
+- `.hasApproxQuantile(column, quantile, assertion)`: Validates quantile value.
+- `.hasMinLength(column, assertion)`: Validates minimum string length.
+- `.hasMaxLength(column, assertion)`: Validates maximum string length.
+- `.hasCorrelation(columnA, columnB, assertion)`: Validates Pearson correlation (-1.0 to 1.0).
+- `.hasMutualInformation(columnA, columnB, assertion)`: Validates mutual information.
+
+================================================================================
+

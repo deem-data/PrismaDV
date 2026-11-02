@@ -12,7 +12,8 @@ class RegexPatternViolation(TabularCorruption):
     Generic pattern violation for any regex-constrained field.
     
     Parameters:
-        pattern: Regex pattern that values should match (dict: {col_name: pattern})
+        pattern: Regex pattern that values should match. Either one pattern
+            string applied to every target column, or a dict {col_name: pattern}.
         strategy: How to violate the pattern
             - 'character_insertion': Insert invalid characters
             - 'character_deletion': Delete required characters
@@ -29,15 +30,20 @@ class RegexPatternViolation(TabularCorruption):
     
     def __init__(self, columns=None, severity=None, sampling=None,
                  pattern=None, strategy="mixed", random_state=None, **kwargs):
-        super().__init__(columns=columns, severity=severity, sampling=sampling, **kwargs)
-        self.pattern = pattern or {}  # Dict mapping column name to regex pattern
+        super().__init__(columns=columns, severity=severity, sampling=sampling,
+                         random_state=random_state, **kwargs)
+        # A bare string is the pattern for every target column; a dict maps
+        # column -> pattern. A string used to fall through `col not in pattern`
+        # as a substring test and skip every column, leaving the data untouched.
+        if isinstance(pattern, str):
+            targets = self._target_columns()
+            if not targets:
+                raise ValueError("a string pattern needs explicit columns")
+            pattern = {col: pattern for col in targets}
+        self.pattern = pattern or {}
         self.strategy = strategy
-        self.random_state = random_state
-        if random_state is not None:
-            random.seed(random_state)
-            np.random.seed(random_state)
-        
-        valid_strategies = ["character_insertion", "character_deletion", 
+
+        valid_strategies = ["character_insertion", "character_deletion",
                           "format_breaking", "case_violation", "mixed"]
         if self.strategy not in valid_strategies:
             raise ValueError(f"strategy must be one of {valid_strategies}")
@@ -76,7 +82,7 @@ class RegexPatternViolation(TabularCorruption):
                 continue
             
             if col not in self.pattern:
-                continue
+                raise ValueError(f"no regex pattern given for column '{col}'")
             
             # Ensure column is string type
             df[col] = df[col].astype('object')

@@ -50,8 +50,12 @@ def _run_batch_detect(manifest_path, sdc_path, out_dir, gpu):
 
 
 def autotest_detect_csvs(id_to_csv, sdc_name="rt_train", run_name=None,
-                         num_workers=None, num_gpus=None, timeout=None):
-    """Detect outliers in a set of CSV tables (each column = a table column)."""
+                         num_workers=None, num_gpus=None, timeout=None, skip_missing=False):
+    """Detect outliers in a set of CSV tables (each column = a table column).
+
+    A table that AutoTest failed on has no output file. By default it comes back as an empty
+    detection ("nothing flagged"); with skip_missing=True it is left out of the result instead.
+    """
     _require_autotest()
     num_workers = num_workers or NUM_WORKERS
     num_gpus = max(1, num_gpus or NUM_GPUS)
@@ -79,12 +83,29 @@ def autotest_detect_csvs(id_to_csv, sdc_name="rt_train", run_name=None,
     results = {}
     for i in id_to_csv:
         out_csv = out_dir / f"{i}.csv"
-        results[i] = pd.read_csv(out_csv, sep="\t") if out_csv.exists() else pd.DataFrame(columns=OUT_COLS)
+        if out_csv.exists():
+            results[i] = pd.read_csv(out_csv, sep="\t")
+        elif not skip_missing:
+            results[i] = pd.DataFrame(columns=OUT_COLS)
     return results
 
 
+def autotest_table_timings(ids, run_name):
+    """{id: {"elapsed_s", "first_in_worker"}} from the per-table timing files batch_detect writes.
+
+    Tables detected before batch_detect wrote timings have no entry.
+    """
+    out_dir = AUTOTEST_STAGING / run_name / "outputs"
+    timings = {}
+    for i in ids:
+        p = out_dir / f"{i}.time.json"
+        if p.exists():
+            timings[i] = json.loads(p.read_text())
+    return timings
+
+
 def autotest_detect_tables(id_to_df, sdc_name="rt_train", run_name=None,
-                           num_workers=None, num_gpus=None, timeout=None):
+                           num_workers=None, num_gpus=None, timeout=None, skip_missing=False):
     """Like autotest_detect_csvs but for in-memory DataFrames (writes temp CSVs)."""
     run_dir = AUTOTEST_STAGING / (run_name if run_name else f"tbl_{uuid.uuid4().hex[:10]}")
     in_dir = run_dir / "inputs"
@@ -96,14 +117,14 @@ def autotest_detect_tables(id_to_df, sdc_name="rt_train", run_name=None,
             df.to_csv(p, index=False)
         id_to_csv[i] = p
     return autotest_detect_csvs(id_to_csv, sdc_name=sdc_name, run_name=run_name,
-                                num_workers=num_workers, num_gpus=num_gpus, timeout=timeout)
+                                num_workers=num_workers, num_gpus=num_gpus, timeout=timeout,
+                                skip_missing=skip_missing)
 
 
 def run_autotest(dataset_name, subtask_name, processed_data_label, sdc_name="rt_train"):
     """EIDBench 'inference' step for AutoTest."""
     project_manager = ProjectManager(project_root=get_project_root(), dataset_name=dataset_name)
-    constraint_output_path = project_manager.get_task_agnostic_constraint_path(
-        subtask_name, processed_data_label) / "autotest_constraints.yaml"
+    constraint_output_path = project_manager.get_task_agnostic_constraint_path(subtask_name) / "autotest_constraints.yaml"
     constraint_output_path.parent.mkdir(parents=True, exist_ok=True)
     marker = {
         "method": "autotest",

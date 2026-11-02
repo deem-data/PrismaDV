@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +18,17 @@ from prismadv.loader import MultiTableLoader
 from prismadv.llm.langchain.models.prismadv_multi_table import MultiTablePrismaLangChainDV
 from prismadv.project_manager import MultiTableProjectManager
 from workflow_prismadv.eid_bench_real_experiments import utils
+from workflow_prismadv.utils.replicates import (
+    add_replicate_argument,
+    artifact_filename,
+    normalize_replicate,
+    replicate_of_artifact,
+)
 
 
 DEFAULT_MODEL_NAME = "gpt-5-mini"
 DEFAULT_SCRIPT_ID = "project"
-DEFAULT_FILENAME_PREFIX = "prismadv_real_etl"
+DEFAULT_FILENAME_PREFIX = "prismadv"
 
 
 def log_progress(message: str) -> None:
@@ -51,11 +57,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--filename-prefix",
-        default=DEFAULT_FILENAME_PREFIX,
+        default=None,
         help=(
-            "Prefix for the generated constraint artifact filename. Use a custom "
-            "prefix (e.g., prismadv_real_etl_wo_correlation) to keep ablation runs "
-            "separate from main-table artifacts."
+            "Prefix for the generated constraint artifact filename. Default: "
+            "prismadv, plus one _wo_<stage> part per disabled stage (e.g. "
+            "prismadv_wo_dataflow), so an ablation run never joins the main family."
         ),
     )
     parser.add_argument(
@@ -66,6 +72,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Prior artifacts are preserved; the new run is written to a fresh timestamped file."
         ),
     )
+    add_replicate_argument(parser)
     return parser.parse_args(argv)
 
 
@@ -85,9 +92,27 @@ def default_prismadv_input_path(
     return utils.constraints_dir(example_id, script_id, project_root) / "prismadv_inputs.yaml"
 
 
-def make_output_filename(model_name: str, filename_prefix: str = DEFAULT_FILENAME_PREFIX) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{filename_prefix}--{model_name}--{timestamp}.yaml"
+def default_filename_prefix(
+    use_dataflow: bool = True,
+    correlation_detection: bool = True,
+    with_assumptions: bool = True,
+) -> str:
+    """`prismadv` for the full method; `prismadv_wo_dataflow` etc. for an ablation, as on synth."""
+    disabled = [
+        name
+        for name, enabled in (
+            ("dataflow", use_dataflow),
+            ("correlation", correlation_detection),
+            ("assumption", with_assumptions),
+        )
+        if not enabled
+    ]
+    return "_wo_".join([DEFAULT_FILENAME_PREFIX, *disabled])
+
+
+def make_output_filename(model_name: str, filename_prefix: str = DEFAULT_FILENAME_PREFIX,
+                         replicate=None) -> str:
+    return artifact_filename(filename_prefix, model_name, replicate)
 
 
 def build_downstream_task_description(prismadv_inputs: dict[str, Any]) -> str:
@@ -185,11 +210,14 @@ def existing_output_for_config(
     prismadv_config: PrismaDVConfig,
     *,
     filename_prefix: str = DEFAULT_FILENAME_PREFIX,
+    replicate=None,
 ) -> Path | None:
+    """An artifact with this configuration *and* this replicate; another replicate is a new sample."""
+    replicate = normalize_replicate(replicate)
     for path in sorted(output_dir.glob(f"{filename_prefix}--*.yaml")):
         raw_data = load_yaml(path)
         existing_config = PrismaDVConfig.from_dict(raw_data["prismadv_config"])
-        if existing_config == prismadv_config:
+        if existing_config == prismadv_config and replicate_of_artifact(path, raw_data) == replicate:
             return path
     return None
 
@@ -206,10 +234,14 @@ def generate_constraints(
     use_dataflow: bool = True,
     correlation_detection: bool = True,
     with_assumptions: bool = True,
-    filename_prefix: str = DEFAULT_FILENAME_PREFIX,
+    filename_prefix: str | None = None,
     overwrite: bool = False,
+    replicate=None,
     generator_cls=MultiTablePrismaLangChainDV,
 ) -> Path:
+    replicate = normalize_replicate(replicate)
+    if filename_prefix is None:
+        filename_prefix = default_filename_prefix(use_dataflow, correlation_detection, with_assumptions)
     project_root = project_root.resolve()
     input_path = input_path or default_prismadv_input_path(example_id, script_id, project_root)
     log_progress(f"loading input artifact: {input_path}")
@@ -232,10 +264,11 @@ def generate_constraints(
     )
 
     existing_output = existing_output_for_config(
-        output_dir, prismadv_config, filename_prefix=filename_prefix
+        output_dir, prismadv_config, filename_prefix=filename_prefix, replicate=replicate
     )
     if existing_output is not None and not overwrite:
-        print(f"Constraints file for this EIDBench-real PrismaDV config already exists. Skipping: {existing_output}")
+        print(f"Constraints file for this EIDBench-real PrismaDV config (replicate {replicate}) "
+              f"already exists. Skipping: {existing_output}")
         return existing_output
 
     spark_session = None
@@ -253,6 +286,7 @@ def generate_constraints(
         input_variables["data_samples"] = data_samples
         log_progress("Spark validation inputs ready")
 
+        started = time.perf_counter()
         log_progress("initializing EIDBench-real PrismaDV generator")
         generator = generator_cls.from_config(prismadv_config)
         log_progress("starting constraint inference")
@@ -267,9 +301,10 @@ def generate_constraints(
         log_progress("closing Spark session")
         close_spark_session(spark_session)
 
-    output_path = output_dir / make_output_filename(model_name, filename_prefix)
+    output_path = output_dir / make_output_filename(model_name, filename_prefix, replicate)
     result = {
         "prismadv_config": prismadv_config.to_dict(),
+        "replicate": replicate,
         "input_artifact": str(input_path),
         "constraints": constraints_with_sources.to_dict()["constraints"],
         "column_data_flow_locations": {
@@ -277,6 +312,7 @@ def generate_constraints(
             for column_group, locations in data_flow_locations.items()
         },
         "cost_summary": cost_summary,
+        "wall_clock_seconds": round(time.perf_counter() - started, 3),
     }
     log_progress(f"writing constraints: {output_path}")
     with output_path.open("w", encoding="utf-8") as handle:
@@ -301,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         with_assumptions=not args.no_assumption,
         filename_prefix=args.filename_prefix,
         overwrite=args.overwrite,
+        replicate=args.replicate,
     )
     print(
         yaml.safe_dump(

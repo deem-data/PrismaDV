@@ -1,0 +1,140 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 3
+Candidate Index: 4
+Score: 0.3500
+Timestamp: 2026-10-11T14:44:01.128424
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data engineering assistant specializing in automated PyDeequ verification. Your task is to translate data quality assumptions about a target column into precise, robust PyDeequ constraints, taking into account profiling metadata, downstream python/pandas code, and operational risk.
+
+---
+
+### Task Inputs
+
+You will receive:
+1. `target_column`: Name of the column being evaluated.
+2. `target_column_desc`: Profiling metadata (e.g., completeness, approximate distinct count, data type, type counts, histogram distribution).
+3. `code_snippet`: Downstream code (pandas, numpy, etc.) consuming the dataset.
+4. `downstream_task_description`: Context on pipeline purpose and downstream usage.
+5. `assumptions`: A numbered list of derived assumptions (0-indexed) with line references.
+
+---
+
+### Core Guidelines & Translation Methodology
+
+#### 1. Severity Level Determination (`"error"` vs `"warning"`)
+- **`"error"` (Hard Failure)**:
+  - Any data anomaly that would cause unhandled exceptions and crash the downstream script at runtime.
+  - Examples:
+    - Missing keys in dictionary mapping without fallback defaults (e.g., `df['col'].map(mapping).astype(...)` where unmapped values become `NaN` and crash non-nullable types or subsequent logic).
+    - Hard type conversions that raise exceptions on invalid inputs (e.g., `df['col'].astype(int)` or `pd.to_datetime` without `errors='coerce'`).
+    - Explicit unhandled division by zero in Python logic.
+    - Missing mandatory index/join columns (e.g., `df.set_index('EmpID')` where nulls or missing columns break pipeline integrity).
+- **`"warning"` (Soft Anomaly / Data Drift)**:
+  - Anomalies that are handled gracefully by code fallback logic (e.g., `pd.to_numeric(..., errors='coerce')`, `.fillna(...)`, `replace(...)`, or `np.where(...)`), but result in silent data corruption, information loss, or skewed aggregate statistics.
+
+#### 2. Constraint Selection & Avoiding Overly Lax Checks
+A common failure mode is generating constraints that are too generic (e.g., checking only `hasDataType` when values have strict bounds or discrete sets), causing zero test-time bug detection. Maximize precision and recall using the following heuristics:
+
+- **Categorical & Mapped Values (`.isContainedIn`)**:
+  - If a column is mapped against a dictionary or discrete set in the script (e.g., `benefits_rate_map`, status categories) or the profiling histogram demonstrates a fixed discrete domain, use `.isContainedIn('col', allowed_values)`.
+- **Numeric Semantics (`.isNonNegative`, `.isPositive`, `.hasMin`, `.hasMax`)**:
+  - Never stop at data type verification when semantic limits apply.
+  - For counts, headcounts, denominators, or standard positive metrics, enforce `.isPositive('col')` (especially when preventing division by zero).
+  - For tenures, ages, monetary amounts, and percentages, enforce `.isNonNegative('col')`.
+  - If the profile and assumptions imply bounded integer ratings or percentages (e.g., ratings 1–5), check min/max or value sets where appropriate.
+- **Completeness (`.isComplete` vs `.hasCompleteness`)**:
+  - If the downstream script or assumption expects zero nulls and the profile indicates `completeness: 1.0`, enforce `.isComplete('col')`.
+  - If the script handles nulls via `.fillna()` or coercion, or if missingness is tolerated, use `.hasCompleteness('col', assertion)` with an appropriate threshold or warn rather than error.
+- **Data Types (`.hasDataType`)**:
+  - Use exact types matching the profile: `ConstrainableDataTypes.Integral`, `ConstrainableDataTypes.Fractional`, `ConstrainableDataTypes.String`, `ConstrainableDataTypes.Boolean`, etc.
+  - Note: By default, `hasDataType` expects 100% adherence. If nulls exist, provide an assertion lambda (e.g., `lambda x: x >= 0.99`).
+- **Identifiers & Uniqueness (`.isUnique`, `.hasUniqueness`)**:
+  - Enforce `.isUnique('col')` when the column serves as an index (`.set_index()`), join key, or entity primary key.
+
+#### 3. Assumption Linking
+- Every constraint must list the 0-based index of every assumption it validates in `"linked assumptions"` (e.g., `[0]`, `[1, 2]`).
+- Every actionable assumption must have at least one corresponding check.
+
+---
+
+### Supported PyDeequ Check Syntax
+
+All constraints must begin with a leading dot (`.`):
+
+#### Row-Level Checks:
+- `.isComplete(column)`
+- `.hasCompleteness(column, assertion)` (e.g., `lambda x: x >= 0.95`)
+- `.areComplete(columns)`
+- `.isUnique(column)`
+- `.hasDataType(column, ConstrainableDataTypes.<Type>, assertion=None)`
+- `.isNonNegative(column, assertion=None)`
+- `.isPositive(column, assertion=None)`
+- `.isContainedIn(column, allowed_values, assertion=None)` (e.g., `['A', 'B', 'C']`)
+- `.isLessThan(columnA, columnB, assertion=None)`
+- `.isLessThanOrEqualTo(columnA, columnB, assertion=None)`
+- `.isGreaterThan(columnA, columnB, assertion=None)`
+- `.isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`
+- `.satisfies(columnCondition, constraintName, assertion=None)` (e.g., ``'`colA` <= `colB`'``)
+- `.hasPattern(column, pattern, assertion=None)`
+
+#### Aggregate & Statistical Checks:
+- `.hasSize(assertion)`
+- `.hasUniqueness(columns, assertion)`
+- `.hasDistinctness(columns, assertion)`
+- `.hasNumberOfDistinctValues(column, assertion)`
+- `.hasMin(column, assertion)` (e.g., `lambda x: x >= 1`)
+- `.hasMax(column, assertion)`
+- `.hasMean(column, assertion)`
+- `.hasStandardDeviation(column, assertion)`
+- `.hasApproxQuantile(column, quantile, assertion)`
+
+---
+
+### Output Format
+
+Respond strictly with a valid JSON object matching this schema. Do not include markdown code fence formatting or explanations outside the JSON object.
+
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".isComplete('column_name')",
+      "level": "error",
+      "linked assumptions": [0]
+    },
+    {
+      "suggestion": ".isContainedIn('column_name', ['Val1', 'Val2'])",
+      "level": "warning",
+      "linked assumptions": [1]
+    }
+  ]
+}
+```
+
+================================================================================
+

@@ -108,7 +108,7 @@ class MultiTablePrismaLangChainDV:
             self._log("LLM stage: table column code generation and validation")
             codes = run_with_cost(
                 "table_column_code_generation",
-                lambda: self._generate_code(column_refs, assumptions, prepared),
+                lambda: self._generate_code(column_refs, assumptions, data_flow_locations, prepared),
                 cost_summary,
             )
             self._log("LLM stage complete: table column code generation and validation")
@@ -166,7 +166,7 @@ class MultiTablePrismaLangChainDV:
                     group_codes = run_with_cost(
                         "table_column_group_code_generation",
                         lambda: self._generate_group_code(
-                            column_groups, group_assumptions, prepared
+                            column_groups, group_assumptions, group_data_flow_locations, prepared
                         ),
                         cost_summary,
                     )
@@ -230,7 +230,7 @@ class MultiTablePrismaLangChainDV:
             self._log("LLM stage: table column code generation and validation")
             codes = await arun_with_cost(
                 "table_column_code_generation",
-                lambda: self._agenerate_code(column_refs, assumptions, prepared),
+                lambda: self._agenerate_code(column_refs, assumptions, data_flow_locations, prepared),
                 cost_summary,
             )
             self._log("LLM stage complete: table column code generation and validation")
@@ -288,7 +288,7 @@ class MultiTablePrismaLangChainDV:
                     group_codes = await arun_with_cost(
                         "table_column_group_code_generation",
                         lambda: self._agenerate_group_code(
-                            column_groups, group_assumptions, prepared
+                            column_groups, group_assumptions, group_data_flow_locations, prepared
                         ),
                         cost_summary,
                     )
@@ -384,11 +384,15 @@ class MultiTablePrismaLangChainDV:
             )
             return column_ref.key, self._source_locations_from_response(response)
 
+        if not column_refs:
+            return {}
+
+        first = await inspect_one(1, column_refs[0])
         results = await batched_gather(
-            [inspect_one(index, column_ref) for index, column_ref in enumerate(column_refs, start=1)],
+            [inspect_one(index, column_ref) for index, column_ref in enumerate(column_refs[1:], start=2)],
             max_concurrent=self.max_concurrent_calls,
         )
-        return dict(results)
+        return dict([first, *results])
 
     @staticmethod
     def _data_flow_payload(column_ref: ColumnRef, vars: dict[str, Any]) -> dict[str, Any]:
@@ -445,6 +449,16 @@ class MultiTablePrismaLangChainDV:
         return dict(results)
 
     @staticmethod
+    def _format_source_ranges(source_locations: SourceLocations) -> str:
+        """Render the data-flow slices as line ranges into the full code quoted above."""
+        sources = source_locations.sources if source_locations else []
+        if not sources:
+            return "none identified; consider the whole code above"
+        return "\n".join(
+            f"- {source.file}:{source.start_line}-{source.end_line}" for source in sources
+        )
+
+    @staticmethod
     def _assumption_payload(
         column_ref: ColumnRef,
         source_locations: SourceLocations,
@@ -452,17 +466,13 @@ class MultiTablePrismaLangChainDV:
     ) -> dict[str, Any]:
         table_profile = vars["table_profiles"][column_ref.table]
         column_profile = _profile_for_column(table_profile, column_ref.column)
-        focused_code = (
-            vars["code_context_obj"].add_highlighted_line_numbers(source_locations.sources)
-            if vars.get("cfg_use_dataflow")
-            else vars["code_context_with_lines"]
-        )
         return {
             "target_table": column_ref.table,
             "target_column": column_ref.column,
             "target_table_desc": yaml.safe_dump(table_profile, sort_keys=False),
             "target_column_desc": yaml.safe_dump(column_profile, sort_keys=False),
-            "focused_code": focused_code,
+            "focused_code": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(source_locations),
             "downstream_task_description": vars["downstream_task_description"],
         }
 
@@ -470,6 +480,7 @@ class MultiTablePrismaLangChainDV:
         self,
         column_refs: list[ColumnRef],
         assumptions: dict[str, list[AssumptionEntry]],
+        data_flow_locations: dict[str, SourceLocations],
         vars: dict[str, Any],
     ) -> dict[str, list[CodeEntry]]:
         codes = {}
@@ -478,7 +489,12 @@ class MultiTablePrismaLangChainDV:
             self._log(f"code generation {index}/{total}: {column_ref.key}")
             response = self.runtime.run_task(
                 MultiTablePrismaDVTasks.TABLE_COLUMN_CODE_GENERATION,
-                self._code_payload(column_ref, assumptions[column_ref.key], vars),
+                self._code_payload(
+                    column_ref,
+                    assumptions[column_ref.key],
+                    data_flow_locations.get(column_ref.key, SourceLocations()),
+                    vars,
+                ),
             )
             codes[column_ref.key] = self._code_entries_from_response(
                 response,
@@ -492,6 +508,7 @@ class MultiTablePrismaLangChainDV:
         self,
         column_refs: list[ColumnRef],
         assumptions: dict[str, list[AssumptionEntry]],
+        data_flow_locations: dict[str, SourceLocations],
         vars: dict[str, Any],
     ) -> dict[str, list[CodeEntry]]:
         total = len(column_refs)
@@ -500,7 +517,12 @@ class MultiTablePrismaLangChainDV:
             self._log(f"code generation {index}/{total}: {column_ref.key}")
             response = await self.runtime.arun_task(
                 MultiTablePrismaDVTasks.TABLE_COLUMN_CODE_GENERATION,
-                self._code_payload(column_ref, assumptions[column_ref.key], vars),
+                self._code_payload(
+                    column_ref,
+                    assumptions[column_ref.key],
+                    data_flow_locations.get(column_ref.key, SourceLocations()),
+                    vars,
+                ),
             )
             return column_ref.key, self._code_entries_from_response(
                 response,
@@ -519,6 +541,7 @@ class MultiTablePrismaLangChainDV:
     def _code_payload(
         column_ref: ColumnRef,
         assumptions: list[AssumptionEntry],
+        source_locations: SourceLocations,
         vars: dict[str, Any],
     ) -> dict[str, Any]:
         function_manager = DeequFunctionManager()
@@ -532,6 +555,7 @@ class MultiTablePrismaLangChainDV:
             "target_table_desc": yaml.safe_dump(table_profile, sort_keys=False),
             "target_column_desc": yaml.safe_dump(column_profile, sort_keys=False),
             "code_context": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(source_locations),
             "downstream_task_description": vars["downstream_task_description"],
             "assumptions": _assumptions_text(assumptions),
         }
@@ -625,11 +649,6 @@ class MultiTablePrismaLangChainDV:
         function_manager = DeequFunctionManager()
         table_profile = vars["table_profiles"][column_ref.table]
         column_profile = _profile_for_column(table_profile, column_ref.column)
-        focused_code = (
-            vars["code_context_obj"].add_highlighted_line_numbers(source_locations.sources)
-            if vars.get("cfg_use_dataflow")
-            else vars["code_context_with_lines"]
-        )
         return {
             "row_level_functions": "\n".join(function_manager.get_constraints(is_row_level=True)),
             "aggregate_level_functions": "\n".join(function_manager.get_constraints(is_row_level=False)),
@@ -637,7 +656,8 @@ class MultiTablePrismaLangChainDV:
             "target_column": column_ref.column,
             "target_table_desc": yaml.safe_dump(table_profile, sort_keys=False),
             "target_column_desc": yaml.safe_dump(column_profile, sort_keys=False),
-            "focused_code": focused_code,
+            "focused_code": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(source_locations),
             "downstream_task_description": vars["downstream_task_description"],
         }
 
@@ -706,11 +726,6 @@ class MultiTablePrismaLangChainDV:
             "table_name": column_group.table,
             "columns": [_profile_for_column(table_profile, column) for column in sorted(column_group.columns)],
         }
-        focused_code = (
-            vars["code_context_obj"].add_highlighted_line_numbers(source_locations.sources)
-            if vars.get("cfg_use_dataflow")
-            else vars["code_context_with_lines"]
-        )
         return {
             "multi_column_functions": "\n".join(
                 function_manager.get_constraints(can_be_used_for_multiple_columns=True)
@@ -718,7 +733,8 @@ class MultiTablePrismaLangChainDV:
             "target_table": column_group.table,
             "target_columns": ", ".join(sorted(column_group.columns)),
             "target_columns_desc": yaml.safe_dump(group_profile, sort_keys=False),
-            "focused_code": focused_code,
+            "focused_code": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(source_locations),
             "downstream_task_description": vars["downstream_task_description"],
         }
 
@@ -795,11 +811,15 @@ class MultiTablePrismaLangChainDV:
             )
             return column_group.key, self._source_locations_from_response(response)
 
+        if not column_groups:
+            return {}
+
+        first = await inspect_one(1, column_groups[0])
         results = await batched_gather(
-            [inspect_one(index, group) for index, group in enumerate(column_groups, start=1)],
+            [inspect_one(index, group) for index, group in enumerate(column_groups[1:], start=2)],
             max_concurrent=self.max_concurrent_calls,
         )
-        return dict(results)
+        return dict([first, *results])
 
     @staticmethod
     def _group_data_flow_payload(
@@ -813,16 +833,12 @@ class MultiTablePrismaLangChainDV:
             if column_ref.key in single_locations
         ]
         seed = SourceLocations.merge_sources(*related) if related else SourceLocations()
-        focused_code = (
-            vars["code_context_obj"].add_highlighted_line_numbers(seed.sources)
-            if vars.get("cfg_use_dataflow")
-            else vars["code_context_with_lines"]
-        )
         return {
             "target_table": column_group.table,
             "target_columns": ", ".join(sorted(column_group.columns)),
             "script_reads": ", ".join(vars["context"]["script"]["reads"]),
-            "code_context": focused_code,
+            "code_context": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(seed),
         }
 
     def _generate_group_assumptions(
@@ -889,16 +905,12 @@ class MultiTablePrismaLangChainDV:
             "table_name": column_group.table,
             "columns": [_profile_for_column(table_profile, column) for column in sorted(column_group.columns)],
         }
-        focused_code = (
-            vars["code_context_obj"].add_highlighted_line_numbers(source_locations.sources)
-            if vars.get("cfg_use_dataflow")
-            else vars["code_context_with_lines"]
-        )
         return {
             "target_table": column_group.table,
             "target_columns": ", ".join(sorted(column_group.columns)),
             "target_columns_desc": yaml.safe_dump(group_profile, sort_keys=False),
-            "focused_code": focused_code,
+            "focused_code": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(source_locations),
             "downstream_task_description": vars["downstream_task_description"],
         }
 
@@ -906,6 +918,7 @@ class MultiTablePrismaLangChainDV:
         self,
         column_groups: list[ColumnGroupRef],
         group_assumptions: dict[FrozenSet[str], list[AssumptionEntry]],
+        group_data_flow_locations: dict[FrozenSet[str], SourceLocations],
         vars: dict[str, Any],
     ) -> dict[FrozenSet[str], list[CodeEntry]]:
         codes: dict[FrozenSet[str], list[CodeEntry]] = {}
@@ -915,7 +928,10 @@ class MultiTablePrismaLangChainDV:
             response = self.runtime.run_task(
                 MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_CODE_GENERATION,
                 self._group_code_payload(
-                    column_group, group_assumptions.get(column_group.key, []), vars
+                    column_group,
+                    group_assumptions.get(column_group.key, []),
+                    group_data_flow_locations.get(column_group.key, SourceLocations()),
+                    vars,
                 ),
             )
             codes[column_group.key] = self._group_code_entries_from_response(
@@ -930,6 +946,7 @@ class MultiTablePrismaLangChainDV:
         self,
         column_groups: list[ColumnGroupRef],
         group_assumptions: dict[FrozenSet[str], list[AssumptionEntry]],
+        group_data_flow_locations: dict[FrozenSet[str], SourceLocations],
         vars: dict[str, Any],
     ) -> dict[FrozenSet[str], list[CodeEntry]]:
         total = len(column_groups)
@@ -941,7 +958,10 @@ class MultiTablePrismaLangChainDV:
             response = await self.runtime.arun_task(
                 MultiTablePrismaDVTasks.TABLE_COLUMN_GROUP_CODE_GENERATION,
                 self._group_code_payload(
-                    column_group, group_assumptions.get(column_group.key, []), vars
+                    column_group,
+                    group_assumptions.get(column_group.key, []),
+                    group_data_flow_locations.get(column_group.key, SourceLocations()),
+                    vars,
                 ),
             )
             return column_group.key, self._group_code_entries_from_response(
@@ -961,6 +981,7 @@ class MultiTablePrismaLangChainDV:
     def _group_code_payload(
         column_group: ColumnGroupRef,
         assumptions: list[AssumptionEntry],
+        source_locations: SourceLocations,
         vars: dict[str, Any],
     ) -> dict[str, Any]:
         function_manager = DeequFunctionManager()
@@ -977,6 +998,7 @@ class MultiTablePrismaLangChainDV:
             "target_columns": ", ".join(sorted(column_group.columns)),
             "target_columns_desc": yaml.safe_dump(group_profile, sort_keys=False),
             "code_context": vars["code_context_with_lines"],
+            "relevant_lines": MultiTablePrismaLangChainDV._format_source_ranges(source_locations),
             "downstream_task_description": vars["downstream_task_description"],
             "assumptions": _assumptions_text(assumptions),
         }

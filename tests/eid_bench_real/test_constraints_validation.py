@@ -78,14 +78,23 @@ def test_validation_targets_include_clean_and_selected_corruptions(tmp_path):
 def test_java_security_manager_compat_flag_is_added_once(monkeypatch):
     monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Xmx2g")
 
-    validation.ensure_java_security_manager_compat()
-    validation.ensure_java_security_manager_compat()
+    validation.ensure_java_security_manager_compat(java_major=17)
+    validation.ensure_java_security_manager_compat(java_major=17)
 
     assert validation.JAVA_SECURITY_MANAGER_FLAG in validation.os.environ["JAVA_TOOL_OPTIONS"]
     assert validation.os.environ["JAVA_TOOL_OPTIONS"].count(validation.JAVA_SECURITY_MANAGER_FLAG) == 1
 
 
-def test_latest_constraint_path_includes_single_shot_real_etl_artifacts(tmp_path):
+def test_java_security_manager_flag_is_not_given_to_jdk_11(monkeypatch):
+    # JDK 11 reads `allow` as a class name and refuses to start; JDK 12+ understands it.
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Xmx2g")
+    validation.ensure_java_security_manager_compat(java_major=11)
+    assert validation.os.environ["JAVA_TOOL_OPTIONS"] == "-Xmx2g"
+    validation.ensure_java_security_manager_compat(java_major=None)  # unknown JVM: leave it alone
+    assert validation.os.environ["JAVA_TOOL_OPTIONS"] == "-Xmx2g"
+
+
+def test_latest_constraint_path_includes_single_shot_artifacts(tmp_path):
     output_dir = (
         tmp_path
         / "data_processed"
@@ -95,8 +104,8 @@ def test_latest_constraint_path_includes_single_shot_real_etl_artifacts(tmp_path
         / "project"
     )
     output_dir.mkdir(parents=True)
-    prismadv_path = output_dir / "prismadv_real_etl--fake.yaml"
-    single_shot_path = output_dir / "single_shot_real_etl--fake.yaml"
+    prismadv_path = output_dir / "prismadv--fake.yaml"
+    single_shot_path = output_dir / "single_shot--fake.yaml"
     prismadv_path.write_text("constraints: {}\n", encoding="utf-8")
     single_shot_path.write_text("constraints: {}\n", encoding="utf-8")
     prismadv_path.touch()
@@ -147,7 +156,7 @@ def test_run_validation_writes_clean_and_corrupted_artifacts(tmp_path, monkeypat
         / "example_a"
         / "constraints"
         / "patient_summary"
-        / "prismadv_real_etl--fake.yaml"
+        / "prismadv--fake.yaml"
     )
     write_constraint_artifact(constraint_path)
 
@@ -172,7 +181,7 @@ def test_run_validation_writes_clean_and_corrupted_artifacts(tmp_path, monkeypat
         / "constraints_validation"
         / "patient_summary"
         / "clean"
-        / "validation_results__prismadv_real_etl--fake.yaml"
+        / "validation_results__prismadv--fake.yaml"
     )
     assert output_paths[1] == (
         tmp_path
@@ -183,7 +192,7 @@ def test_run_validation_writes_clean_and_corrupted_artifacts(tmp_path, monkeypat
         / "patient_summary"
         / "corrupted"
         / "missing_key"
-        / "validation_results__prismadv_real_etl--fake.yaml"
+        / "validation_results__prismadv--fake.yaml"
     )
     raw = yaml.safe_load(output_paths[1].read_text(encoding="utf-8"))
     assert raw["variant"] == "corrupted"

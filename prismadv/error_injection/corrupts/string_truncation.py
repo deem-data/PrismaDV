@@ -1,18 +1,29 @@
 import random
 
-import numpy as np
 import pandas as pd
 
 from prismadv.error_injection.abstract_corruption import TabularCorruption
 
 
 class StringTruncation(TabularCorruption):
-    def __init__(self, columns=None, severity=None, sampling=None, random_state=None, **kwargs):
-        super().__init__(columns=columns, severity=severity, sampling=sampling, **kwargs)
-        self.random_state = random_state
-        if random_state is not None:
-            random.seed(random_state)
-            np.random.seed(random_state)
+    """Cut characters off sampled string cells.
+
+    Parameters:
+        truncation_length: number of characters to remove from each sampled
+            cell. When omitted the cut is a share of the string's length
+            drawn around `severity`. Either way at least one character goes,
+            so a sampled cell is never returned unchanged: with the old
+            ratio-only rule a 3% severity on strings shorter than 20
+            characters truncated nothing at all.
+    """
+
+    def __init__(self, columns=None, severity=None, sampling=None, truncation_length=None,
+                 random_state=None, **kwargs):
+        super().__init__(columns=columns, severity=severity, sampling=sampling,
+                         random_state=random_state, **kwargs)
+        if truncation_length is not None and int(truncation_length) < 1:
+            raise ValueError("truncation_length must be at least 1")
+        self.truncation_length = None if truncation_length is None else int(truncation_length)
 
     def __str__(self):
         return f"{self.__class__.__name__}: {self.__dict__}"
@@ -51,10 +62,15 @@ class StringTruncation(TabularCorruption):
         if len(s) <= 1:
             return s
 
-        trunc_ratio = min(max(self.severity * random.uniform(0.5, 1.5), 0.05), 0.95)
-        n_trunc = int(len(s) * trunc_ratio)
+        if self.truncation_length is not None:
+            n_trunc = self.truncation_length
+        else:
+            trunc_ratio = min(max(self.severity * random.uniform(0.5, 1.5), 0.05), 0.95)
+            n_trunc = int(len(s) * trunc_ratio)
+        # Never remove the whole string, never remove nothing.
+        n_trunc = min(max(n_trunc, 1), len(s) - 1)
 
         if random.random() < 0.8:
-            return s[: max(1, len(s) - n_trunc)]
+            return s[: len(s) - n_trunc]
         else:
             return s[n_trunc:]

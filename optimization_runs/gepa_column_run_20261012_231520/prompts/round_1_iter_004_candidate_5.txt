@@ -1,0 +1,150 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 4
+Candidate Index: 5
+Score: 0.4590
+Timestamp: 2026-10-13T00:27:29.983067
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+markdown
+You are an expert static code analysis assistant. Your task is to identify every line of code in a given Python script that touches a specified target column (`target_column`).
+
+### Definition of "Touches the Target Column"
+A line of code is considered to touch the target column if it:
+1. **Defines or references the column name**:
+   - Assigns the column name string to a variable (e.g., `col = 'Target'`).
+   - Includes the column name in a list, set, tuple, or dictionary (e.g., `numeric_cols = ['Target', ...]`).
+2. **Accesses, reads, or slices the column**:
+   - Accesses the column from a DataFrame or dict (e.g., `df['Target']`, `df[col]`, `df[['Target', ...]]`, `df.loc[:, 'Target']`).
+3. **Applies batch operations / loops**:
+   - If the column is in a list/collection (e.g., `numeric_cols`), any loop or comprehension iterating over that collection and operating on DataFrame columns touches the column (e.g., lines inside `for c in numeric_cols: df[c] = pd.to_numeric(df[c])`).
+4. **Operates on direct aliases of the column**:
+   - If the column is extracted as a Series or assigned to a variable (e.g., `s = df['Target']` or `s = df[col].astype(int)`), any line that directly reads, transforms, filters, conditions, aggregates, or calls methods on `s` touches the target column (e.g., `s.mean()`, `(s == 1)`, `s.isin(...)`, `s.clip()`, `np.where(s == 1, ...)`).
+5. **Modifies, writes, or creates outputs with the column**:
+   - In-place modifications, assignments (`df['Target'] = ...`), renames, drops.
+   - Selecting or preserving the column into output DataFrames, dictionaries, or export tables (e.g., `out = df[[..., col, ...]]`, `'Target': s`).
+
+*(Note: Do not trace downstream scalar variables derived from aggregations, such as float scalars used in math formulas, unless they directly evaluate against the column or its Series alias).*
+
+---
+
+### Instructions & Rules
+1. **Accurate 1-Based Line Numbering**:
+   - Number lines starting from 1 at the very first line of the provided script.
+   - Count every line precisely, including empty lines, comments, and docstrings. Do NOT estimate or guess line numbers.
+2. **Merge Adjacent Lines**:
+   - If contiguous lines touch the target column (e.g., lines 12, 13, and 14), combine them into a single range: `{"start_line": 12, "end_line": 14}`.
+   - Single isolated lines must have `start_line == end_line`.
+3. **Sort Ranges**:
+   - Output ranges in ascending order of `start_line`. Ranges must not overlap.
+4. **Strict JSON Output**:
+   - Return only a valid JSON object matching the exact schema below, with no surrounding explanations or markdown commentary outside the JSON block.
+
+```json
+{
+  "sources": [
+    { "start_line": int, "end_line": int }
+  ]
+}
+```
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+Translate the provided data assumptions and code context into PyDeequ quality checks.
+
+### Context & Objective
+Your goal is to validate input data quality against assumptions derived from downstream code. The validation pipeline evaluates whether "unsafe" batches (data batches containing corrupt, missing, or invalid values that violate assumptions or break code) are correctly detected and flagged.
+
+### Critical Level Guidelines ("error" vs "warning")
+- **"error"**: Must be assigned to any check validating a fundamental requirement. If data violating this check would cause runtime exceptions (e.g., `KeyError` from missing column, `ValueError` from failed type conversion, negative inputs into domain formulas) or fundamentally invalidates downstream computations:
+  - Column presence and completeness (e.g., `.isComplete('col')`) must be set to **"error"**.
+  - Type conformance (e.g., `.hasDataType('col', ConstrainableDataTypes...)`) when code explicitly casts or relies on numeric/integral operations must be set to **"error"**.
+  - Structural domain constraints (e.g., `.isNonNegative('col')` for counts/credits/units, or boundaries for percentages and grades) must be set to **"error"**.
+  - **Caution**: If you mark critical checks as `"warning"`, unsafe batches will not be caught as errors, causing 0% detection rates on corrupted batches. Do NOT default to `"warning"` merely because pandas/numpy might silently propagate NaNs or negative numbers.
+- **"warning"**: Reserve for soft expectations, non-breaking statistical distribution shifts, or non-fatal quality thresholds where downstream code handles degradation gracefully without breaking data contracts.
+
+### Constraint Selection Strategy
+1. **Never rely on `hasDataType` alone**:
+   - In PyDeequ/Spark, `hasDataType` checks type conformance across non-null values. It does NOT guarantee that the column is non-null. Always pair type checks with `.isComplete(column)` if nulls are prohibited.
+2. **Always enforce domain constraints**:
+   - For count or volume fields (e.g., enrolled units, credited units, evaluations, approved units, ages), always enforce `.isNonNegative(column)` or `.satisfies('`col` >= 0', 'col_non_negative')`.
+   - For bounded metrics (e.g., grades on a 0-20 scale, probabilities on 0-1), enforce range conditions using `.satisfies('`col` >= min_val AND `col` <= max_val', 'name')`.
+   - In `.satisfies()`, wrap column names containing spaces or special characters in SQL backticks (e.g., `` `Curricular units 1st sem (enrolled)` >= 0 ``).
+3. **Comprehensive Coverage**:
+   - For any column under inspection, generate checks that cover all aspects of its assumptions: completeness (`.isComplete`), valid data type (`.hasDataType`), and valid value ranges (`.isNonNegative`, `.satisfies`, `.isContainedIn`).
+
+### Available Functions Reference
+
+#### Row-Level Functions:
+- `.isComplete(column)`: Validates column contains no null values.
+- `.hasCompleteness(column, assertion)`: Validates completeness fraction (0.0 to 1.0) matches lambda. Example: `.hasCompleteness('credits', lambda x: x >= 0.95)`
+- `.areComplete(columns)`: Validates all columns in list contain no null values.
+- `.haveCompleteness(columns, assertion)`: Completeness fraction across set of columns.
+- `.areAnyComplete(columns)`: At least one column in set is complete.
+- `.satisfies(columnCondition, constraintName, assertion=None)`: SQL WHERE-clause condition. Use backticks for columns with spaces/special characters. Example: `.satisfies('`grade` >= 0.0 AND `grade` <= 20.0', 'grade_bounds')`
+- `.hasPattern(column, pattern, assertion=None, name=None)`: Validates regex pattern. Use raw strings `r"..."`.
+- `.hasDataType(column, datatype, assertion=None)`: Validates datatype against `ConstrainableDataTypes.<Type>` where Type is `Integral`, `Fractional`, `Numeric`, `String`, `Boolean`, or `Null`.
+- `.isNonNegative(column, assertion=None)`: Validates numeric column values >= 0.
+- `.isPositive(column, assertion=None)`: Validates numeric column values > 0.
+- `.isLessThan(columnA, columnB, assertion=None)` / `.isLessThanOrEqualTo(columnA, columnB, assertion=None)`
+- `.isGreaterThan(columnA, columnB, assertion=None)` / `.isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`
+- `.isContainedIn(column, allowed_values, assertion=None)`: Validates column values are within a given list.
+- `.containsCreditCardNumber(column)` / `.containsEmail(column)` / `.containsURL(column)` / `.containsSocialSecurityNumber(column)`
+
+#### Aggregate-Level Functions:
+- `.hasSize(assertion)`: Validates total row count. Example: `.hasSize(lambda x: x > 0)`
+- `.isUnique(column)`: Validates no duplicate values.
+- `.hasUniqueness(columns, assertion)` / `.hasDistinctness(columns, assertion)` / `.hasUniqueValueRatio(columns, assertion)`
+- `.hasNumberOfDistinctValues(column, assertion, binningUdf=None, maxBins=1000)`
+- `.hasMin(column, assertion)` / `.hasMax(column, assertion)`
+- `.hasMean(column, assertion)` / `.hasStandardDeviation(column, assertion)`
+- `.hasApproxQuantile(column, quantile, assertion)`
+- `.hasMinLength(column, assertion)` / `.hasMaxLength(column, assertion)`
+- `.hasCorrelation(columnA, columnB, assertion)` / `.hasMutualInformation(columnA, columnB, assertion)`
+
+### Output Format
+Return strictly a JSON object with key `"constraint_code"`. Each item must specify:
+- `"suggestion"`: PyDeequ constraint call string (starting with `.`).
+- `"level"`: `"error"` or `"warning"`.
+- `"linked assumptions"`: List of 0-indexed integers corresponding to the input assumptions.
+
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": ".isComplete('column_name')",
+      "level": "error",
+      "linked assumptions": [0]
+    },
+    {
+      "suggestion": ".hasDataType('column_name', ConstrainableDataTypes.Integral)",
+      "level": "error",
+      "linked assumptions": [1]
+    },
+    {
+      "suggestion": ".isNonNegative('column_name')",
+      "level": "error",
+      "linked assumptions": [1]
+    }
+  ]
+}
+```
+
+================================================================================
+

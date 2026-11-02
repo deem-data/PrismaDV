@@ -5,12 +5,15 @@ from prismadv.error_injection.abstract_corruption import TabularCorruption
 
 class MissingCategoricalValueCorruption(TabularCorruption):
     def __init__(self, columns: object = None, severity: float = 0.1, corrupt_strategy: object = "to_nan",
-                 **kwargs: object):
+                 max_unique_num: int = 30, **kwargs: object):
         super().__init__(columns, **kwargs)
         self.severity = severity
-        self.max_unique_num = 30
+        # Columns with fewer distinct values than this count as categorical
+        # when `columns` is not given.
+        self.max_unique_num = max_unique_num
         self.corrupt_strategy = corrupt_strategy
-        assert self.corrupt_strategy in ["to_nan", "to_majority", "to_random", "remove"]
+        if self.corrupt_strategy not in ["to_nan", "to_majority", "to_random", "remove"]:
+            raise ValueError(f"unknown corrupt_strategy '{self.corrupt_strategy}'")
 
     def identify_columns(self, dataframe):
         """
@@ -60,20 +63,26 @@ class MissingCategoricalValueCorruption(TabularCorruption):
 
         remove_mask = corrupted_df[column].isin(categories_to_remove)
 
+        # `to_majority` and `to_random` write values the column already holds,
+        # so its dtype is kept: a numeric column stays numeric for whatever
+        # corruption runs next (an object cast here made GaussianNoise refuse
+        # the column). Only `to_nan` needs the object cast, which keeps an int
+        # column from being upcast to float for the untouched rows.
         if self.corrupt_strategy == "to_nan":
             corrupted_df[column] = corrupted_df[column].astype("object")
             corrupted_df.loc[remove_mask, column] = np.nan
         elif self.corrupt_strategy == "to_majority":
-            corrupted_df[column] = corrupted_df[column].astype("object")
             majority = corrupted_df[column].mode().values[0]
             corrupted_df.loc[remove_mask, column] = majority
         elif self.corrupt_strategy == "to_random":
-            corrupted_df[column] = corrupted_df[column].astype("object")
-            unique_values = set(corrupted_df[column].unique()) - set(categories_to_remove)
-            if len(unique_values) > 0:
-                unique_values = list(unique_values)
-            else:
-                unique_values = categories_to_remove
+            # Sorted, not a set: a set of strings iterates in an order that
+            # depends on the process's hash seed, so the same seed drew
+            # different replacements on every run.
+            unique_values = sorted(
+                set(corrupted_df[column].dropna().unique()) - set(categories_to_remove), key=str
+            )
+            if not unique_values:
+                unique_values = list(categories_to_remove)
             corrupted_df.loc[remove_mask, column] = np.random.choice(unique_values, remove_mask.sum())
         elif self.corrupt_strategy == "remove":
             corrupted_df = corrupted_df[~remove_mask]

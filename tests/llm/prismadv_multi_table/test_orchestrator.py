@@ -187,11 +187,10 @@ def test_multi_file_code_context_renders_independent_file_line_numbers():
         ]
     )
 
-    rendered = context.add_highlighted_line_numbers(
-        [SourceLocation(file="adapter/case.py", start_line=2, end_line=2)]
-    )
+    rendered = context.with_line_numbers()
 
     assert "# File: adapter/run_script.py" in rendered
     assert "# File: adapter/case.py" in rendered
     assert "      0001: import case" in rendered
-    assert "-**-> 0002:     return 1" in rendered
+    assert "      0001: def run():" in rendered
+    assert "      0002:     return 1" in rendered

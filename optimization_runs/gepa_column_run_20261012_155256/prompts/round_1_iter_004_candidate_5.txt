@@ -1,0 +1,137 @@
+================================================================================
+GEPA Column-Level Baseline - Prompt Log
+================================================================================
+
+Round: 1
+Iteration: 4
+Candidate Index: 5
+Score: 0.4810
+Timestamp: 2026-10-12T16:46:54.095447
+
+================================================================================
+
+[dataflow_inspector]
+--------------------------------------------------------------------------------
+List every line of the code that touches the target column: reads it, writes it, filters on it, transforms it, merges it, or passes it along. Use 1-based line numbers; put adjacent lines in one range.
+
+Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...] }
+
+================================================================================
+
+[assumption_generation]
+--------------------------------------------------------------------------------
+Code makes assumptions about its input data, often without stating them. For example, fillna on a column means the column may contain nulls, and an assert sets a bound the data must meet. From the code that uses the target column and the task description, write these assumptions as statements about the input data that a Deequ check can test.
+
+Output only valid JSON (numbers without leading zeros): { "assumptions": [{ "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }
+
+================================================================================
+
+[ir_generation]
+--------------------------------------------------------------------------------
+markdown
+You are an expert data quality and data engineering assistant. Your task is to translate data quality assumptions for a target column into PyDeequ verification checks.
+
+### Input Format
+You will be provided with:
+1. `target_column`: The name of the column being evaluated.
+2. `target_column_desc`: Profiling metadata and statistics for the column (e.g., completeness, data types, type counts, distinct values, histogram).
+3. `code_snippet`: The downstream Python script (with line numbers) that consumes the data.
+4. `downstream_task_description`: Context or description of the pipeline/task.
+5. `assumptions`: A numbered list of assumptions (from index 0) derived for the target column.
+
+---
+
+### Output Format
+Return a valid JSON object with the following structure:
+```json
+{
+  "constraint_code": [
+    {
+      "suggestion": "<PyDeequ constraint method call starting with '.'>",
+      "level": "error" | "warning",
+      "linked assumptions": [0, 1]
+    }
+  ]
+}
+```
+
+---
+
+### Critical Guidelines for "level" ("error" vs "warning")
+An evaluation framework evaluates your generated checks against both safe and unsafe data batches. **Unsafe batches are only flagged/caught when critical checks trigger at the `"error"` level.** Setting checks to `"warning"` by default will result in 0 unsafe batches being caught.
+
+Apply the following logic:
+- **Set `level: "error"`** for core integrity checks that represent hard requirements for the pipeline's logic and data validity:
+  - Completeness / non-nullness (`isComplete`) for columns used in filtering, grouping, joins, primary identifiers, or conditional branches.
+  - Data type validity (`hasDataType`) where unexpected types would cause runtime exceptions, silent type coercion, or corrupt calculations.
+  - Value domain / set membership (`isContainedIn`) for categorical status/decision flags driving downstream control flow.
+  - Critical structural conditions / business invariants (`satisfies`, column comparisons) without which outputs are invalid or computations produce meaningless/corrupt results.
+  - Non-emptiness / required filter matches (e.g., matching rows must exist for downstream aggregation).
+- **Set `level: "warning"`** only for soft quality attributes or informational statistics:
+  - Approximate statistical distributions, quantiles, means, standard deviations.
+  - String length bounds (`hasMinLength`, `hasMaxLength`) that do not break downstream processing.
+  - Completeness thresholds on optional/auxiliary columns where partial missingness is tolerated.
+
+When an assumption describes a requirement using "must", "required", "should only contain", "must not be null", or defines essential types/values for the downstream pipeline, prioritize **`"error"`**.
+
+---
+
+### PyDeequ Syntax and Best Practices
+1. **Method chaining format**: Every suggestion string must start with a dot (e.g., `.isComplete('column_name')`).
+2. **Column naming**: In `satisfies` SQL WHERE conditions, always wrap column names in backticks (e.g., `` `team2` != `team1` `` or `` `match_type` = 'League' ``).
+3. **Data Types**: Use the `ConstrainableDataTypes` enum for `hasDataType`:
+   - `ConstrainableDataTypes.Null`
+   - `ConstrainableDataTypes.Fractional`
+   - `ConstrainableDataTypes.Integral`
+   - `ConstrainableDataTypes.Boolean`
+   - `ConstrainableDataTypes.String`
+   - `ConstrainableDataTypes.Numeric` (union of Integral and Fractional)
+4. **Regular Expressions**: In `hasPattern`, always use Python raw string notation (e.g., `r"^\d+$"`).
+5. **Set Membership**: In `isContainedIn`, pass the exact list of allowed string or numeric values: `.isContainedIn('col', ['A', 'B'])`.
+6. **Linking Assumptions**: Include all 0-based indices of the assumptions addressed by each constraint in `"linked assumptions"`.
+
+---
+
+### Available Functions Reference
+
+#### Row-Level Functions:
+- `isComplete(column)`: Validates column has no nulls. Example: `.isComplete('col')`
+- `hasCompleteness(column, assertion)`: Validates completeness fraction (0.0 to 1.0). Example: `.hasCompleteness('col', lambda x: x >= 0.95)`
+- `areComplete(columns)`: Validates all columns in list contain no nulls. Example: `.areComplete(['col1', 'col2'])`
+- `haveCompleteness(columns, assertion)`: Completeness across set of columns. Example: `.haveCompleteness(['col1', 'col2'], lambda x: x >= 0.95)`
+- `areAnyComplete(columns)`: At least one column is complete. Example: `.areAnyComplete(['col1', 'col2'])`
+- `satisfies(columnCondition, constraintName, assertion=None)`: SQL WHERE condition. Example: `.satisfies('`col1` <= `col2`', 'c1_le_c2')` or `.satisfies('`status` = \'League\'', 'has_league', lambda x: x > 0)`
+- `hasPattern(column, pattern, assertion=None, name=None)`: Regex match. Example: `.hasPattern('id', r'^\d+$')`
+- `containsCreditCardNumber(column, assertion=None)`
+- `containsEmail(column, assertion=None)`
+- `containsURL(column, assertion=None)`
+- `containsSocialSecurityNumber(column, assertion=None)`
+- `hasDataType(column, datatype, assertion=None)`: Validates against `ConstrainableDataTypes.*`. Example: `.hasDataType('col', ConstrainableDataTypes.String)`
+- `isNonNegative(column, assertion=None)`: Numeric >= 0. Example: `.isNonNegative('col')`
+- `isPositive(column, assertion=None)`: Numeric > 0. Example: `.isPositive('col')`
+- `isLessThan(columnA, columnB, assertion=None)`: columnA < columnB.
+- `isLessThanOrEqualTo(columnA, columnB, assertion=None)`: columnA <= columnB.
+- `isGreaterThan(columnA, columnB, assertion=None)`: columnA > columnB.
+- `isGreaterThanOrEqualTo(columnA, columnB, assertion=None)`: columnA >= columnB.
+- `isContainedIn(column, allowed_values, assertion=None)`: Example: `.isContainedIn('col', ['A', 'B'])`
+
+#### Aggregate-Level Functions:
+- `hasSize(assertion)`: Row count assertion. Example: `.hasSize(lambda x: x >= 100)`
+- `haveAnyCompleteness(columns, assertion)`: Completeness of at least one column.
+- `isUnique(column)`: Every value occurs exactly once. Example: `.isUnique('id')`
+- `hasUniqueness(columns, assertion)`: Ratio of unique values. Example: `.hasUniqueness(['id'], lambda x: x >= 0.99)`
+- `hasDistinctness(columns, assertion)`: Ratio of distinct values to total rows.
+- `hasUniqueValueRatio(columns, assertion)`: Ratio of unique values to distinct values.
+- `hasNumberOfDistinctValues(column, assertion, binningUdf=None, maxBins=1000)`
+- `hasMutualInformation(columnA, columnB, assertion)`
+- `hasApproxQuantile(column, quantile, assertion)`: Example: `.hasApproxQuantile('col', 0.5, lambda x: x >= 10)`
+- `hasMinLength(column, assertion)`: Minimum string length. Example: `.hasMinLength('col', lambda x: x >= 3)`
+- `hasMaxLength(column, assertion)`: Maximum string length. Example: `.hasMaxLength('col', lambda x: x <= 50)`
+- `hasMin(column, assertion)`: Numeric minimum. Example: `.hasMin('col', lambda x: x >= 0)`
+- `hasMax(column, assertion)`: Numeric maximum. Example: `.hasMax('col', lambda x: x <= 100)`
+- `hasMean(column, assertion)`: Numeric mean. Example: `.hasMean('col', lambda x: 10 <= x <= 20)`
+- `hasStandardDeviation(column, assertion)`
+- `hasCorrelation(columnA, columnB, assertion)`
+
+================================================================================
+

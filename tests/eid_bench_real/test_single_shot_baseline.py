@@ -46,7 +46,7 @@ def write_eid_bench_real_project(tmp_path: Path) -> Path:
     return example_root
 
 
-def test_single_shot_real_etl_generates_project_level_constraints(tmp_path):
+def test_single_shot_generates_project_level_constraints(tmp_path):
     write_eid_bench_real_project(tmp_path)
     captured_input = {}
 
@@ -88,13 +88,13 @@ def test_single_shot_real_etl_generates_project_level_constraints(tmp_path):
         / "project"
         / output_path.name
     )
-    assert output_path.name.startswith("single_shot_real_etl--gpt-5-mini--")
+    assert output_path.name.startswith("single_shot--gpt-5-mini--")
     assert "Project scripts:" in captured_input["downstream_task_description"]
     assert "patients:" in captured_input["tables_desc"]
     assert "encounters:" in captured_input["data_sample"]
 
     raw = yaml.safe_load(output_path.read_text(encoding="utf-8"))
-    assert raw["baseline_method"] == "single_shot_real_etl"
+    assert raw["baseline_method"] == "single_shot"
     assert raw["input_artifact"].endswith("constraints/project/prismadv_inputs.yaml")
     assert sorted(raw["constraints"]) == ["encounters.PATIENT", "patients.Id"]
     assert raw["constraints"]["patients.Id"]["table_name"] == "patients"
@@ -102,7 +102,7 @@ def test_single_shot_real_etl_generates_project_level_constraints(tmp_path):
     assert raw["constraints"]["patients.Id"]["code"][0]["validity"] is True
 
 
-def test_single_shot_real_etl_reuses_existing_model_artifact_without_overwrite(tmp_path):
+def test_single_shot_reuses_existing_model_artifact_without_overwrite(tmp_path):
     write_eid_bench_real_project(tmp_path)
     calls = 0
 
