@@ -1,0 +1,585 @@
+sifta_generation:
+  program: sifta
+  run_dir: optimization_runs/run_20261014_005436
+  run_settings:
+    batch_sampler_strategy: worst_first
+    feedback_level: full
+    silent_as_safe: 0.0
+  metric_rev: error_level
+  final_program_round: final
+  final_program_val_score: 20.0
+  instructions:
+    dataflow_inspector: 'Find every exact line in the code script that references
+      the target column, including where it is loaded, read, indexed, filtered, transformed,
+      aggregated, sorted, or included in output/export column lists (e.g., in list
+      literals like out_cols or subset selections).
+
+
+      Line Counting and Verification Guidelines:
+
+      1. Use exact 1-based line numbering: Start counting at line 1 for the very first
+      line of the file (including all comments, blank lines, and imports).
+
+      2. Content verification: Before outputting a line number, verify that the line
+      text explicitly contains the target column name as a string literal (e.g., ''col''
+      or "col"), variable, or parameter. Do not output adjacent blank lines, closing
+      braces, or unrelated statements. If a line does not literally contain the target
+      column name, check adjacent lines (N-1, N+1) to avoid off-by-one indexing errors.
+
+      3. Group contiguous lines that reference the target column into a single range
+      [start_line, end_line]. Separate occurrences should be distinct entries.
+
+
+      Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...]
+      }'
+    assumption_generation: "Analyze how the target column is used in the focused code\
+      \ and downstream task, combined with target_column_desc, to determine the input\
+      \ data assumptions required for the code to run correctly and produce valid\
+      \ results.\n\nGuidelines:\n1. Ground assumptions in code usage and target_column_desc:\n\
+      \   - Distinguish the column's role in the script:\n     a. Critical execution/calculation\
+      \ dependency: The column is directly used in unhandled mathematical operations\
+      \ (e.g., polyfit, division, logarithms), string extractions with strict casting\
+      \ (e.g., unhandled .str.extract().astype(int)), or index integrity enforcement\
+      \ (e.g., set_index(..., verify_integrity=True)). Violations cause immediate\
+      \ crashes or corrupted calculations.\n     b. Defensively handled dependency:\
+      \ The code uses defensive constructs (e.g., errors='coerce', .fillna(), .clip(),\
+      \ mapping fallbacks). The code is built to tolerate missing or out-of-vocabulary\
+      \ values; only severe corruption (e.g., negative counts passed into logarithms)\
+      \ causes silent errors.\n     c. Pass-through / optional output: The column\
+      \ is only listed in export column lists (e.g., out_cols with [c for c in out_cols\
+      \ if c in final.columns]) and is not used in calculations or filtering. The\
+      \ script execution and core metrics do not depend on it; do not generate strict,\
+      \ failure-inducing assumptions for pass-through columns.\n2. Completeness and\
+      \ presence requirements:\n   - Assume strict completeness (non-null) ONLY when\
+      \ null values would trigger an unhandled crash (e.g., direct unhandled .astype(int),\
+      \ string extract casts, verify_integrity=True on index keys).\n   - If the script\
+      \ defensively fills or handles nulls (e.g., .fillna('Not Rated'), .fillna(median)),\
+      \ do NOT assume high completeness thresholds (e.g., >= 0.8), as safe data partitions\
+      \ naturally fluctuate in missingness.\n3. Domain, format, and semantic bounds\
+      \ (IMDb dataset conventions):\n   - Gross: Formatted as string with commas (e.g.,\
+      \ \"28,341,469\") with ~83% completeness. When used in log transforms (np.log1p),\
+      \ non-null values must parse to non-negative numbers (>= 0).\n   - Runtime:\
+      \ Formatted as string with minutes (e.g., \"142 min\"). If parsed via regex\
+      \ and strictly cast to int, values must be non-null and contain numeric digits.\n\
+      \   - No_of_Votes: Non-negative count (>= 0), required for log transforms (np.log1p\
+      \ / np.log10).\n   - IMDB_Rating: Bounded numeric score (0 to 10), used in quality\
+      \ scaling.\n   - Series_Title & Released_Year: When used as unique multi-index\
+      \ keys with verify_integrity=True, combinations must be unique and non-null.\n\
+      \   - Certificate & Meta_score: Often defensively filled (fillna) or passed\
+      \ through to output. Do not assume strict completeness or rigid types when handled\
+      \ gracefully.\n4. Avoid overly narrow or fragile assumptions:\n   - Do NOT assume\
+      \ arbitrary completeness ratios or overly narrow numeric bounds that safe partitions\
+      \ may legitimately deviate from.\n   - Clearly state whether the property is\
+      \ a strict requirement (crash/corruption) or a tolerated/advisory condition.\n\
+      \nOutput only valid JSON (numbers without leading zeros): { \"assumptions\"\
+      : [{ \"text\": str, \"sources\": [{ \"start_line\": int, \"end_line\": int }]\
+      \ }, ...] }"
+    ir_generation: "Translate the assumptions into executable PyDeequ checks.\n\n\
+      Constraint Level Rules:\n- A validation suite rejects unsafe partitions only\
+      \ when an \"error\" constraint fails. A single failing \"error\" constraint\
+      \ marks the entire partition as erroneous. Therefore:\n  - Set level \"error\"\
+      \ ONLY if violating the check causes the code to crash (e.g., unhandled null\
+      \ in strict int cast, duplicate keys in verify_integrity=True) OR silently corrupts\
+      \ downstream calculations/rankings (e.g., negative counts in log transforms).\n\
+      \  - Set level \"warning\" for checks on properties that the code handles defensively\
+      \ (e.g., .fillna(), errors='coerce', fallback mappings) or for columns that\
+      \ are purely pass-through / optional in output column selections (e.g., [c for\
+      \ c in out_cols if c in final.columns]).\n  - Do NOT force an \"error\" constraint\
+      \ on columns that are defensively handled or pass-through; having only \"warning\"\
+      \ constraints (or no error constraints) is correct for columns whose variation\
+      \ cannot crash or corrupt the pipeline.\n\nTranslation Guidelines & Patterns:\n\
+      1. Crash-Inducing Completeness & Uniqueness (Error level):\n   - If nulls cause\
+      \ an unhandled crash (e.g., unhandled .astype(int), index verification): use\
+      \ `.isComplete(column)` with level \"error\".\n   - If key uniqueness is strictly\
+      \ required (e.g., verify_integrity=True): use `.isUnique(column)` or `.hasUniqueness([cols],\
+      \ lambda x: x == 1.0)` with level \"error\".\n2. Defensively Handled Completeness\
+      \ (Warning level):\n   - If the script uses .fillna() or handles missing values\
+      \ gracefully, do NOT use `.hasCompleteness(..., lambda x: x >= 0.8)` with level\
+      \ \"error\". Safe partitions can have lower completeness without harming the\
+      \ pipeline. If checking presence, use `.hasCompleteness(column, lambda x: x\
+      \ > 0.0)` or set level to \"warning\".\n3. Data Type Conformance with Null Tolerance:\n\
+      \   - Note: In PyDeequ, `.hasDataType` evaluates null rows as non-conforming.\
+      \ If a column contains nulls (completeness < 1.0 in target_column_desc), using\
+      \ `.hasDataType` without a threshold will fail on clean data.\n   - For string\
+      \ columns with numbers/commas (e.g., Gross): use SQL satisfies with null tolerance:\n\
+      \     `.satisfies(\"`column` IS NULL OR CAST(REPLACE(`column`, ',', '') AS DOUBLE)\
+      \ IS NOT NULL\", \"column_parsable\", lambda x: x >= 0.95)`\n   - For defensive\
+      \ coercion (errors='coerce'): use `.hasDataType(column, ConstrainableDataTypes.<Type>,\
+      \ lambda x: x >= 0.85)` or set level to \"warning\".\n4. Domain & Non-Negativity\
+      \ Bounds:\n   - For quantities requiring non-negativity in math (e.g., No_of_Votes,\
+      \ parsed Gross in np.log1p):\n     - If numeric and complete: `.isNonNegative(column)`\
+      \ with level \"error\".\n     - If formatted string with commas or nullable:\
+      \ `.satisfies(\"`Gross` IS NULL OR CAST(REPLACE(`Gross`, ',', '') AS DOUBLE)\
+      \ >= 0\", \"gross_non_negative\", lambda x: x >= 0.95)` with level \"error\"\
+      .\n5. Pattern Matching:\n   - For strings containing required patterns (e.g.,\
+      \ Runtime containing digits): `.hasPattern(column, r'.*\\d+.*')` with level\
+      \ \"error\" if unparsed strings crash downstream astype(int).\n\nLink each check\
+      \ to the indices (from 0) of the assumptions it tests.\n\nOutput: {\"constraint_code\"\
+      : [{\"suggestion\": PyDeequ code (starting with \".\" or a function), \"level\"\
+      : \"warning\"|\"error\", \"linked assumptions\": [indices]}, ...]}\n\nAvailable\
+      \ Row-Level Functions:\nName: isComplete, Description: Validates that a column\
+      \ contains no null values. A column is considered complete if all rows have\
+      \ non-null values.\n RequiredArgs: ['column']\n OptionalArgs: []\n Example:\
+      \ .isComplete('student_id')\nName: hasCompleteness, Description: Validates the\
+      \ completeness fraction of a column. Completeness is the ratio of non-null values\
+      \ to total rows. The assertion lambda receives the completeness fraction (0.0\
+      \ to 1.0) and returns a boolean indicating if it meets the threshold.\n RequiredArgs:\
+      \ ['column', 'assertion']\n OptionalArgs: []\n Example: .hasCompleteness('credits_attempted',\
+      \ lambda x: x >= 0.95)\nName: areComplete, Description: Validates that all columns\
+      \ in a set are complete (contain no null values). All specified columns must\
+      \ have non-null values in every row.\n RequiredArgs: ['columns']\n OptionalArgs:\
+      \ []\n Example: .areComplete(['student_id', 'target'])\nName: haveCompleteness,\
+      \ Description: Validates the completeness fraction across a set of columns.\
+      \ The assertion lambda receives the completeness fraction and returns a boolean\
+      \ indicating if it meets the threshold.\n RequiredArgs: ['columns', 'assertion']\n\
+      \ OptionalArgs: []\n Example: .haveCompleteness(['credits_attempted', 'credits_completed'],\
+      \ lambda x: x >= 0.95)\nName: areAnyComplete, Description: Validates that at\
+      \ least one column in a set is complete (contains no null values). At least\
+      \ one of the specified columns must have non-null values in every row.\n RequiredArgs:\
+      \ ['columns']\n OptionalArgs: []\n Example: .areAnyComplete(['student_id', 'target'])\n\
+      Name: satisfies, Description: Validates a custom SQL-like condition on the dataframe.\
+      \ The columnCondition should be written as a SQL WHERE clause condition (e.g.,\
+      \ '`col1` <= `col2`'). The constraintName is a descriptive name for the constraint.\
+      \ The optional assertion lambda receives the fraction of rows that satisfy the\
+      \ condition and returns a boolean indicating if it meets the threshold.\n RequiredArgs:\
+      \ ['columnCondition', 'constraintName']\n OptionalArgs: ['assertion']\n Examples:\n\
+      \  - .satisfies('`credits_completed` <= `credits_attempted`', 'completed_le_attempted')\n\
+      \  - .satisfies('`credits_completed` <= `credits_attempted`', 'completed_le_attempted',\
+      \ lambda x: x >= 0.95)\nName: hasPattern, Description: Validates that column\
+      \ values match a regular expression pattern. The pattern is a regex string.\
+      \ The optional assertion lambda receives the fraction of matching rows and returns\
+      \ a boolean indicating if it meets the threshold. The optional name parameter\
+      \ provides a descriptive name for the constraint.\nIMPORTANT: Use raw strings\
+      \ (r\"...\") for regex patterns to avoid escape sequence issues. For example,\
+      \ use r\"^\\d+$\" instead of \"^\\\\d+$\".\n RequiredArgs: ['column', 'pattern']\n\
+      \ OptionalArgs: ['assertion', 'name']\n Examples:\n  - .hasPattern('student_id',\
+      \ r'^id_\\d+$')\n  - .hasPattern('student_id', r'^id_\\d+$', lambda x: x >=\
+      \ 0.95)\nName: containsCreditCardNumber, Description: Validates that values\
+      \ in a string column are valid credit card numbers. The optional assertion lambda\
+      \ receives the fraction of valid credit card numbers and returns a boolean indicating\
+      \ if it meets the threshold.\n RequiredArgs: ['column']\n OptionalArgs: ['assertion']\n\
+      \ Examples:\n  - .containsCreditCardNumber('credit_card')\n  - .containsCreditCardNumber('credit_card',\
+      \ lambda x: x >= 0)\nName: containsEmail, Description: Validates that values\
+      \ in a string column are valid email addresses. The optional assertion lambda\
+      \ receives the fraction of valid emails and returns a boolean indicating if\
+      \ it meets the threshold.\n RequiredArgs: ['column']\n OptionalArgs: ['assertion']\n\
+      \ Examples:\n  - .containsEmail('email')\n  - .containsEmail('email', lambda\
+      \ x: x >= 0)\nName: containsURL, Description: Validates that values in a string\
+      \ column are valid URLs. The optional assertion lambda receives the fraction\
+      \ of valid URLs and returns a boolean indicating if it meets the threshold.\n\
+      \ RequiredArgs: ['column']\n OptionalArgs: ['assertion']\n Examples:\n  - .containsURL('url')\n\
+      \  - .containsURL('url', lambda x: x >= 0)\nName: containsSocialSecurityNumber,\
+      \ Description: Validates that values in a string column are valid US social\
+      \ security numbers. The optional assertion lambda receives the fraction of valid\
+      \ SSNs and returns a boolean indicating if it meets the threshold.\n RequiredArgs:\
+      \ ['column']\n OptionalArgs: ['assertion']\n Examples:\n  - .containsSocialSecurityNumber('ssn')\n\
+      \  - .containsSocialSecurityNumber('ssn', lambda x: x >= 0)\nName: hasDataType,\
+      \ Description: Validates that values in a column conform to the specified data\
+      \ type. The datatype parameter must be a ConstrainableDataTypes enum value from\
+      \ pydeequ.checks.ConstrainableDataTypes. Valid enum values are: ConstrainableDataTypes.Null,\
+      \ ConstrainableDataTypes.Fractional, ConstrainableDataTypes.Integral, ConstrainableDataTypes.Boolean,\
+      \ ConstrainableDataTypes.String, and ConstrainableDataTypes.Numeric (union of\
+      \ Integral and Fractional). The optional assertion lambda receives the fraction\
+      \ of conforming rows and returns a boolean indicating if it meets the threshold.\n\
+      \ RequiredArgs: ['column', 'datatype']\n OptionalArgs: ['assertion']\n Examples:\n\
+      \  - .hasDataType('student_id', ConstrainableDataTypes.String)\n  - .hasDataType('student_id',\
+      \ ConstrainableDataTypes.String, lambda x: x >= 0.95)\nName: isNonNegative,\
+      \ Description: Validates that a numeric column contains no negative values (values\
+      \ >= 0). The optional assertion lambda receives the fraction of non-negative\
+      \ rows and returns a boolean indicating if it meets the threshold.\n RequiredArgs:\
+      \ ['column']\n OptionalArgs: ['assertion']\n Examples:\n  - .isNonNegative('credits_attempted')\n\
+      \  - .isNonNegative('credits_attempted', lambda x: x >= 0.95)\nName: isPositive,\
+      \ Description: Validates that a numeric column contains only positive values\
+      \ (values > 0). The optional assertion lambda receives the fraction of positive\
+      \ rows and returns a boolean indicating if it meets the threshold.\n RequiredArgs:\
+      \ ['column']\n OptionalArgs: ['assertion']\n Examples:\n  - .isPositive('credits_attempted')\n\
+      \  - .isPositive('credits_attempted', lambda x: x >= 0.95)\nName: isLessThan,\
+      \ Description: Validates that values in columnA are less than corresponding\
+      \ values in columnB for each row. The optional assertion lambda receives the\
+      \ fraction of rows where columnA < columnB and returns a boolean indicating\
+      \ if it meets the threshold.\n RequiredArgs: ['columnA', 'columnB']\n OptionalArgs:\
+      \ ['assertion']\n Examples:\n  - .isLessThan('credits_completed', 'credits_attempted')\n\
+      \  - .isLessThan('credits_completed', 'credits_attempted', lambda x: x >= 0.95)\n\
+      Name: isLessThanOrEqualTo, Description: Validates that values in columnA are\
+      \ less than or equal to corresponding values in columnB for each row. The optional\
+      \ assertion lambda receives the fraction of rows where columnA <= columnB and\
+      \ returns a boolean indicating if it meets the threshold.\n RequiredArgs: ['columnA',\
+      \ 'columnB']\n OptionalArgs: ['assertion']\n Examples:\n  - .isLessThanOrEqualTo('credits_completed',\
+      \ 'credits_attempted')\n  - .isLessThanOrEqualTo('credits_completed', 'credits_attempted',\
+      \ lambda x: x >= 0.95)\nName: isGreaterThan, Description: Validates that values\
+      \ in columnA are greater than corresponding values in columnB for each row.\
+      \ The optional assertion lambda receives the fraction of rows where columnA\
+      \ > columnB and returns a boolean indicating if it meets the threshold.\n RequiredArgs:\
+      \ ['columnA', 'columnB']\n OptionalArgs: ['assertion']\n Examples:\n  - .isGreaterThan('credits_attempted',\
+      \ 'credits_completed')\n  - .isGreaterThan('credits_attempted', 'credits_completed',\
+      \ lambda x: x >= 0.95)\nName: isGreaterThanOrEqualTo, Description: Validates\
+      \ that values in columnA are greater than or equal to corresponding values in\
+      \ columnB for each row. The optional assertion lambda receives the fraction\
+      \ of rows where columnA >= columnB and returns a boolean indicating if it meets\
+      \ the threshold.\n RequiredArgs: ['columnA', 'columnB']\n OptionalArgs: ['assertion']\n\
+      \ Examples:\n  - .isGreaterThanOrEqualTo('credits_attempted', 'credits_completed')\n\
+      \  - .isGreaterThanOrEqualTo('credits_attempted', 'credits_completed', lambda\
+      \ x: x >= 0.95)\nName: isContainedIn, Description: Validates that each non-NULL\
+      \ value in a column is contained in the specified set of allowed values. The\
+      \ optional assertion lambda receives the fraction of matching rows and returns\
+      \ a boolean indicating if it meets the threshold.\n RequiredArgs: ['column',\
+      \ 'allowed_values']\n OptionalArgs: ['assertion']\n Examples:\n  - .isContainedIn('target',\
+      \ ['Graduate', 'Dropout', 'Enrolled'])\n  - .isContainedIn('target', ['Graduate',\
+      \ 'Dropout', 'Enrolled'], lambda x: x >= 0.95)\n\nAvailable Aggregate-Level\
+      \ Functions:\nName: hasSize, Description: Validates the total number of rows\
+      \ in the dataframe. The assertion is a lambda function that receives the row\
+      \ count as input and returns a boolean indicating whether the size meets the\
+      \ expectation.\n RequiredArgs: ['assertion']\n OptionalArgs: []\n Example: .hasSize(lambda\
+      \ x: x >= 1000)\nName: haveAnyCompleteness, Description: Validates that at least\
+      \ one column in a set meets the specified completeness threshold. The assertion\
+      \ lambda receives the completeness fraction and returns a boolean indicating\
+      \ if at least one column meets the threshold.\n RequiredArgs: ['columns', 'assertion']\n\
+      \ OptionalArgs: []\n Example: .haveAnyCompleteness(['credits_attempted', 'credits_completed'],\
+      \ lambda x: x >= 0.95)\nName: isUnique, Description: Validates that a column\
+      \ contains only unique values with no duplicates. Every value in the column\
+      \ must appear exactly once.\n RequiredArgs: ['column']\n OptionalArgs: []\n\
+      \ Example: .isUnique('student_id')\nName: hasUniqueness, Description: Validates\
+      \ the uniqueness fraction of a single column or combined set of columns. Uniqueness\
+      \ is the ratio of values that occur exactly once. The assertion lambda receives\
+      \ the uniqueness fraction (0.0 to 1.0) and returns a boolean indicating if it\
+      \ meets the threshold.\n RequiredArgs: ['columns', 'assertion']\n OptionalArgs:\
+      \ []\n Example: .hasUniqueness(['student_id'], lambda x: x >= 0.99)\nName: hasDistinctness,\
+      \ Description: Validates the distinctness fraction of a single column or combined\
+      \ set of columns. Distinctness is the ratio of distinct values to total rows.\
+      \ The assertion lambda receives the distinctness fraction (0.0 to 1.0) and returns\
+      \ a boolean indicating if it meets the threshold.\n RequiredArgs: ['columns',\
+      \ 'assertion']\n OptionalArgs: []\n Example: .hasDistinctness(['student_id'],\
+      \ lambda x: x >= 0.99)\nName: hasUniqueValueRatio, Description: Validates the\
+      \ unique value ratio of a single column or combined set of columns. The unique\
+      \ value ratio is the fraction of unique values compared to the total number\
+      \ of distinct values. The assertion lambda receives the ratio (0.0 to 1.0) and\
+      \ returns a boolean indicating if it meets the threshold.\n RequiredArgs: ['columns',\
+      \ 'assertion']\n OptionalArgs: []\n Example: .hasUniqueValueRatio(['student_id'],\
+      \ lambda x: x >= 0.99)\nName: hasNumberOfDistinctValues, Description: Validates\
+      \ the absolute number of distinct values in a column. The assertion lambda receives\
+      \ the count of distinct values and returns a boolean indicating if it meets\
+      \ the expectation. Note: This constraint requires additional parameters (binningUdf\
+      \ and maxBins) when used in practice.\n RequiredArgs: ['column', 'assertion']\n\
+      \ OptionalArgs: []\n Example: .hasNumberOfDistinctValues('credits_attempted',\
+      \ lambda x: x >= 0, binningUdf=None, maxBins=1000)\nName: hasMutualInformation,\
+      \ Description: Validates the mutual information between two columns. Mutual\
+      \ information measures how much information about one column can be inferred\
+      \ from another. The assertion lambda receives the mutual information value and\
+      \ returns a boolean indicating if it meets the threshold.\n RequiredArgs: ['columnA',\
+      \ 'columnB', 'assertion']\n OptionalArgs: []\n Example: .hasMutualInformation('credits_attempted',\
+      \ 'credits_completed', lambda x: x >= 0)\nName: hasApproxQuantile, Description:\
+      \ Validates a specific quantile value of a numeric column. The assertion lambda\
+      \ receives the computed quantile value and returns a boolean indicating if it\
+      \ meets the expectation.\n RequiredArgs: ['column', 'quantile', 'assertion']\n\
+      \ OptionalArgs: []\n Example: .hasApproxQuantile('gpa', 0.5, lambda x: x >=\
+      \ 0)\nName: hasMinLength, Description: Validates the minimum string length in\
+      \ a column. The assertion lambda receives the minimum length value and returns\
+      \ a boolean indicating if it meets the expectation.\n RequiredArgs: ['column',\
+      \ 'assertion']\n OptionalArgs: []\n Example: .hasMinLength('student_id', lambda\
+      \ x: x >= 3)\nName: hasMaxLength, Description: Validates the maximum string\
+      \ length in a column. The assertion lambda receives the maximum length value\
+      \ and returns a boolean indicating if it meets the expectation.\n RequiredArgs:\
+      \ ['column', 'assertion']\n OptionalArgs: []\n Example: .hasMaxLength('student_id',\
+      \ lambda x: x <= 20)\nName: hasMin, Description: Validates the minimum value\
+      \ of a numeric column. The assertion lambda receives the minimum value and returns\
+      \ a boolean indicating if it meets the expectation.\n RequiredArgs: ['column',\
+      \ 'assertion']\n OptionalArgs: []\n Example: .hasMin('credits_attempted', lambda\
+      \ x: x >= 18)\nName: hasMax, Description: Validates the maximum value of a numeric\
+      \ column. The assertion lambda receives the maximum value and returns a boolean\
+      \ indicating if it meets the expectation.\n RequiredArgs: ['column', 'assertion']\n\
+      \ OptionalArgs: []\n Example: .hasMax('credits_attempted', lambda x: x <= 48)\n\
+      Name: hasMean, Description: Validates the mean (average) value of a numeric\
+      \ column. The assertion lambda receives the mean value and returns a boolean\
+      \ indicating if it meets the expectation.\n RequiredArgs: ['column', 'assertion']\n\
+      \ OptionalArgs: []\n Example: .hasMean('gpa', lambda x: x >= 2.0 and x <= 3.5)\n\
+      Name: hasStandardDeviation, Description: Validates the standard deviation of\
+      \ a numeric column. The assertion lambda receives the standard deviation value\
+      \ and returns a boolean indicating if it meets the expectation.\n RequiredArgs:\
+      \ ['column', 'assertion']\n OptionalArgs: []\n Example: .hasStandardDeviation('gpa',\
+      \ lambda x: x >= 0.5 and x <= 1.5)\nName: hasCorrelation, Description: Validates\
+      \ the Pearson correlation coefficient between two numeric columns. The assertion\
+      \ lambda receives the correlation value (-1.0 to 1.0) and returns a boolean\
+      \ indicating if it meets the expectation.\n RequiredArgs: ['columnA', 'columnB',\
+      \ 'assertion']\n OptionalArgs: []\n Example: .hasCorrelation('credits_attempted',\
+      \ 'credits_completed', lambda x: x >= 0)"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+columns_considered:
+- Certificate
+- Genre
+- IMDB_Rating
+- No_of_Votes
+- Poster_Link
+- Released_Year
+- Runtime
+- Series_Title
+columns_failed: []
+constraints:
+  Certificate:
+    code:
+    - suggestion: '.hasCompleteness(''Certificate'', lambda x: x >= 0.8)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 27c2f67b-3961-4e1a-803c-70172cde9e49
+      source_assumptions:
+      - 27c2f99d-870a-4306-b2c4-285cb9f11d17
+      - 615218e5-202c-4956-b49c-cdb0c20a669b
+    assumptions:
+    - text: The input CSV must contain the column 'Certificate' so it can be accessed
+        on each row via itertuples.
+      sources:
+      - start_line: 49
+        end_line: 50
+        file: ''
+      uid: 27c2f99d-870a-4306-b2c4-285cb9f11d17
+    - text: Missing values or whitespace-only values in 'Certificate' are defensively
+        handled by falling back to 'NR', so strict completeness is not required.
+      sources:
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 615218e5-202c-4956-b49c-cdb0c20a669b
+  Genre:
+    code:
+    - suggestion: '.hasCompleteness(''Genre'', lambda x: x > 0.0)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 241230ae-b172-4f17-bdf8-1eac301d3a07
+      source_assumptions:
+      - e90e5e96-659a-4007-924d-7bbd883bab7c
+    assumptions:
+    - text: The column 'Genre' must be present in the input CSV so that accessing
+        the attribute via getattr(row, 'Genre') does not raise an AttributeError.
+      sources:
+      - start_line: 67
+        end_line: 67
+        file: ''
+      uid: e90e5e96-659a-4007-924d-7bbd883bab7c
+  IMDB_Rating:
+    code:
+    - suggestion: '.hasCompleteness(''IMDB_Rating'', lambda x: x > 0.0)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 90ba00fc-2d66-4f26-9611-843fde80c928
+      source_assumptions:
+      - 504b3f69-c294-4735-8017-64eea5e63268
+      - fc196975-defe-4cd9-be90-9f5775547f74
+    - suggestion: '.satisfies(''`IMDB_Rating` IS NULL OR CAST(`IMDB_Rating` AS DOUBLE)
+        IS NOT NULL'', ''IMDB_Rating_numeric_parsable'', lambda x: x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 1379eec7-eca0-49d4-8f82-9e496254057e
+      source_assumptions:
+      - e4e481b6-bcac-423c-b2f1-d0f303dd7359
+    - suggestion: '.satisfies(''`IMDB_Rating` IS NULL OR (CAST(`IMDB_Rating` AS DOUBLE)
+        >= 0.0 AND CAST(`IMDB_Rating` AS DOUBLE) <= 10.0)'', ''IMDB_Rating_range_0_to_10'',
+        lambda x: x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 7d7bbe6a-97a7-4d37-8957-6de2d5aa02e8
+      source_assumptions:
+      - 1b83953f-86e9-45e1-94c8-436558673c93
+    assumptions:
+    - text: The column 'IMDB_Rating' must exist in the input CSV file.
+      sources:
+      - start_line: 16
+        end_line: 19
+        file: ''
+      uid: 504b3f69-c294-4735-8017-64eea5e63268
+    - text: Values in 'IMDB_Rating' should be numeric or convertible to numeric via
+        pd.to_numeric; non-numeric values are coerced to NaN.
+      sources:
+      - start_line: 19
+        end_line: 19
+        file: ''
+      uid: e4e481b6-bcac-423c-b2f1-d0f303dd7359
+    - text: The dataset should contain at least some non-null numeric ratings so that
+        the mean baseline rating C (r.mean()) can be computed for the Bayesian ranking
+        calculation.
+      sources:
+      - start_line: 23
+        end_line: 29
+        file: ''
+      uid: fc196975-defe-4cd9-be90-9f5775547f74
+    - text: Ratings are expected to adhere to the standard IMDb 0 to 10 scale, as
+        evidenced by star fill percentage scaling (rating_val * 10.0 clamped between
+        0.0 and 100.0).
+      sources:
+      - start_line: 51
+        end_line: 55
+        file: ''
+      uid: 1b83953f-86e9-45e1-94c8-436558673c93
+  No_of_Votes:
+    code:
+    - suggestion: '.hasCompleteness(''No_of_Votes'', lambda x: x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: af7e2037-b764-40b0-b293-bd792ba3c0fc
+      source_assumptions:
+      - 9a3d2e33-066e-4e1c-9713-6f10579c8de5
+    - suggestion: '.hasDataType(''No_of_Votes'', ConstrainableDataTypes.Integral,
+        lambda x: x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: fa5063d7-8b63-428d-a92e-bc3ddcd3d5fe
+      source_assumptions:
+      - 9a3d2e33-066e-4e1c-9713-6f10579c8de5
+    - suggestion: .isNonNegative('No_of_Votes')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1585d2ee-4580-403c-8595-95b3538929cf
+      source_assumptions:
+      - c7c98415-d4b6-489b-88a6-db4058f274bd
+    assumptions:
+    - text: Values in No_of_Votes for the top selected records must be valid numeric
+        values (non-null and finite after numeric conversion) because line 52 calls
+        `int(getattr(row, 'No_of_Votes'))` without null handling, which raises a ValueError
+        if passed NaN.
+      sources:
+      - start_line: 20
+        end_line: 20
+        file: ''
+      - start_line: 52
+        end_line: 52
+        file: ''
+      uid: 9a3d2e33-066e-4e1c-9713-6f10579c8de5
+    - text: No_of_Votes must represent non-negative numeric counts (>= 0) for the
+        Bayesian ranking score calculation (v / (v + m)) and quantile calculation
+        to behave validly.
+      sources:
+      - start_line: 22
+        end_line: 30
+        file: ''
+      uid: c7c98415-d4b6-489b-88a6-db4058f274bd
+  Poster_Link:
+    code:
+    - suggestion: '.hasCompleteness(''Poster_Link'', lambda x: x > 0.0)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 0ce7180b-60ae-4949-a142-43e9de4e2807
+      source_assumptions:
+      - 94a6ee7d-e677-4492-8848-f892eca0512d
+    assumptions:
+    - text: The column 'Poster_Link' must be present in the input CSV so that it can
+        be accessed as an attribute during tuple iteration.
+      sources:
+      - start_line: 44
+        end_line: 47
+        file: ''
+      uid: 94a6ee7d-e677-4492-8848-f892eca0512d
+  Released_Year:
+    code:
+    - suggestion: .satisfies("`Released_Year` IS NULL OR CAST(`Released_Year` AS BIGINT)
+        IS NOT NULL", "released_year_parsable_as_int")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e084e901-f924-4189-8a73-c1fc323c858a
+      source_assumptions:
+      - f5196a95-6903-4116-a5af-8153d1608adf
+      - 0eed2665-25fd-46ab-9822-9b0c88e1d899
+    assumptions:
+    - text: The column 'Released_Year' must exist in the input CSV file ('new_data.csv').
+      sources:
+      - start_line: 16
+        end_line: 16
+        file: ''
+      - start_line: 46
+        end_line: 46
+        file: ''
+      uid: f5196a95-6903-4116-a5af-8153d1608adf
+    - text: Non-null values of 'Released_Year' for the featured items must be convertible
+        to an integer via int() (e.g., integer values or integer strings); invalid
+        strings will trigger a ValueError.
+      sources:
+      - start_line: 46
+        end_line: 46
+        file: ''
+      uid: 0eed2665-25fd-46ab-9822-9b0c88e1d899
+  Runtime:
+    code:
+    - suggestion: .isComplete('Runtime')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: b20030d3-d73f-49b5-8f02-c328cf6d4d88
+      source_assumptions:
+      - 17115a89-bbbb-4b42-8122-8ff66be360a6
+    - suggestion: .hasPattern('Runtime', r'.*\d+.*')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: dd5c45b6-c2df-4866-8f16-a79138b76efe
+      source_assumptions:
+      - 17115a89-bbbb-4b42-8122-8ff66be360a6
+    assumptions:
+    - text: The column 'Runtime' must contain string values that include at least
+        one sequence of numeric digits (e.g., '142 min') and must not be null for
+        any of the top featured rows, as featured['Runtime'].str.extract(r'(\d+)')[0].astype(int)
+        strictly extracts digits and converts them to int without handling NaN values.
+      sources:
+      - start_line: 36
+        end_line: 36
+        file: ''
+      uid: 17115a89-bbbb-4b42-8122-8ff66be360a6
+  Series_Title:
+    code:
+    - suggestion: '.hasCompleteness(''Series_Title'', lambda x: x > 0.0)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 4b6022f4-975a-4448-8f9d-729c60f1f607
+      source_assumptions:
+      - 58d897f3-7a3b-470b-9176-60bf017219f8
+    assumptions:
+    - text: The input dataset must contain the column 'Series_Title' so that row objects
+        produced by itertuples have the 'Series_Title' attribute accessible via getattr
+        without raising an AttributeError.
+      sources:
+      - start_line: 44
+        end_line: 45
+        file: ''
+      uid: 58d897f3-7a3b-470b-9176-60bf017219f8
+llm_usage:
+  task_lm:
+    cost: 0.247813
+    cost_spent: 0.247813
+    total_tokens: 158261
+    prompt_tokens: 115222
+    completion_tokens: 43039
+    cached_prompt_tokens: 0
+    reasoning_tokens: 40166
+    requests: 26
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 331.7
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.247813
+    cost_spent: 0.247813
+    total_tokens: 158261
+    prompt_tokens: 115222
+    completion_tokens: 43039
+    cached_prompt_tokens: 0
+    reasoning_tokens: 40166
+    requests: 26
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 331.7
+    api_seconds_saved: 0.0
+wall_clock_seconds: 80.232

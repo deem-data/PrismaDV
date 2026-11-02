@@ -1,0 +1,293 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261014_005320
+  run_settings: {}
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 70.6
+  instructions:
+    generator: "markdown\nYou are an expert data quality and data engineering assistant.\
+      \ Your task is to analyze a data processing script (`code_script`), metadata\
+      \ profiling of input columns (`columns_desc`), and an optional downstream task\
+      \ description (`downstream_task_description`), and produce a targeted set of\
+      \ PyDeequ data quality checks along with the underlying assumptions and code\
+      \ references.\n\n---\n\n### Step-by-Step Instructions\n\n1. **Identify Columns\
+      \ and Line Traces**:\n   - For every input column referenced in `code_script`,\
+      \ identify the lines that touch the column (read, filter, transform, group,\
+      \ merge, join, sort, or pass through).\n   - Use 1-based line numbers. Combine\
+      \ adjacent line numbers into ranges (`{\"start_line\": X, \"end_line\": Y}`).\n\
+      \   - If multiple columns participate in a joint operation, integrity constraint,\
+      \ or relational comparison (e.g., `team1 != team2`, `winner in [team1, team2]`,\
+      \ `toss_winner in [team1, team2]`), group them together under a list in `column_group`.\
+      \ Single columns should be a single string.\n\n2. **Formulate Input Assumptions**:\n\
+      \   - Analyze explicit requirements (casts, filters, asserts, comparisons) and\
+      \ implicit assumptions made by the code.\n   - Cross-reference with `columns_desc`\
+      \ to understand distribution, distinct values, nullability, and types.\n   -\
+      \ Link each assumption to the exact line ranges where the column is used.\n\n\
+      3. **Translate to PyDeequ Checks**:\n   - Convert assumptions into PyDeequ checks.\n\
+      \   - Assign appropriate severity: `\"error\"` or `\"warning\"`.\n   - Link\
+      \ each check to the corresponding 0-based index of the assumption it validates\
+      \ (`linked_assumptions`).\n\n---\n\n### Critical Guidelines for Maximizing Precision\
+      \ & Avoiding False Positives\n\nEvaluation is performed against both **unsafe\
+      \ batches** (corrupted data that must be flagged) and **safe batches** (clean\
+      \ production batches with real-world noise, natural missingness, or variant\
+      \ distributions). \n\nIn historical evaluations, **false positive alarms on\
+      \ safe batches** have severely degraded F1 scores. Follow these strict rules:\n\
+      \n#### 1. Completeness Checks (`.isComplete`)\n- **NEVER check `.isComplete(col)`\
+      \ if `columns_desc` shows `completeness < 1.0`** (e.g., `result_margin`, `target_runs`,\
+      \ `target_overs`, `city`, `player_of_match`, `method`, `winner`). Doing so is\
+      \ an instant false positive on safe batches.\n- Even if `columns_desc` shows\
+      \ `completeness: 1.0`, **do NOT routinely add `.isComplete()` to auxiliary or\
+      \ passthrough columns** unless the script crashes on `NaN` (e.g., `.astype(int)`\
+      \ directly on a column without `errors='coerce'`).\n- In Pandas, boolean masking\
+      \ (e.g., `df['match_type'] == 'League'`), comparisons (`df['result'] == 'no\
+      \ result'`), and `.isin([...])` do **NOT** throw errors when `NaN` is encountered;\
+      \ they simply evaluate to `False`. Do not mark `.isComplete()` as an `\"error\"\
+      ` on categorical filter columns like `match_type` or `result` unless missing\
+      \ values break core groupby/ranking partitions.\n\n#### 2. Domain / Set Membership\
+      \ (`.isContainedIn`)\n- Safe batches can contain rare categories or domain values\
+      \ not explicitly present in the sample histogram (e.g., `match_type` can have\
+      \ playoffs, eliminators; match formats can differ).\n- Only apply `.isContainedIn(...)`\
+      \ at `level: \"error\"` if invalid values cause logic corruption in strict binary/multi-way\
+      \ branchings (e.g., `super_over` in `['Y', 'N']`).\n- When checking categorical\
+      \ values, ensure you include all legitimate domain values observed in the metadata\
+      \ or standard rules.\n\n#### 3. Cross-Column Relational Checks (`.satisfies`)\n\
+      - **Null Safety in SQL Expressions**: In PyDeequ, `.satisfies(...)` executes\
+      \ Spark SQL boolean logic. If any operand is `NULL`, standard equality checks\
+      \ evaluate to `UNKNOWN`/`NULL`, which PyDeequ counts as a **failure**!\n  -\
+      \ Bad: `.satisfies(\"winner = team1 OR winner = team2\", ...)` (Fails on tied\
+      \ / abandoned matches where `winner` is NULL!).\n  - Good (Null-safe): `.satisfies(\"\
+      winner IS NULL OR winner = team1 OR winner = team2\", \"winner_is_participant_if_present\"\
+      )`\n  - Bad: `.satisfies(\"result_margin >= 0\", ...)`\n  - Good: `.satisfies(\"\
+      result_margin IS NULL OR result_margin >= 0\", \"margin_non_negative\")`\n \
+      \ - Bad: `.satisfies(\"target_overs > 0\", ...)`\n  - Good: `.satisfies(\"target_overs\
+      \ IS NULL OR target_overs > 0\", \"target_overs_positive\")`\n- **Distinct Entity\
+      \ Constraints**:\n  - Distinct entities in pairings (e.g., `team1 != team2`)\
+      \ are hard domain invariants. Use `.satisfies(\"`team1` != `team2`\", \"teams_distinct\"\
+      )` with `level: \"error\"`.\n\n#### 4. Unique Identifiers and Primary Keys\n\
+      - Only assert `.isUnique('id')` if `id` truly represents a unique key across\
+      \ the dataset and the script assumes each row represents a unique event.\n\n\
+      #### 5. Severity Selection (`error` vs `warning`):\n- **`level: \"error\"`**:\n\
+      \  - The script will directly throw an unhandled exception or crash (e.g., `.astype(int)`\
+      \ on non-integral/null values without coercion, zero-division in non-nullable\
+      \ denominators).\n  - Primary entity pairing violations (`team1 == team2`).\n\
+      \  - Strict key completeness when key nullability breaks joins or produces invalid\
+      \ aggregates.\n- **`level: \"warning\"`**:\n  - Conditional invariants on columns\
+      \ that can be null (`winner IS NULL OR ...`).\n  - Numeric ranges on metrics/margins\
+      \ (`margin >= 0`).\n  - Hygiene on columns where the code gracefully handles\
+      \ nulls via `errors='coerce'`, `.fillna()`, or `.dropna()`.\n\n---\n\n### Output\
+      \ Format\n\nReturn a single JSON array matching the structure below. Do not\
+      \ output markdown text outside the JSON code block.\n\n```json\n[\n  {\n   \
+      \ \"column_group\": \"column_name\",\n    \"assumptions\": [\n      {\n    \
+      \    \"text\": \"Detailed description of the assumption.\",\n        \"sources\"\
+      : [\n          {\n            \"start_line\": 15,\n            \"end_line\"\
+      : 20\n          }\n        ]\n      }\n    ],\n    \"code\": [\n      {\n  \
+      \      \"suggestion\": \".isComplete('column_name')\",\n        \"level\": \"\
+      error\",\n        \"linked_assumptions\": [0]\n      }\n    ]\n  },\n  {\n \
+      \   \"column_group\": [\"col1\", \"col2\"],\n    \"assumptions\": [\n      {\n\
+      \        \"text\": \"Cross-column relationship assumption.\",\n        \"sources\"\
+      : [\n          {\n            \"start_line\": 28,\n            \"end_line\"\
+      : 34\n          }\n        ]\n      }\n    ],\n    \"code\": [\n      {\n  \
+      \      \"suggestion\": \".satisfies('`col1` != `col2`', 'col1_different_from_col2')\"\
+      ,\n        \"level\": \"error\",\n        \"linked_assumptions\": [0]\n    \
+      \  }\n    ]\n  }\n]\n```"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+constraints:
+  '["team1","team2","winner"]':
+    code:
+    - suggestion: .satisfies('winner IS NULL OR winner = team1 OR winner = team2',
+        'winner_is_participant_if_present')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: ad50b258-a785-4016-a860-a1e2a9bdfb7d
+      source_assumptions:
+      - f0fccb11-020b-4ddf-ad88-6390efbb845e
+    assumptions:
+    - text: If a match has a declared winner, the winner must be one of the participating
+        teams (team1 or team2).
+      sources:
+      - start_line: 39
+        end_line: 42
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      - start_line: 58
+        end_line: 58
+        file: ''
+      - start_line: 87
+        end_line: 88
+        file: ''
+      - start_line: 174
+        end_line: 175
+        file: ''
+      uid: f0fccb11-020b-4ddf-ad88-6390efbb845e
+  '["team1","team2"]':
+    code:
+    - suggestion: .satisfies('`team1` != `team2`', 'teams_distinct')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e6cb2313-0ba9-4a13-975f-b2072de87b41
+      source_assumptions:
+      - 8af69959-4216-47b5-8a46-f554216c1621
+    assumptions:
+    - text: Each match must be played between two distinct teams.
+      sources:
+      - start_line: 39
+        end_line: 42
+        file: ''
+      - start_line: 66
+        end_line: 69
+        file: ''
+      - start_line: 104
+        end_line: 118
+        file: ''
+      - start_line: 123
+        end_line: 138
+        file: ''
+      - start_line: 166
+        end_line: 177
+        file: ''
+      uid: 8af69959-4216-47b5-8a46-f554216c1621
+  id:
+    code:
+    - suggestion: .isComplete('id')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4f0264e6-a766-4e3d-8c34-4bac1da62e1b
+      source_assumptions:
+      - 970ee693-c27d-4641-b419-0efdce8a4eef
+    assumptions:
+    - text: id is the match identifier used to count played matches in aggregation
+        and to break sorting ties, and must be complete.
+      sources:
+      - start_line: 87
+        end_line: 87
+        file: ''
+      - start_line: 95
+        end_line: 95
+        file: ''
+      - start_line: 104
+        end_line: 104
+        file: ''
+      - start_line: 111
+        end_line: 111
+        file: ''
+      - start_line: 123
+        end_line: 123
+        file: ''
+      - start_line: 129
+        end_line: 129
+        file: ''
+      - start_line: 147
+        end_line: 147
+        file: ''
+      - start_line: 179
+        end_line: 179
+        file: ''
+      uid: 970ee693-c27d-4641-b419-0efdce8a4eef
+  result_margin:
+    code:
+    - suggestion: .satisfies('result_margin IS NULL OR result_margin >= 0', 'margin_non_negative')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 2287df04-4bd0-4ff8-aec6-b94f6c83c6a5
+      source_assumptions:
+      - 7a7c8d38-5497-427c-8f63-3af1d7da7ad9
+    assumptions:
+    - text: When result_margin is present, it represents a positive victory margin
+        (runs or wickets) and should be non-negative.
+      sources:
+      - start_line: 22
+        end_line: 22
+        file: ''
+      - start_line: 33
+        end_line: 34
+        file: ''
+      - start_line: 37
+        end_line: 37
+        file: ''
+      - start_line: 52
+        end_line: 53
+        file: ''
+      - start_line: 60
+        end_line: 61
+        file: ''
+      uid: 7a7c8d38-5497-427c-8f63-3af1d7da7ad9
+  season:
+    code:
+    - suggestion: .isComplete('season')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e44dab8f-858d-43bc-949f-85b4151f67fe
+      source_assumptions:
+      - 99eb74bd-190b-4c2b-89f7-c6f852c80349
+    assumptions:
+    - text: season is used as a core partition key for standings aggregation and sorting,
+        and must be present for all records.
+      sources:
+      - start_line: 87
+        end_line: 87
+        file: ''
+      - start_line: 95
+        end_line: 95
+        file: ''
+      - start_line: 104
+        end_line: 104
+        file: ''
+      - start_line: 111
+        end_line: 111
+        file: ''
+      - start_line: 123
+        end_line: 123
+        file: ''
+      - start_line: 129
+        end_line: 129
+        file: ''
+      - start_line: 146
+        end_line: 154
+        file: ''
+      - start_line: 179
+        end_line: 180
+        file: ''
+      uid: 99eb74bd-190b-4c2b-89f7-c6f852c80349
+llm_usage:
+  task_lm:
+    cost: 0.029014
+    cost_spent: 0.029014
+    total_tokens: 13830
+    prompt_tokens: 7616
+    completion_tokens: 6214
+    cached_prompt_tokens: 0
+    reasoning_tokens: 4696
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 31.069
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.029014
+    cost_spent: 0.029014
+    total_tokens: 13830
+    prompt_tokens: 7616
+    completion_tokens: 6214
+    cached_prompt_tokens: 0
+    reasoning_tokens: 4696
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 31.069
+    api_seconds_saved: 0.0
+wall_clock_seconds: 37.002

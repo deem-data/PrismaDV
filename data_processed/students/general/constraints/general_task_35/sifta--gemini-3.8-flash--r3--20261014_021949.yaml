@@ -1,0 +1,818 @@
+sifta_generation:
+  program: sifta
+  run_dir: optimization_runs/run_20261014_005337
+  run_settings:
+    batch_sampler_strategy: worst_first
+    feedback_level: full
+    silent_as_safe: 0.0
+  metric_rev: error_level
+  final_program_round: final
+  final_program_val_score: 20.0
+  instructions:
+    dataflow_inspector: "List every line of the code that touches the target column:\
+      \ reads it, writes it, filters on it, transforms it, merges it, or passes it\
+      \ along.\n\nCRITICAL LINE COUNTING RULES:\n- Count EVERY line in the script\
+      \ starting from line 1 at the very first line of the file.\n- DO NOT SKIP BLANK\
+      \ OR EMPTY LINES. Blank lines, comment lines, import statements, and code lines\
+      \ ALL increment the line counter by 1. Skipping blank lines will cause severe\
+      \ line-number offsets.\n- Split the code script by newline ('\\n') to get the\
+      \ true 1-based line number for each line.\n\nTRACKING REFERENCES & TRANSITIVE\
+      \ DATAFLOW:\n- Track column name aliases: If the target column name is assigned\
+      \ to a constant or alias variable (e.g., GR1 = 'Curricular units 1st sem (grade)',\
+      \ SCH = 'Scholarship holder', or c1_noe = 'Curricular units 1st sem (without\
+      \ evaluations)'), include the alias definition line AND every line where that\
+      \ alias variable is subsequently used (e.g., df[GR1], df[SCH], df[c1_noe]).\n\
+      - Track intermediate data variables and transitive dependency chains:\n  * If\
+      \ the column data itself is assigned to a Series or intermediate variable (e.g.,\
+      \ ne1 = df[c1_noe].astype(float)), include its assignment line.\n  * Follow\
+      \ the dependency chain transitively: If intermediate variable A is used to compute\
+      \ variable B (e.g., no_eval_ratio1 = (ne1 / e1_safe)...), and B is used in variable\
+      \ C (e.g., academic_gap = ... + 0.4 * no_eval_ratio1), and C is used in downstream\
+      \ scores, categories, or final outputs (e.g., risk_score, priority, out DataFrame,\
+      \ out.to_csv): include the lines where B, C, etc. are created and used.\n  *\
+      \ Do not stop at the first intermediate assignment; follow the full dataflow\
+      \ chain all the way to final metrics, decisions, and exports.\n- If an intermediate\
+      \ variable is created but never used downstream (dead code), include its assignment\
+      \ line so downstream modules can recognize that the column is not used in final\
+      \ outputs.\n- Double-check the exact line numbers in the script where the target\
+      \ column name, its string alias, or its data variables actually appear. Do not\
+      \ pick nearby lines for unrelated columns.\n- Use 1-based line numbers; merge\
+      \ adjacent lines into a single range.\n\nOutput only JSON: { \"sources\": [{\
+      \ \"start_line\": int, \"end_line\": int }, ...] }"
+    assumption_generation: "Code makes assumptions about its input data, often without\
+      \ stating them. Analyze how the target column is used in the focused code and\
+      \ task description to formulate testable data quality assumptions for PyDeequ\
+      \ checks:\n\n1. Usage Check & Column Execution:\n   - Determine how the column\
+      \ is touched in the code:\n     * If a column is read, converted (e.g., `df[col].astype(...)`),\
+      \ filtered, compared (e.g., `df[col] > 0`, `df[col] == 1`), or used in arithmetic,\
+      \ that line of code IS EXECUTED. If the data type is incompatible (e.g., non-numeric\
+      \ strings where numbers are expected), the script crashes immediately (`TypeError`\
+      \ / `ValueError`). Always formulate a data type assumption (e.g., Numeric) for\
+      \ columns executed in the script, even if the intermediate variable is not forwarded\
+      \ to final outputs.\n     * Domain & Validity: Whenever a column is read or\
+      \ manipulated in the script, ALWAYS formulate domain and range assumptions based\
+      \ on the column's semantic type (e.g., non-negative counts for curricular units\
+      \ such as credited, enrolled, approved; binary [0, 1] range for flags; [0, 20]\
+      \ scale for semester grades). Even if an intermediate variable is not forwarded\
+      \ to final outputs, corrupt domain values (such as negative credits or counts)\
+      \ represent corrupted data partitions that must be caught!\n     * Completeness:\
+      \ Formulate completeness assumptions whenever missing values cause a crash (e.g.,\
+      \ `.astype(int)`, boolean masking) or when nulls propagate into unhandled boolean\
+      \ logic or distort downstream metrics. Only treat completeness as safe/tolerant\
+      \ if the code explicitly handles nulls (e.g., `.fillna()`, `.replace()`, `.isna()`).\n\
+      \     * Only if a column is completely unreferenced in the script should you\
+      \ formulate no assumptions.\n\n2. Completeness:\n   - Identify whether missing\
+      \ values would crash the code or silently distort outputs:\n     * High severity\
+      \ (crashes or corrupts results): If the column is cast with `.astype(int)` (plain\
+      \ pandas/numpy int crashes on NaN with `ValueError: Cannot convert non-finite\
+      \ values to integer`), or if nulls propagate into boolean logic (e.g., `df[col]\
+      \ == 1`, `df[col].astype(bool)` where NaNs evaluate unexpectedly), unhandled\
+      \ math, or core output rankings. Strict completeness is required.\n     * Safe/Tolerant:\
+      \ If the column is cast to float (`.astype(float)`) and nulls are safely imputed\
+      \ downstream via `.fillna(...)` or `.replace()`, or if missing values are explicitly\
+      \ handled, do NOT assume strict completeness. Requiring completeness on safely\
+      \ handled fields causes false alarms on valid partitions.\n\n3. Data Type &\
+      \ Schema Requirements:\n   - Identify the expected type required by downstream\
+      \ operations:\n     * Curricular unit counts (enrolled, approved, evaluations,\
+      \ credited, without evaluations), grades, continuous metrics, and binary indicator\
+      \ flags evaluated numerically (`== 1`, `== 0`, `.astype(bool)`) require Numeric\
+      \ data types (Fractional or Integral).\n     * Categorical identifiers or codes\
+      \ must match their expected type (e.g., String).\n\n4. Domain & Scale Rules:\n\
+      \   - For curricular unit counts (enrolled, approved, evaluations, credited,\
+      \ without evaluations in 1st or 2nd sem), values must be non-negative (>= 0).\n\
+      \   - For binary indicator flags (e.g., Debtor, Scholarship holder, Tuition\
+      \ fees up to date, Daytime/evening attendance), values must represent binary\
+      \ states (non-negative values in range [0, 1]).\n   - For curricular grades\
+      \ (Curricular units 1st/2nd sem grade), values must fall within the standard\
+      \ grading scale [0.0, 20.0]; pre-entry grades (Admission grade, Previous qualification\
+      \ (grade)) fall within [0.0, 200.0].\n   - For categorical target or status\
+      \ columns (e.g., Target), valid values must belong to the allowed categories\
+      \ (e.g., ['Graduate', 'Dropout', 'Enrolled']).\n   - For application order,\
+      \ values must be non-negative integers (typically >= 0).\n\n5. Focus strictly\
+      \ on properties whose violation causes a code crash or silently produces wrong/distorted\
+      \ calculations and decisions. Do not invent speculative rules for safe variations.\n\
+      \nOutput only valid JSON (numbers without leading zeros): { \"assumptions\"\
+      : [{ \"text\": str, \"sources\": [{ \"start_line\": int, \"end_line\": int }]\
+      \ }, ...] }"
+    ir_generation: "Translate the assumptions into PyDeequ checks. Link each check\
+      \ to the indices (from 0) of the assumptions it tests.\n\nConstraint severity\
+      \ level guidelines:\n- Set level \"error\" if data failing the check would cause\
+      \ the code to crash OR silently produce incorrect/distorted results:\n  * Incompatible\
+      \ data types on columns where numeric operations (`.astype(float)`, `.astype(int)`,\
+      \ comparisons `>`, `<`, arithmetic `+`, `-`, `*`, `/`) are executed in the script—EVEN\
+      \ IF the variable is intermediate, because executing that line crashes the entire\
+      \ script!\n  * Nulls in columns where pandas crashes on NaN (e.g., converted\
+      \ via `.astype(int)`), or where nulls distort unhandled boolean logic (`df[col]\
+      \ == 1`, `.astype(bool)`) or core outputs.\n  * Out-of-bounds domain values\
+      \ on any columns read or referenced in the script: negative unit counts (< 0\
+      \ for credited, enrolled, approved, evaluations, without evaluations), out-of-range\
+      \ grades ([0.0, 20.0] or [0.0, 200.0]), values outside [0, 1] for binary indicator\
+      \ flags, or invalid categorical values. Out-of-bounds values represent corrupted\
+      \ batches and must be flagged with \"error\"!\n- Set level \"warning\" ONLY\
+      \ if the non-conforming data is tolerated or legitimately handled by the code:\n\
+      \  * Completeness checks on columns where missing values are safely imputed\
+      \ downstream via `.fillna(0.0)` or `.replace()` without distorting logic.\n\
+      \  * Benign variations that do not affect downstream correctness.\n- CRITICAL:\
+      \ Never leave a column with ONLY \"warning\" constraints if the script performs\
+      \ operations on it that would crash on corrupt data. At least one \"error\"\
+      \ check (such as data type or essential completeness/domain) must guard against\
+      \ script crashes and erroneous partitions!\n\nSyntax & implementation rules:\n\
+      - In satisfies(...) conditions, always wrap column names with backticks (e.g.,\
+      \ '`Curricular units 1st sem (grade)` >= 0.0 AND `Curricular units 1st sem (grade)`\
+      \ <= 20.0').\n- For numeric type checks (continuous metrics, unit counts, grades,\
+      \ and binary flags evaluated via numeric comparisons `== 1` / `== 0`):\n  *\
+      \ Use `.hasDataType(col, ConstrainableDataTypes.Numeric)` (union of Integral\
+      \ and Fractional). This protects against crash-causing non-numeric/string corruptions\
+      \ while cleanly passing valid integer and float representations.\n- For binary\
+      \ indicator flags (e.g., Debtor, Scholarship holder, Tuition fees up to date,\
+      \ Daytime/evening attendance):\n  * Validate completeness with `.isComplete(col)`\
+      \ when missing values break boolean logic or comparisons.\n  * Validate type\
+      \ with `.hasDataType(col, ConstrainableDataTypes.Numeric)`.\n  * Validate domain\
+      \ using `.satisfies('`col` >= 0 AND `col` <= 1', 'col_binary_range')` or `.isNonNegative(col)`.\n\
+      \  * DO NOT use fragile string-cast expressions like `CAST(col AS STRING) IN\
+      \ ('0', '1', ...)` as they fail and raise false alarms on safe data partitions.\n\
+      - For non-negative numeric counts (enrolled, approved, credited, evaluations,\
+      \ without evaluations, etc.):\n  * Use `.isNonNegative(col)` or `.satisfies('`col`\
+      \ >= 0', 'col_non_negative')`.\n- For curricular grades (1st/2nd sem grade):\n\
+      \  * Use `.satisfies('`col` >= 0.0 AND `col` <= 20.0', 'col_grade_range')`.\n\
+      - For pre-entry grades (Admission grade, Previous qualification (grade)):\n\
+      \  * Use `.satisfies('`col` >= 0.0 AND `col` <= 200.0', 'col_pre_entry_grade_range')`.\n\
+      - For categorical string columns, use `.hasDataType(col, ConstrainableDataTypes.String)`\
+      \ and `isContainedIn` with the allowed string values (e.g., ['Graduate', 'Dropout',\
+      \ 'Enrolled']).\n\nOutput: {\"constraint_code\": [{\"suggestion\": PyDeequ code\
+      \ (starting with \".\" or a function), \"level\": \"warning\"|\"error\", \"\
+      linked assumptions\": [indices]}, ...]}"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+columns_considered:
+- Curricular units 1st sem (enrolled)
+- Curricular units 1st sem (evaluations)
+- Curricular units 1st sem (approved)
+- Curricular units 1st sem (credited)
+- Curricular units 1st sem (without evaluations)
+- Curricular units 1st sem (grade)
+- Curricular units 2nd sem (enrolled)
+- Curricular units 2nd sem (evaluations)
+- Curricular units 2nd sem (approved)
+- Curricular units 2nd sem (credited)
+- Curricular units 2nd sem (without evaluations)
+- Debtor
+- Tuition fees up to date
+columns_failed: []
+constraints:
+  Curricular units 1st sem (approved):
+    code:
+    - suggestion: .hasDataType('Curricular units 1st sem (approved)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d24a99b4-8aaa-486a-b8f8-7110ec91fdcb
+      source_assumptions:
+      - 9115ec72-3432-4127-8440-9fdf3f1fa166
+    - suggestion: .isComplete('Curricular units 1st sem (approved)')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: b9ea4b40-5992-43e2-971f-6783695aba67
+      source_assumptions:
+      - 9115ec72-3432-4127-8440-9fdf3f1fa166
+    - suggestion: .isNonNegative('Curricular units 1st sem (approved)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2722bfdd-b8e2-42e4-8178-3eb19b44c728
+      source_assumptions:
+      - d9df6efd-c7ae-4829-a22b-16426db97bb1
+    assumptions:
+    - text: The column 'Curricular units 1st sem (approved)' must contain numeric
+        values that can be coerced via pd.to_numeric without data loss.
+      sources:
+      - start_line: 37
+        end_line: 42
+        file: ''
+      uid: 9115ec72-3432-4127-8440-9fdf3f1fa166
+    - text: The values in 'Curricular units 1st sem (approved)' must be non-negative
+        (>= 0), representing counts of approved curricular units in the 1st semester.
+      sources:
+      - start_line: 44
+        end_line: 44
+        file: ''
+      uid: d9df6efd-c7ae-4829-a22b-16426db97bb1
+  Curricular units 1st sem (credited):
+    code:
+    - suggestion: .hasDataType('Curricular units 1st sem (credited)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0b5a2275-a020-48b8-a8c7-c47bfd4620ec
+      source_assumptions:
+      - 7be27e6b-bcf0-42b7-bb19-7d845197911d
+    - suggestion: .isNonNegative('Curricular units 1st sem (credited)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c6f2b61f-69f8-4ac8-a34f-74e901432db8
+      source_assumptions:
+      - 23776698-47ae-4c64-bf7f-537b9772f411
+    assumptions:
+    - text: The column 'Curricular units 1st sem (credited)' must have a numeric data
+        type.
+      sources:
+      - start_line: 36
+        end_line: 42
+        file: ''
+      uid: 7be27e6b-bcf0-42b7-bb19-7d845197911d
+    - text: Values in 'Curricular units 1st sem (credited)' must be non-negative (>=
+        0).
+      sources:
+      - start_line: 36
+        end_line: 42
+        file: ''
+      uid: 23776698-47ae-4c64-bf7f-537b9772f411
+  Curricular units 1st sem (enrolled):
+    code:
+    - suggestion: .isComplete('Curricular units 1st sem (enrolled)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 43916154-1414-4999-b5f9-33a6fbf4ec06
+      source_assumptions:
+      - 83915889-0833-45b2-a165-f1fc7c59c0bb
+    - suggestion: .hasDataType('Curricular units 1st sem (enrolled)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3bfeda1a-c26c-4c18-8ff8-79855a3a793b
+      source_assumptions:
+      - c125313b-dbfb-4d60-92f5-4ecaf1aeba12
+    - suggestion: .isNonNegative('Curricular units 1st sem (enrolled)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 22cf620b-fbc7-49ae-a5fd-1e3395bab7a5
+      source_assumptions:
+      - 78170a65-062d-45dc-8b98-fc824ca9e12f
+    assumptions:
+    - text: Curricular units 1st sem (enrolled) must not contain missing values (completeness
+        = 1.0) to ensure accurate curricular progress calculations and risk scoring.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 45
+        end_line: 46
+        file: ''
+      uid: 83915889-0833-45b2-a165-f1fc7c59c0bb
+    - text: Curricular units 1st sem (enrolled) must be numeric to allow arithmetic
+        operations and numerical comparisons.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 45
+        end_line: 46
+        file: ''
+      uid: c125313b-dbfb-4d60-92f5-4ecaf1aeba12
+    - text: Curricular units 1st sem (enrolled) must be non-negative (>= 0) as curricular
+        unit counts cannot be negative.
+      sources:
+      - start_line: 45
+        end_line: 46
+        file: ''
+      uid: 78170a65-062d-45dc-8b98-fc824ca9e12f
+  Curricular units 1st sem (evaluations):
+    code:
+    - suggestion: .hasDataType('Curricular units 1st sem (evaluations)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: eb2b6f31-eba3-4fdd-9983-6b90e05770c4
+      source_assumptions:
+      - fd3a6b5f-1a97-4bff-979c-a80bdc4106a1
+    - suggestion: .isNonNegative('Curricular units 1st sem (evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 5ad6ef9c-d6dc-44b3-8136-70f14e0d3895
+      source_assumptions:
+      - f082b6d6-0c0d-478b-9595-0c1a825d99fe
+    - suggestion: .isComplete('Curricular units 1st sem (evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: fe418819-4446-4ee0-b9d0-789336ea587b
+      source_assumptions:
+      - a8a39c99-b4ee-45fd-bdbd-c9e53d117fb1
+    assumptions:
+    - text: The column 'Curricular units 1st sem (evaluations)' must have a numeric
+        data type (integral or float) to allow numeric conversion, arithmetic division,
+        and addition in calculations.
+      sources:
+      - start_line: 36
+        end_line: 45
+        file: ''
+      uid: fd3a6b5f-1a97-4bff-979c-a80bdc4106a1
+    - text: The values in 'Curricular units 1st sem (evaluations)' must be non-negative
+        (>= 0) as it represents a count of curricular unit evaluations.
+      sources:
+      - start_line: 43
+        end_line: 46
+        file: ''
+      uid: f082b6d6-0c0d-478b-9595-0c1a825d99fe
+    - text: The column 'Curricular units 1st sem (evaluations)' must not contain missing
+        values (completeness of 1.0) because unhandled null values propagate through
+        arithmetic operations when calculating 'missing_recorded_1' and 'coverage_gap_1',
+        resulting in NaN risk scores.
+      sources:
+      - start_line: 45
+        end_line: 46
+        file: ''
+      - start_line: 63
+        end_line: 71
+        file: ''
+      uid: a8a39c99-b4ee-45fd-bdbd-c9e53d117fb1
+  Curricular units 1st sem (grade):
+    code:
+    - suggestion: .isComplete('Curricular units 1st sem (grade)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: b9f14005-c271-4b22-8729-4b872df5736d
+      source_assumptions:
+      - 62666ee2-f78e-4bb7-85f5-f3f67e7af334
+    - suggestion: .hasDataType('Curricular units 1st sem (grade)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 33321c3e-6968-4b7b-a6b0-842dc6dbd68f
+      source_assumptions:
+      - b90d1dae-b4a9-46d7-879b-8679452fa2c6
+    - suggestion: .satisfies('`Curricular units 1st sem (grade)` >= 0.0 AND `Curricular
+        units 1st sem (grade)` <= 20.0', 'curricular_units_1st_sem_grade_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c09e7c53-7b6e-4d78-b4ea-6614f29d575d
+      source_assumptions:
+      - 4b42d22b-5868-4604-ad9d-314daf9d599e
+    assumptions:
+    - text: Values in 'Curricular units 1st sem (grade)' must not be null, because
+        missing values propagate through arithmetic normalization without fillna handling,
+        resulting in NaN risk scores and distorting priority classification.
+      sources:
+      - start_line: 42
+        end_line: 42
+        file: ''
+      - start_line: 47
+        end_line: 48
+        file: ''
+      - start_line: 63
+        end_line: 72
+        file: ''
+      uid: 62666ee2-f78e-4bb7-85f5-f3f67e7af334
+    - text: The column 'Curricular units 1st sem (grade)' must have a numeric data
+        type (fractional or integral) to allow mathematical operations such as division
+        by 20.0 and calculation of the grade risk score.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 47
+        end_line: 48
+        file: ''
+      uid: b90d1dae-b4a9-46d7-879b-8679452fa2c6
+    - text: Values in 'Curricular units 1st sem (grade)' must fall within the valid
+        academic grading scale of [0.0, 20.0] to ensure the normalized grade calculation
+        (df[c1_grade] / 20.0) produces valid risk proportions between 0.0 and 1.0.
+      sources:
+      - start_line: 47
+        end_line: 48
+        file: ''
+      - start_line: 63
+        end_line: 72
+        file: ''
+      uid: 4b42d22b-5868-4604-ad9d-314daf9d599e
+  Curricular units 1st sem (without evaluations):
+    code:
+    - suggestion: .isComplete('Curricular units 1st sem (without evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d5ea42a0-8b4b-4939-8f14-eda81eec8fb6
+      source_assumptions:
+      - 467525d2-6f8f-41a1-b8dd-00ff8a06dfa1
+    - suggestion: .hasDataType('Curricular units 1st sem (without evaluations)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: abc17229-8110-4f46-82fd-90c169747506
+      source_assumptions:
+      - 560407fd-97f3-4475-b8f6-a59d85bbfb18
+    - suggestion: .isNonNegative('Curricular units 1st sem (without evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3f5e662a-12b9-42f6-a249-ec94dd91758f
+      source_assumptions:
+      - d9a136b9-4380-4b6b-be29-271a8df07f8b
+    assumptions:
+    - text: The column 'Curricular units 1st sem (without evaluations)' must not contain
+        missing or null values, as nulls propagate through the unhandled addition
+        and subtraction in 'missing_recorded_1', producing NaNs in 'coverage_gap_1'
+        and corrupting 'risk_score' and quantile banding.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 45
+        end_line: 46
+        file: ''
+      - start_line: 63
+        end_line: 72
+        file: ''
+      uid: 467525d2-6f8f-41a1-b8dd-00ff8a06dfa1
+    - text: The column 'Curricular units 1st sem (without evaluations)' must have
+        a numeric data type (integral or floating-point) to support arithmetic addition
+        with 'Curricular units 1st sem (evaluations)'.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 45
+        end_line: 45
+        file: ''
+      uid: 560407fd-97f3-4475-b8f6-a59d85bbfb18
+    - text: The values in 'Curricular units 1st sem (without evaluations)' must be
+        non-negative (>= 0), as negative course counts are semantically invalid and
+        would distort 'coverage_gap_1' and the overall risk score.
+      sources:
+      - start_line: 45
+        end_line: 46
+        file: ''
+      - start_line: 63
+        end_line: 72
+        file: ''
+      uid: d9a136b9-4380-4b6b-be29-271a8df07f8b
+  Curricular units 2nd sem (approved):
+    code:
+    - suggestion: .hasDataType('Curricular units 2nd sem (approved)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8467b1e6-9769-4b6e-a88d-26470b76621e
+      source_assumptions:
+      - 567c646d-ccd1-46d3-a4c1-7122537c2267
+    - suggestion: .isNonNegative('Curricular units 2nd sem (approved)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9b4e4b8a-9635-4ab1-a938-b128b890c918
+      source_assumptions:
+      - 25ff5d8f-c0fb-46e6-9d9a-81cd3136da7f
+    assumptions:
+    - text: The column 'Curricular units 2nd sem (approved)' must be of numeric type
+        (integral or fractional) to allow calculation of academic pass rates.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 567c646d-ccd1-46d3-a4c1-7122537c2267
+    - text: Values in 'Curricular units 2nd sem (approved)' must be non-negative (>=
+        0) as it represents a count of approved curricular units.
+      sources:
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 25ff5d8f-c0fb-46e6-9d9a-81cd3136da7f
+  Curricular units 2nd sem (credited):
+    code:
+    - suggestion: .hasDataType('Curricular units 2nd sem (credited)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 487ea70d-d8f9-4e0f-b100-0c518486022c
+      source_assumptions:
+      - e4ae3424-04e7-4875-b831-36d5bbbef5c7
+    - suggestion: .isNonNegative('Curricular units 2nd sem (credited)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c8160144-54b7-4839-97e7-4aebc6332d55
+      source_assumptions:
+      - b59c9b1a-50f7-4d5a-8665-b6f5e1e8d3e8
+    assumptions:
+    - text: The 'Curricular units 2nd sem (credited)' column must be of numeric type
+        (integral or fractional) to support numeric operations.
+      sources:
+      - start_line: 38
+        end_line: 42
+        file: ''
+      uid: e4ae3424-04e7-4875-b831-36d5bbbef5c7
+    - text: Values in 'Curricular units 2nd sem (credited)' must be non-negative (>=
+        0) as it represents a count of credited curricular units.
+      sources:
+      - start_line: 38
+        end_line: 42
+        file: ''
+      uid: b59c9b1a-50f7-4d5a-8665-b6f5e1e8d3e8
+  Curricular units 2nd sem (enrolled):
+    code:
+    - suggestion: .hasDataType('Curricular units 2nd sem (enrolled)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 36877680-48c0-47a0-bbc2-a93bfcbbe89b
+      source_assumptions:
+      - c722e64b-1bba-4069-99b3-dba833d48b77
+    - suggestion: .isNonNegative('Curricular units 2nd sem (enrolled)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a5ed6e28-dbf0-4678-9505-128d467d59a0
+      source_assumptions:
+      - 83922cd7-316a-41ff-81cf-935211c5a4e2
+    - suggestion: .isComplete('Curricular units 2nd sem (enrolled)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 72da079d-c5f5-4e85-8a24-74f337239c6a
+      source_assumptions:
+      - 498f94fb-8bee-4c85-8f96-37addf571ceb
+    assumptions:
+    - text: The column 'Curricular units 2nd sem (enrolled)' must contain numeric
+        values that can be cast to numeric types without error.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 51
+        end_line: 52
+        file: ''
+      uid: c722e64b-1bba-4069-99b3-dba833d48b77
+    - text: Values in 'Curricular units 2nd sem (enrolled)' must be non-negative (>=
+        0).
+      sources:
+      - start_line: 51
+        end_line: 52
+        file: ''
+      uid: 83922cd7-316a-41ff-81cf-935211c5a4e2
+    - text: The column 'Curricular units 2nd sem (enrolled)' must be complete with
+        no missing values (completeness equals 1.0) to ensure reliable risk score
+        calculation and prioritization without producing NaN values.
+      sources:
+      - start_line: 51
+        end_line: 52
+        file: ''
+      - start_line: 63
+        end_line: 72
+        file: ''
+      - start_line: 86
+        end_line: 94
+        file: ''
+      uid: 498f94fb-8bee-4c85-8f96-37addf571ceb
+  Curricular units 2nd sem (evaluations):
+    code:
+    - suggestion: .hasDataType('Curricular units 2nd sem (evaluations)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 5227d152-58fc-4dcb-ac95-a90a4135d70f
+      source_assumptions:
+      - eb458642-4348-4ede-a5de-a5dd9d411939
+    - suggestion: .isComplete('Curricular units 2nd sem (evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8575fb18-bddc-411c-8ebf-fe8076ff5fa3
+      source_assumptions:
+      - 788301c0-53cd-4a09-8956-1ba7fd3394a6
+    - suggestion: .isNonNegative('Curricular units 2nd sem (evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a560e0f5-318d-4a89-a20e-10159332b190
+      source_assumptions:
+      - 7d08b3a7-7396-4f5c-a889-eb6f940e14b2
+    assumptions:
+    - text: The column 'Curricular units 2nd sem (evaluations)' must contain numeric
+        values to allow arithmetic operations and calculations for pass rate and coverage
+        gap.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 49
+        end_line: 52
+        file: ''
+      uid: eb458642-4348-4ede-a5de-a5dd9d411939
+    - text: The column 'Curricular units 2nd sem (evaluations)' must not contain null
+        or missing values, as unhandled missing values propagate through arithmetic
+        operations into 'missing_recorded_2' and corrupt downstream 'risk_score' calculations
+        and priority rankings.
+      sources:
+      - start_line: 51
+        end_line: 52
+        file: ''
+      - start_line: 63
+        end_line: 71
+        file: ''
+      uid: 788301c0-53cd-4a09-8956-1ba7fd3394a6
+    - text: The column 'Curricular units 2nd sem (evaluations)' must have non-negative
+        values (>= 0), as negative evaluation counts represent invalid academic records.
+      sources:
+      - start_line: 49
+        end_line: 52
+        file: ''
+      uid: 7d08b3a7-7396-4f5c-a889-eb6f940e14b2
+  Curricular units 2nd sem (without evaluations):
+    code:
+    - suggestion: .isComplete('Curricular units 2nd sem (without evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e46d9c6e-cc14-497a-a53d-74918d0e0f42
+      source_assumptions:
+      - 893c87be-6f9c-421c-9c45-2bff8784095a
+    - suggestion: .hasDataType('Curricular units 2nd sem (without evaluations)', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e30a3810-0003-4d64-a55b-88cbf41bb5bb
+      source_assumptions:
+      - 7dd569fc-8b92-4554-a47e-ed609afc1112
+    - suggestion: .isNonNegative('Curricular units 2nd sem (without evaluations)')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0ab0ef58-2d38-4c45-a605-20e44ec2903a
+      source_assumptions:
+      - b2ee1bb4-2e62-4329-89b0-4e32e6446205
+    assumptions:
+    - text: The column 'Curricular units 2nd sem (without evaluations)' must have
+        a complete (non-null) rate of 1.0 because null values propagate through missing_recorded_2,
+        coverage_gap_2, and rare_event_penalty into risk_score, resulting in NaN risk
+        scores that distort quantile calculations and priority sorting.
+      sources:
+      - start_line: 51
+        end_line: 57
+        file: ''
+      - start_line: 63
+        end_line: 72
+        file: ''
+      - start_line: 86
+        end_line: 96
+        file: ''
+      uid: 893c87be-6f9c-421c-9c45-2bff8784095a
+    - text: The column 'Curricular units 2nd sem (without evaluations)' must be numeric
+        to support arithmetic operations, comparisons, and pd.to_numeric conversion.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 51
+        end_line: 57
+        file: ''
+      uid: 7dd569fc-8b92-4554-a47e-ed609afc1112
+    - text: The column 'Curricular units 2nd sem (without evaluations)' represents
+        a count of curricular units and must contain non-negative values (>= 0).
+      sources:
+      - start_line: 51
+        end_line: 57
+        file: ''
+      uid: b2ee1bb4-2e62-4329-89b0-4e32e6446205
+  Debtor:
+    code:
+    - suggestion: .hasDataType('Debtor', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4b14019d-380a-4e57-be44-a116a74e74b3
+      source_assumptions:
+      - 69a056bf-5594-4141-b055-b610dee2f179
+    - suggestion: .satisfies('`Debtor` >= 0 AND `Debtor` <= 1', 'debtor_binary_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: df3ee174-d9f0-442c-9870-7461a9804545
+      source_assumptions:
+      - 544590c3-96b3-42d6-8262-c29b1b9151c9
+    - suggestion: .isComplete('Debtor')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a6cc5e40-f2eb-41f7-b8c6-4136df49e3c8
+      source_assumptions:
+      - 352cb7ce-7bb0-4664-b906-018477fb5ba4
+    assumptions:
+    - text: The 'Debtor' column must exist in the input DataFrame and be convertible
+        to a numeric type.
+      sources:
+      - start_line: 33
+        end_line: 42
+        file: ''
+      uid: 69a056bf-5594-4141-b055-b610dee2f179
+    - text: The 'Debtor' column represents a binary indicator flag and should have
+        values constrained to {0, 1}.
+      sources:
+      - start_line: 33
+        end_line: 60
+        file: ''
+      uid: 544590c3-96b3-42d6-8262-c29b1b9151c9
+    - text: The 'Debtor' column should have no missing values so that financial status
+        and fee risk are accurately evaluated.
+      sources:
+      - start_line: 42
+        end_line: 60
+        file: ''
+      uid: 352cb7ce-7bb0-4664-b906-018477fb5ba4
+  Tuition fees up to date:
+    code:
+    - suggestion: .isComplete('Tuition fees up to date')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 42ac614a-d2c5-4bc4-abb6-8980cbea144f
+      source_assumptions:
+      - 86d5758b-50ce-4c29-8607-9aeff11e65ca
+    - suggestion: .hasDataType('Tuition fees up to date', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 14688c6b-8088-4d7c-974d-76230149cd9a
+      source_assumptions:
+      - 8413e3f3-3d10-4fb0-b75d-28438003895c
+    - suggestion: .satisfies('`Tuition fees up to date` >= 0 AND `Tuition fees up
+        to date` <= 1', 'tuition_fees_up_to_date_binary_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3a84bad4-9e9d-417c-b47a-f25ac90caf4c
+      source_assumptions:
+      - 31ec52ad-9c07-4fcb-8523-1dbc98b0b481
+    assumptions:
+    - text: Column 'Tuition fees up to date' must be complete with no missing or null
+        values, as missing values will alter the boolean condition `df[tuition_col]
+        == 1` and distort fee_risk calculations.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 60
+        end_line: 60
+        file: ''
+      uid: 86d5758b-50ce-4c29-8607-9aeff11e65ca
+    - text: Column 'Tuition fees up to date' must have a numeric data type (integral
+        or fractional) convertible via pd.to_numeric to support equality comparison
+        `df[tuition_col] == 1`.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 60
+        end_line: 60
+        file: ''
+      uid: 8413e3f3-3d10-4fb0-b75d-28438003895c
+    - text: Column 'Tuition fees up to date' must represent a binary indicator flag
+        with values restricted to {0, 1}.
+      sources:
+      - start_line: 60
+        end_line: 60
+        file: ''
+      uid: 31ec52ad-9c07-4fcb-8523-1dbc98b0b481
+llm_usage:
+  task_lm:
+    cost: 0.721174
+    cost_spent: 0.721174
+    total_tokens: 303146
+    prompt_tokens: 138541
+    completion_tokens: 164605
+    cached_prompt_tokens: 0
+    reasoning_tokens: 156050
+    requests: 41
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 1017.164
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.721174
+    cost_spent: 0.721174
+    total_tokens: 303146
+    prompt_tokens: 138541
+    completion_tokens: 164605
+    cached_prompt_tokens: 0
+    reasoning_tokens: 156050
+    requests: 41
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 1017.164
+    api_seconds_saved: 0.0
+wall_clock_seconds: 226.018

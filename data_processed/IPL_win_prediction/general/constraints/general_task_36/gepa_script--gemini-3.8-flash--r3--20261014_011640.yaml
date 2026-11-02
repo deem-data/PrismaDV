@@ -1,0 +1,296 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261014_005320
+  run_settings: {}
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 70.6
+  instructions:
+    generator: "markdown\nYou are an expert data quality and data engineering assistant.\
+      \ Your task is to analyze a data processing script (`code_script`), metadata\
+      \ profiling of input columns (`columns_desc`), and an optional downstream task\
+      \ description (`downstream_task_description`), and produce a targeted set of\
+      \ PyDeequ data quality checks along with the underlying assumptions and code\
+      \ references.\n\n---\n\n### Step-by-Step Instructions\n\n1. **Identify Columns\
+      \ and Line Traces**:\n   - For every input column referenced in `code_script`,\
+      \ identify the lines that touch the column (read, filter, transform, group,\
+      \ merge, join, sort, or pass through).\n   - Use 1-based line numbers. Combine\
+      \ adjacent line numbers into ranges (`{\"start_line\": X, \"end_line\": Y}`).\n\
+      \   - If multiple columns participate in a joint operation, integrity constraint,\
+      \ or relational comparison (e.g., `team1 != team2`, `winner in [team1, team2]`,\
+      \ `toss_winner in [team1, team2]`), group them together under a list in `column_group`.\
+      \ Single columns should be a single string.\n\n2. **Formulate Input Assumptions**:\n\
+      \   - Analyze explicit requirements (casts, filters, asserts, comparisons) and\
+      \ implicit assumptions made by the code.\n   - Cross-reference with `columns_desc`\
+      \ to understand distribution, distinct values, nullability, and types.\n   -\
+      \ Link each assumption to the exact line ranges where the column is used.\n\n\
+      3. **Translate to PyDeequ Checks**:\n   - Convert assumptions into PyDeequ checks.\n\
+      \   - Assign appropriate severity: `\"error\"` or `\"warning\"`.\n   - Link\
+      \ each check to the corresponding 0-based index of the assumption it validates\
+      \ (`linked_assumptions`).\n\n---\n\n### Critical Guidelines for Maximizing Precision\
+      \ & Avoiding False Positives\n\nEvaluation is performed against both **unsafe\
+      \ batches** (corrupted data that must be flagged) and **safe batches** (clean\
+      \ production batches with real-world noise, natural missingness, or variant\
+      \ distributions). \n\nIn historical evaluations, **false positive alarms on\
+      \ safe batches** have severely degraded F1 scores. Follow these strict rules:\n\
+      \n#### 1. Completeness Checks (`.isComplete`)\n- **NEVER check `.isComplete(col)`\
+      \ if `columns_desc` shows `completeness < 1.0`** (e.g., `result_margin`, `target_runs`,\
+      \ `target_overs`, `city`, `player_of_match`, `method`, `winner`). Doing so is\
+      \ an instant false positive on safe batches.\n- Even if `columns_desc` shows\
+      \ `completeness: 1.0`, **do NOT routinely add `.isComplete()` to auxiliary or\
+      \ passthrough columns** unless the script crashes on `NaN` (e.g., `.astype(int)`\
+      \ directly on a column without `errors='coerce'`).\n- In Pandas, boolean masking\
+      \ (e.g., `df['match_type'] == 'League'`), comparisons (`df['result'] == 'no\
+      \ result'`), and `.isin([...])` do **NOT** throw errors when `NaN` is encountered;\
+      \ they simply evaluate to `False`. Do not mark `.isComplete()` as an `\"error\"\
+      ` on categorical filter columns like `match_type` or `result` unless missing\
+      \ values break core groupby/ranking partitions.\n\n#### 2. Domain / Set Membership\
+      \ (`.isContainedIn`)\n- Safe batches can contain rare categories or domain values\
+      \ not explicitly present in the sample histogram (e.g., `match_type` can have\
+      \ playoffs, eliminators; match formats can differ).\n- Only apply `.isContainedIn(...)`\
+      \ at `level: \"error\"` if invalid values cause logic corruption in strict binary/multi-way\
+      \ branchings (e.g., `super_over` in `['Y', 'N']`).\n- When checking categorical\
+      \ values, ensure you include all legitimate domain values observed in the metadata\
+      \ or standard rules.\n\n#### 3. Cross-Column Relational Checks (`.satisfies`)\n\
+      - **Null Safety in SQL Expressions**: In PyDeequ, `.satisfies(...)` executes\
+      \ Spark SQL boolean logic. If any operand is `NULL`, standard equality checks\
+      \ evaluate to `UNKNOWN`/`NULL`, which PyDeequ counts as a **failure**!\n  -\
+      \ Bad: `.satisfies(\"winner = team1 OR winner = team2\", ...)` (Fails on tied\
+      \ / abandoned matches where `winner` is NULL!).\n  - Good (Null-safe): `.satisfies(\"\
+      winner IS NULL OR winner = team1 OR winner = team2\", \"winner_is_participant_if_present\"\
+      )`\n  - Bad: `.satisfies(\"result_margin >= 0\", ...)`\n  - Good: `.satisfies(\"\
+      result_margin IS NULL OR result_margin >= 0\", \"margin_non_negative\")`\n \
+      \ - Bad: `.satisfies(\"target_overs > 0\", ...)`\n  - Good: `.satisfies(\"target_overs\
+      \ IS NULL OR target_overs > 0\", \"target_overs_positive\")`\n- **Distinct Entity\
+      \ Constraints**:\n  - Distinct entities in pairings (e.g., `team1 != team2`)\
+      \ are hard domain invariants. Use `.satisfies(\"`team1` != `team2`\", \"teams_distinct\"\
+      )` with `level: \"error\"`.\n\n#### 4. Unique Identifiers and Primary Keys\n\
+      - Only assert `.isUnique('id')` if `id` truly represents a unique key across\
+      \ the dataset and the script assumes each row represents a unique event.\n\n\
+      #### 5. Severity Selection (`error` vs `warning`):\n- **`level: \"error\"`**:\n\
+      \  - The script will directly throw an unhandled exception or crash (e.g., `.astype(int)`\
+      \ on non-integral/null values without coercion, zero-division in non-nullable\
+      \ denominators).\n  - Primary entity pairing violations (`team1 == team2`).\n\
+      \  - Strict key completeness when key nullability breaks joins or produces invalid\
+      \ aggregates.\n- **`level: \"warning\"`**:\n  - Conditional invariants on columns\
+      \ that can be null (`winner IS NULL OR ...`).\n  - Numeric ranges on metrics/margins\
+      \ (`margin >= 0`).\n  - Hygiene on columns where the code gracefully handles\
+      \ nulls via `errors='coerce'`, `.fillna()`, or `.dropna()`.\n\n---\n\n### Output\
+      \ Format\n\nReturn a single JSON array matching the structure below. Do not\
+      \ output markdown text outside the JSON code block.\n\n```json\n[\n  {\n   \
+      \ \"column_group\": \"column_name\",\n    \"assumptions\": [\n      {\n    \
+      \    \"text\": \"Detailed description of the assumption.\",\n        \"sources\"\
+      : [\n          {\n            \"start_line\": 15,\n            \"end_line\"\
+      : 20\n          }\n        ]\n      }\n    ],\n    \"code\": [\n      {\n  \
+      \      \"suggestion\": \".isComplete('column_name')\",\n        \"level\": \"\
+      error\",\n        \"linked_assumptions\": [0]\n      }\n    ]\n  },\n  {\n \
+      \   \"column_group\": [\"col1\", \"col2\"],\n    \"assumptions\": [\n      {\n\
+      \        \"text\": \"Cross-column relationship assumption.\",\n        \"sources\"\
+      : [\n          {\n            \"start_line\": 28,\n            \"end_line\"\
+      : 34\n          }\n        ]\n      }\n    ],\n    \"code\": [\n      {\n  \
+      \      \"suggestion\": \".satisfies('`col1` != `col2`', 'col1_different_from_col2')\"\
+      ,\n        \"level\": \"error\",\n        \"linked_assumptions\": [0]\n    \
+      \  }\n    ]\n  }\n]\n```"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+constraints:
+  '["result","result_margin"]':
+    code:
+    - suggestion: .satisfies('`result` NOT IN (\'runs\', \'wickets\') OR (`result_margin`
+        IS NOT NULL AND `result_margin` >= 0)', 'result_margin_valid_for_runs_and_wickets')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: cefa35f9-9cf5-458c-b0ef-09599b5f3c43
+      source_assumptions:
+      - a4c1759b-981c-4142-a814-8e991e9bbd52
+    assumptions:
+    - text: When result is 'runs' or 'wickets', result_margin is cast directly to
+        int, which requires it to be non-null and non-negative to avoid conversion
+        errors.
+      sources:
+      - start_line: 50
+        end_line: 55
+        file: ''
+      - start_line: 124
+        end_line: 129
+        file: ''
+      - start_line: 133
+        end_line: 138
+        file: ''
+      uid: a4c1759b-981c-4142-a814-8e991e9bbd52
+  '["result","team1","team2","winner"]':
+    code:
+    - suggestion: .satisfies('`result` NOT IN (\'runs\', \'wickets\') OR (`winner`
+        IS NOT NULL AND (`winner` = `team1` OR `winner` = `team2`))', 'winner_valid_when_decided')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a76b6ec9-7f2b-4c72-b0a6-11377a208d9d
+      source_assumptions:
+      - 22b2f3b2-600b-451d-8878-698064e83907
+    assumptions:
+    - text: When a match is decided by 'runs' or 'wickets', the winner must be non-null
+        and match one of the participating teams to avoid KeyError in the points accumulator.
+      sources:
+      - start_line: 121
+        end_line: 126
+        file: ''
+      - start_line: 130
+        end_line: 135
+        file: ''
+      uid: 22b2f3b2-600b-451d-8878-698064e83907
+  '["team1","team2","toss_winner"]':
+    code:
+    - suggestion: .satisfies('`toss_winner` = `team1` OR `toss_winner` = `team2`',
+        'toss_winner_is_participant')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6f771f73-f7c0-4d4e-a9d9-1cb4fd4ecfbd
+      source_assumptions:
+      - 0e254d39-b36e-4d6c-b067-f8d3833b805a
+    assumptions:
+    - text: The toss winner must be one of the participating teams (team1 or team2)
+        so that opponent and innings order can be derived.
+      sources:
+      - start_line: 37
+        end_line: 39
+        file: ''
+      uid: 0e254d39-b36e-4d6c-b067-f8d3833b805a
+  '["team1","team2"]':
+    code:
+    - suggestion: .satisfies('`team1` != `team2`', 'teams_distinct')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 95bb845a-1d25-424d-8aa6-8fb054f645c8
+      source_assumptions:
+      - 7c51de37-a8b8-4931-9829-20cf9d9debd0
+    assumptions:
+    - text: Each match must be played between two distinct teams.
+      sources:
+      - start_line: 37
+        end_line: 39
+        file: ''
+      - start_line: 104
+        end_line: 108
+        file: ''
+      uid: 7c51de37-a8b8-4931-9829-20cf9d9debd0
+  result:
+    code:
+    - suggestion: .isComplete('result')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 5fbcb29c-76dd-4b33-a09c-39f36352bbd9
+      source_assumptions:
+      - cbae2ba4-7dba-4993-aa7c-3779274edd9e
+    - suggestion: .isContainedIn('result', ['runs', 'wickets', 'tie', 'no result'])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 89790cab-7564-4935-a9f1-1716a7246f13
+      source_assumptions:
+      - cbae2ba4-7dba-4993-aa7c-3779274edd9e
+    assumptions:
+    - text: result drives the branching logic across match outcome texts and points
+        assignment.
+      sources:
+      - start_line: 34
+        end_line: 34
+        file: ''
+      - start_line: 49
+        end_line: 64
+        file: ''
+      - start_line: 114
+        end_line: 158
+        file: ''
+      uid: cbae2ba4-7dba-4993-aa7c-3779274edd9e
+  super_over:
+    code:
+    - suggestion: .isComplete('super_over')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 2bfbb4b2-6b4e-4596-8411-cd673f50bcd5
+      source_assumptions:
+      - 8dbfef93-eb08-4899-804b-1d373b4439c7
+    - suggestion: .isContainedIn('super_over', ['Y', 'N'])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: aa6bb727-e5d0-4636-8b7e-b6daa04dd7ee
+      source_assumptions:
+      - 8dbfef93-eb08-4899-804b-1d373b4439c7
+    assumptions:
+    - text: super_over indicates whether a super over was played ('Y' or 'N').
+      sources:
+      - start_line: 35
+        end_line: 35
+        file: ''
+      - start_line: 57
+        end_line: 60
+        file: ''
+      - start_line: 140
+        end_line: 146
+        file: ''
+      uid: 8dbfef93-eb08-4899-804b-1d373b4439c7
+  toss_decision:
+    code:
+    - suggestion: .isComplete('toss_decision')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 79972375-ff60-4249-8ab6-79d94a9cb93c
+      source_assumptions:
+      - 27fd58da-1763-4475-bf0e-006867b6791f
+    - suggestion: .isContainedIn('toss_decision', ['field', 'bat'])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: d1844749-4e1b-4d96-b364-d8f72b9799f9
+      source_assumptions:
+      - 27fd58da-1763-4475-bf0e-006867b6791f
+    assumptions:
+    - text: toss_decision should be complete and contain standard decisions ('field'
+        or 'bat').
+      sources:
+      - start_line: 38
+        end_line: 38
+        file: ''
+      uid: 27fd58da-1763-4475-bf0e-006867b6791f
+llm_usage:
+  task_lm:
+    cost: 0.017806
+    cost_spent: 0.017806
+    total_tokens: 10345
+    prompt_tokens: 6996
+    completion_tokens: 3349
+    cached_prompt_tokens: 0
+    reasoning_tokens: 1776
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 17.649
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.017806
+    cost_spent: 0.017806
+    total_tokens: 10345
+    prompt_tokens: 6996
+    completion_tokens: 3349
+    cached_prompt_tokens: 0
+    reasoning_tokens: 1776
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 17.649
+    api_seconds_saved: 0.0
+wall_clock_seconds: 23.665

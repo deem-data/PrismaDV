@@ -1,0 +1,1765 @@
+baseline_method: codex
+model_name: gpt-6-sol
+created_at: '20260927_191148'
+prompt_source: /sc-scratch/sc-scratch-ikim-prismadv/prismadv-revision/workflow_prismadv/eid_bench_baselines/prompts/codex.md
+prompt_template: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ\
+  \ constraints describing what\nthe program below assumes about its input data. If\
+  \ new data arrived that violated\none of your constraints, the program should be\
+  \ expected to misbehave -- crash,\nsilently produce a wrong number, or drop records\
+  \ it should have kept.\n\nYour output is a single file, `constraints.json`, in the\
+  \ current folder.\n\n# The program\n\nThis program consumes the dataset.\n\n```python\n\
+  {{CODE}}\n```\n\nThe same program is on disk at `{{CODE_PATH}}`, so you can run\
+  \ it against the\nstaged table, step through it, or search it, rather than working\
+  \ from the\nlisting alone.\n\n# The data\n\nThree rows sampled from the dataset\
+  \ the program consumes:\n\n{{DATA_SAMPLE}}\n\nThe full table is on disk at `{{TABLE_PATH}}`.\
+  \ You have complete access to it:\nload it with pandas, profile it, plot it, run\
+  \ whatever analysis helps. It is a\nthrowaway copy -- nothing you do to it has any\
+  \ effect outside this workspace.\n\n# Verifying your constraints\n\nYou can execute\
+  \ PyDeequ constraint code against the staged table and read back\nthe result of\
+  \ every check:\n\n```\n{{CHECKER_CMD}}\n```\n\nwhere the constraints file is plain\
+  \ text with one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"\
+  age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"closed\"\
+  ])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure prints\
+  \ the reason,\nincluding compilation errors. Use it as often as you like.\n\n# Output\
+  \ format\n\nWrite `constraints.json` in the current folder, containing the union\
+  \ of what you\nsettled on for every column:\n\n{\n    \"constraints\": [\n     \
+  \   {\n            \"column_name\": \"some_column\",\n            \"code_for_constraint\"\
+  : \".isComplete('some_column')\"\n        },\n        {\n            \"column_name\"\
+  : \"another_column\",\n            \"code_for_constraint\": \".isPositive('another_column')\"\
+  \n        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+  \ Each\nentry names the single column it constrains; for a constraint spanning several\n\
+  columns, name the one it is primarily about.\n"
+prompt_text: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+  \ describing what\nthe program below assumes about its input data. If new data arrived\
+  \ that violated\none of your constraints, the program should be expected to misbehave\
+  \ -- crash,\nsilently produce a wrong number, or drop records it should have kept.\n\
+  \nYour output is a single file, `constraints.json`, in the current folder.\n\n#\
+  \ The program\n\nThis program consumes the dataset.\n\n```python\nimport argparse\n\
+  import json\nimport os\n\nimport numpy as np\nimport pandas as pd\n\n\ndef main():\n\
+  \    parser = argparse.ArgumentParser()\n    parser.add_argument('--input', type=str,\
+  \ required=True)\n    parser.add_argument('--output', type=str, required=True)\n\
+  \    args = parser.parse_args()\n\n    os.makedirs(args.output, exist_ok=True)\n\
+  \n    input_csv = os.path.join(args.input, 'new_data.csv')\n    df = pd.read_csv(input_csv)\n\
+  \n    # Basic normalization of relevant fields\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'],\
+  \ errors='coerce')\n    df['Released_Year'] = pd.to_numeric(df['Released_Year'],\
+  \ errors='coerce')\n    df['Runtime'] = df['Runtime'].astype(str).str.strip()\n\
+  \    # Normalize Gross to have NaN for missing/blank\n    if 'Gross' in df.columns:\n\
+  \        gross_raw = df['Gross'].astype(str)\n        gross_raw = gross_raw.replace({\n\
+  \            '': np.nan,\n            'nan': np.nan,\n            'None': np.nan,\n\
+  \            'NaN': np.nan\n        })\n        df['Gross'] = gross_raw\n    else:\n\
+  \        df['Gross'] = np.nan\n\n    # Score components configuration\n    current_year\
+  \ = int(pd.Timestamp.today().year)\n    min_year = 1900\n    min_runtime = 60\n\
+  \    max_runtime = 240\n    ideal_runtime = 110\n    target_runtime_low = 80\n \
+  \   target_runtime_high = 140\n    rating_score = df['IMDB_Rating'] / 10.0\n   \
+  \ year_span = float(current_year - min_year) if current_year > min_year else 1.0\n\
+  \    recency_score = (df['Released_Year'] - min_year) / year_span\n    runtime_min\
+  \ = df['Runtime'].str.extract(r'^([1-9][0-9]{1,2}) min$')[0].astype(int)\n    runtime_deviation\
+  \ = (runtime_min - ideal_runtime).abs()\n    # Linearly decay from ideal with tolerance\
+  \ window; negative clipped at 0\n    tolerance = 50.0\n    runtime_suitability =\
+  \ 1.0 - (runtime_deviation / tolerance)\n    runtime_suitability = runtime_suitability.clip(lower=0.0,\
+  \ upper=1.0)\n\n    present_mask = df['Gross'].notna() & (df['Gross'].astype(str).str.strip()\
+  \ != '')\n    gross_num = pd.to_numeric(df['Gross'].astype(str).str.replace(',',\
+  \ '', regex=False), errors='coerce')\n    # Impute missing revenue proxy with median\
+  \ to avoid biasing scores where Gross is absent\n    gross_filled = gross_num.fillna(gross_num.median())\n\
+  \    if np.isfinite(gross_filled.max()) and gross_filled.max() > 0:\n        revenue_score\
+  \ = np.log1p(gross_filled) / np.log1p(gross_filled.max())\n    else:\n        revenue_score\
+  \ = pd.Series(0.0, index=df.index)\n\n    # Composite score assembly\n    # Weights\
+  \ tuned to favor quality and recency for licensing\n    w_rating = 0.4\n    w_recency\
+  \ = 0.3\n    w_runtime = 0.15\n    w_revenue = 0.15\n    composite_score = (\n \
+  \           w_rating * rating_score +\n            w_recency * recency_score +\n\
+  \            w_runtime * runtime_suitability +\n            w_revenue * revenue_score\n\
+  \    )\n\n    # Suitability filters for shortlist (keep code behavior dependent\
+  \ on valid assumptions)\n    runtime_in_target = runtime_min.between(target_runtime_low,\
+  \ target_runtime_high, inclusive='both')\n    quality_filter = df['IMDB_Rating']\
+  \ >= 7.0\n    filtered = df[quality_filter & runtime_in_target].copy()\n\n    #\
+  \ Attach computed fields for ranking and auditing\n    filtered['runtime_min'] =\
+  \ runtime_min.loc[filtered.index]\n    filtered['rating_score'] = rating_score.loc[filtered.index]\n\
+  \    filtered['recency_score'] = recency_score.loc[filtered.index]\n    filtered['revenue_score']\
+  \ = revenue_score.loc[filtered.index]\n    filtered['composite_score'] = composite_score.loc[filtered.index]\n\
+  \    # Rank and produce a mapping keyed by (title, year)\n    filtered['shortlist_rank']\
+  \ = filtered['composite_score'].rank(method='dense', ascending=False).astype(int)\n\
+  \    filtered.sort_values(['composite_score', 'No_of_Votes'], ascending=[False,\
+  \ False], inplace=True)\n\n    # Build a dict for downstream contracts that rely\
+  \ on unique keys\n    key_tuples = list(zip(filtered['Series_Title'].astype(str),\
+  \ filtered['Released_Year'].astype(int)))\n    score_map = dict(zip(key_tuples,\
+  \ filtered['composite_score'].round(6)))\n\n    # Outputs\n    shortlist_cols =\
+  \ [\n        'Series_Title', 'Released_Year', 'IMDB_Rating', 'Runtime', 'runtime_min',\n\
+  \        'Gross', 'composite_score', 'shortlist_rank', 'No_of_Votes', 'Genre', 'Director'\n\
+  \    ]\n    shortlist_path = os.path.join(args.output, 'licensing_shortlist.csv')\n\
+  \    filtered[shortlist_cols].to_csv(shortlist_path, index=False)\n\n    scores_path\
+  \ = os.path.join(args.output, 'title_scores.csv')\n    scored_df = df.copy()\n \
+  \   scored_df['runtime_min'] = runtime_min\n    scored_df['rating_score'] = rating_score\n\
+  \    scored_df['recency_score'] = recency_score\n    scored_df['revenue_score']\
+  \ = revenue_score\n    scored_df['composite_score'] = composite_score\n    scored_df.to_csv(scores_path,\
+  \ index=False)\n\n    mapping_path = os.path.join(args.output, 'score_map.json')\n\
+  \    with open(mapping_path, 'w', encoding='utf-8') as f:\n        json.dump({f\"\
+  {k[0]} ({k[1]})\": float(v) for k, v in score_map.items()}, f, ensure_ascii=False,\
+  \ indent=2)\n\n\nif __name__ == '__main__':\n    main()\n\n```\n\nThe same program\
+  \ is on disk at `./code/general_task_35.py`, so you can run it against the\nstaged\
+  \ table, step through it, or search it, rather than working from the\nlisting alone.\n\
+  \n# The data\n\nThree rows sampled from the dataset the program consumes:\n\n[{'id':\
+  \ 200, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BZjZlZDlkYTktMmU1My00ZDBiLWFlNjEtYTBhNjVhOTM4ZjJjXkEyXkFqcGdeQXVyMTMxODk2OTU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+  \ 'Series_Title': 'Donnie Darko', 'Released_Year': 2001, 'Certificate': 'R', 'Runtime':\
+  \ '113 min', 'Genre': 'Drama, Mystery, Sci-Fi', 'IMDB_Rating': 8.0, 'Overview':\
+  \ 'After narrowly escaping a bizarre accident, a troubled teenager is plagued by\
+  \ visions of a man in a large rabbit suit who manipulates him to commit a series\
+  \ of crimes.', 'Meta_score': 88.0, 'Director': 'Richard Kelly', 'Star1': 'Jake Gyllenhaal',\
+  \ 'Star2': 'Jena Malone', 'Star3': 'Mary McDonnell', 'Star4': 'Holmes Osborne',\
+  \ 'No_of_Votes': 740086, 'Gross': '1,480,006'}, {'id': 56, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BOWVmZGQ0MGYtMDI1Yy00MDkxLWJiYjQtMmZjZmQ0NDFmMDRhXkEyXkFqcGdeQXVyNjg3MDMxNzU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+  \ 'Series_Title': 'The Peanut Butter Falcon', 'Released_Year': 2019, 'Certificate':\
+  \ 'PG-13', 'Runtime': '97 min', 'Genre': 'Adventure, Comedy, Drama', 'IMDB_Rating':\
+  \ 7.6, 'Overview': 'Zak runs away from his care home to make his dream of becoming\
+  \ a wrestler come true.', 'Meta_score': 70.0, 'Director': 'Tyler Nilson', 'Star1':\
+  \ 'Michael Schwartz', 'Star2': 'Zack Gottsagen', 'Star3': 'Ann Owens', 'Star4':\
+  \ 'Dakota Johnson', 'No_of_Votes': 66346, 'Gross': '13,122,642'}, {'id': 43, 'Poster_Link':\
+  \ 'https://m.media-amazon.com/images/M/MV5BMDU2ZWJlMjktMTRhMy00ZTA5LWEzNDgtYmNmZTEwZTViZWJkXkEyXkFqcGdeQXVyNDQ2OTk4MzI@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+  \ 'Series_Title': 'Toy Story', 'Released_Year': 1995, 'Certificate': 'U', 'Runtime':\
+  \ '81 min', 'Genre': 'Animation, Adventure, Comedy', 'IMDB_Rating': 8.3, 'Overview':\
+  \ \"A cowboy doll is profoundly threatened and jealous when a new spaceman figure\
+  \ supplants him as top toy in a boy's room.\", 'Meta_score': 95.0, 'Director': 'John\
+  \ Lasseter', 'Star1': 'Tom Hanks', 'Star2': 'Tim Allen', 'Star3': 'Don Rickles',\
+  \ 'Star4': 'Jim Varney', 'No_of_Votes': 887429, 'Gross': '191,796,233'}]\n\nThe\
+  \ full table is on disk at `./data/tables/observed_data.csv`. You have complete\
+  \ access to it:\nload it with pandas, profile it, plot it, run whatever analysis\
+  \ helps. It is a\nthrowaway copy -- nothing you do to it has any effect outside\
+  \ this workspace.\n\n# Verifying your constraints\n\nYou can execute PyDeequ constraint\
+  \ code against the staged table and read back\nthe result of every check:\n\n```\n\
+  python deequ_check.py --table observed_data --constraints <your_constraints_file>\n\
+  ```\n\nwhere the constraints file is plain text with one PyDeequ `Check` call per\
+  \ line,\nfor example:\n\n```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"\
+  status\", [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or\
+  \ `[FAILS]`, and a failure prints the reason,\nincluding compilation errors. Use\
+  \ it as often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+  \ current folder, containing the union of what you\nsettled on for every column:\n\
+  \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+  ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n       \
+  \ },\n        {\n            \"column_name\": \"another_column\",\n            \"\
+  code_for_constraint\": \".isPositive('another_column')\"\n        }\n    ]\n}\n\n\
+  Use only the PyDeequ `Check` object's methods in `code_for_constraint`. Each\nentry\
+  \ names the single column it constrains; for a constraint spanning several\ncolumns,\
+  \ name the one it is primarily about.\n\n# Workspace boundary\n\nYour workspace\
+  \ is the current folder, and for this task nothing else exists.\n\n- Read, list,\
+  \ search and write only inside this folder: `./data`, `./code`,\n  `deequ_check.py`,\
+  \ `task.txt`, and whatever you create here.\n- Do not touch anything outside it.\
+  \ That means no parent directory (`..`), no\n  other folder under /tmp, no home\
+  \ directory (`~`, $HOME), and no absolute path\n  anywhere else on the filesystem.\n\
+  - Do not search the wider filesystem -- no `rg`, `grep`, `find`, `ls` or\n  `python`\
+  \ over `/`, `/tmp`, `..`, `~` or any path outside this folder -- for\n  related\
+  \ data, prompts, examples, other runs, or previous answers. There is\n  nothing\
+  \ out there you are allowed to use, and a run that looks is discarded.\n- Running\
+  \ `python`, `deequ_check.py` and the tools on your PATH is fine; the\n  boundary\
+  \ is about what you read and write, not which interpreter runs.\n\nEverything you\
+  \ need is here. Work only from it.\n"
+reasoning_effort: medium
+isolation: audit
+staged_code_path: code/general_task_35.py
+replicate: 1
+token_accounting: &id002
+  input_tokens: 292245
+  cached_input_tokens: 263941
+  output_tokens: 4438
+  reasoning_tokens: 1820
+  total_tokens: null
+  turns: 1
+  cache_hit_rate: 0.9031
+  raw_turns:
+  - &id001
+    input_tokens: 292245
+    cached_input_tokens: 263941
+    cache_write_input_tokens: 27420
+    output_tokens: 4438
+    reasoning_output_tokens: 1820
+  agent_messages: 6
+  command_executions: 8
+  file_changes: 0
+  item_counts:
+    error: 1
+    agent_message: 6
+    command_execution: 8
+    reasoning: 3
+    todo_list: 1
+  llm_calls: 13
+  llm_calls_source: rollout token_count events
+  llm_calls_estimate: 14
+  calls:
+  - input_tokens: 13211
+    cached_input_tokens: 0
+    cache_write_input_tokens: 13143
+    output_tokens: 141
+    reasoning_output_tokens: 15
+    total_tokens: 13352
+  - input_tokens: 16016
+    cached_input_tokens: 13143
+    cache_write_input_tokens: 2805
+    output_tokens: 119
+    reasoning_output_tokens: 11
+    total_tokens: 16135
+  - input_tokens: 18969
+    cached_input_tokens: 15948
+    cache_write_input_tokens: 2953
+    output_tokens: 290
+    reasoning_output_tokens: 10
+    total_tokens: 19259
+  - input_tokens: 21512
+    cached_input_tokens: 18901
+    cache_write_input_tokens: 2543
+    output_tokens: 258
+    reasoning_output_tokens: 165
+    total_tokens: 21770
+  - input_tokens: 21783
+    cached_input_tokens: 21444
+    cache_write_input_tokens: 271
+    output_tokens: 291
+    reasoning_output_tokens: 0
+    total_tokens: 22074
+  - input_tokens: 22206
+    cached_input_tokens: 21715
+    cache_write_input_tokens: 423
+    output_tokens: 811
+    reasoning_output_tokens: 749
+    total_tokens: 23017
+  - input_tokens: 23030
+    cached_input_tokens: 22138
+    cache_write_input_tokens: 824
+    output_tokens: 883
+    reasoning_output_tokens: 7
+    total_tokens: 23913
+  - input_tokens: 24645
+    cached_input_tokens: 22962
+    cache_write_input_tokens: 1615
+    output_tokens: 292
+    reasoning_output_tokens: 181
+    total_tokens: 24937
+  - input_tokens: 25006
+    cached_input_tokens: 24577
+    cache_write_input_tokens: 361
+    output_tokens: 116
+    reasoning_output_tokens: 23
+    total_tokens: 25122
+  - input_tokens: 25135
+    cached_input_tokens: 24938
+    cache_write_input_tokens: 129
+    output_tokens: 144
+    reasoning_output_tokens: 0
+    total_tokens: 25279
+  - input_tokens: 25837
+    cached_input_tokens: 25067
+    cache_write_input_tokens: 702
+    output_tokens: 976
+    reasoning_output_tokens: 652
+    total_tokens: 26813
+  - input_tokens: 27407
+    cached_input_tokens: 25769
+    cache_write_input_tokens: 1570
+    output_tokens: 68
+    reasoning_output_tokens: 7
+    total_tokens: 27475
+  - input_tokens: 27488
+    cached_input_tokens: 27339
+    cache_write_input_tokens: 81
+    output_tokens: 49
+    reasoning_output_tokens: 0
+    total_tokens: 27537
+  rollout_path: /home/hach13/.codex-eidbench/sessions/2026/09/27/rollout-2026-09-27T19-09-30-01a0e3d7-dd8d-74e1-9ca3-b6cb4e669b4e.jsonl
+cost: &id003
+  usd: 0.153776
+  priced: true
+  rates:
+    model: gpt-6-sol
+    provider: openai
+    input: 2.0
+    cached_input: 0.2
+    output: 10.0
+    source: developers.openai.com/api/docs/models/gpt-6-sol
+    as_of: '2026-09-27'
+    note: ''
+  source: developers.openai.com/api/docs/models/gpt-6-sol (as of 2026-09-27)
+cost_without_cache_usd: 0.62887
+failed_attempts: []
+cost_all_attempts:
+  attempts: 1
+  usd: 0.153776
+  usd_without_cache: 0.62887
+  failed_usd: 0
+  failed_usd_without_cache: 0
+wall_clock_seconds: 138.635
+attempts: 1
+deequ_tool_health: &id004
+  invocations: 4
+  verdict_lines: 46
+  usable: true
+  failure_tail: null
+raw_constraints:
+- column_name: Series_Title
+  code_for_constraint: .isComplete('Series_Title')
+- column_name: Series_Title
+  code_for_constraint: .satisfies("TRIM(Series_Title) <> ''", 'nonblank_title')
+- column_name: Released_Year
+  code_for_constraint: .isComplete('Released_Year')
+- column_name: Released_Year
+  code_for_constraint: .satisfies("Released_Year BETWEEN 1900 AND year(current_date())",
+    'valid_release_year')
+- column_name: Released_Year
+  code_for_constraint: .satisfies("Released_Year = FLOOR(Released_Year)", 'whole_release_year')
+- column_name: IMDB_Rating
+  code_for_constraint: .isComplete('IMDB_Rating')
+- column_name: IMDB_Rating
+  code_for_constraint: .satisfies("IMDB_Rating BETWEEN 0 AND 10", 'rating_out_of_ten')
+- column_name: Runtime
+  code_for_constraint: .isComplete('Runtime')
+- column_name: Runtime
+  code_for_constraint: .satisfies("TRIM(Runtime) RLIKE '^[1-9][0-9]{1,2} min$'", 'parseable_runtime_minutes')
+- column_name: Gross
+  code_for_constraint: .satisfies("Gross IS NULL OR TRIM(Gross) = '' OR TRIM(Gross)
+    RLIKE '^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$'", 'parseable_optional_gross')
+- column_name: Gross
+  code_for_constraint: '.hasCompleteness(''Gross'', lambda fraction: fraction > 0)'
+- column_name: No_of_Votes
+  code_for_constraint: .isComplete('No_of_Votes')
+- column_name: No_of_Votes
+  code_for_constraint: .satisfies("No_of_Votes >= 0", 'nonnegative_votes')
+- column_name: Genre
+  code_for_constraint: .satisfies("Genre IS NOT NULL AND TRIM(Genre) <> ''", 'present_genre')
+- column_name: Director
+  code_for_constraint: .satisfies("Director IS NOT NULL AND TRIM(Director) <> ''",
+    'present_director')
+- column_name: Series_Title
+  code_for_constraint: '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda
+    fraction: fraction == 1.0)'
+constraint_normalization:
+  entries: 16
+  plain_strings: 0
+  column_inferred: 0
+  dropped_no_column: 0
+  dropped_no_code: 0
+raw_constraints_as_written:
+- column_name: Series_Title
+  code_for_constraint: .isComplete('Series_Title')
+- column_name: Series_Title
+  code_for_constraint: .satisfies("TRIM(Series_Title) <> ''", 'nonblank_title')
+- column_name: Released_Year
+  code_for_constraint: .isComplete('Released_Year')
+- column_name: Released_Year
+  code_for_constraint: .satisfies("Released_Year BETWEEN 1900 AND year(current_date())",
+    'valid_release_year')
+- column_name: Released_Year
+  code_for_constraint: .satisfies("Released_Year = FLOOR(Released_Year)", 'whole_release_year')
+- column_name: IMDB_Rating
+  code_for_constraint: .isComplete('IMDB_Rating')
+- column_name: IMDB_Rating
+  code_for_constraint: .satisfies("IMDB_Rating BETWEEN 0 AND 10", 'rating_out_of_ten')
+- column_name: Runtime
+  code_for_constraint: .isComplete('Runtime')
+- column_name: Runtime
+  code_for_constraint: .satisfies("TRIM(Runtime) RLIKE '^[1-9][0-9]{1,2} min$'", 'parseable_runtime_minutes')
+- column_name: Gross
+  code_for_constraint: .satisfies("Gross IS NULL OR TRIM(Gross) = '' OR TRIM(Gross)
+    RLIKE '^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$'", 'parseable_optional_gross')
+- column_name: Gross
+  code_for_constraint: '.hasCompleteness(''Gross'', lambda fraction: fraction > 0)'
+- column_name: No_of_Votes
+  code_for_constraint: .isComplete('No_of_Votes')
+- column_name: No_of_Votes
+  code_for_constraint: .satisfies("No_of_Votes >= 0", 'nonnegative_votes')
+- column_name: Genre
+  code_for_constraint: .satisfies("Genre IS NOT NULL AND TRIM(Genre) <> ''", 'present_genre')
+- column_name: Director
+  code_for_constraint: .satisfies("Director IS NOT NULL AND TRIM(Director) <> ''",
+    'present_director')
+- column_name: Series_Title
+  code_for_constraint: '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda
+    fraction: fraction == 1.0)'
+trajectory:
+  codex_version: codex-cli 0.147.0
+  model: gpt-6-sol
+  reasoning_effort: medium
+  command:
+  - codex
+  - exec
+  - --model
+  - gpt-6-sol
+  - -C
+  - /tmp/codex_synth_lfxe72f0
+  - --sandbox
+  - workspace-write
+  - --skip-git-repo-check
+  - --ignore-user-config
+  - --color
+  - never
+  - --json
+  - -c
+  - sandbox_workspace_write.network_access=true
+  - -c
+  - model_reasoning_effort="medium"
+  - Solve the task specified in task.txt.
+  usage: *id001
+  token_accounting: *id002
+  cost: *id003
+  cost_without_cache_usd: 0.62887
+  failed_attempts: []
+  wall_clock_seconds: 138.635
+  wall_clock_seconds_including_retries: 138.635
+  attempts: 1
+  timeout_seconds: 1800
+  returncode: 0
+  isolation: audit
+  workspace_escapes: []
+  outside_workspace: []
+  deequ_tool_health: *id004
+  events:
+  - type: thread.started
+    thread_id: 01a0e3d7-dd8d-74e1-9ca3-b6cb4e669b4e
+  - type: item.completed
+    item:
+      id: item_0
+      type: error
+      message: Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata;
+        this can degrade performance and cause issues.
+  - type: turn.started
+  - type: item.completed
+    item:
+      id: item_1
+      type: agent_message
+      text: I’ll read `task.txt` and inspect the allowed files, then implement and
+        check the solution.
+  - type: item.started
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; ls -la; cat task.txt; printf '\\n--- files
+        ---\\n'; rg --files data code 2>/dev/null | head -80; printf '\\n--- checker
+        ---\\n'; sed -n '1,220p' deequ_check.py"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; ls -la; cat task.txt; printf '\\n--- files
+        ---\\n'; rg --files data code 2>/dev/null | head -80; printf '\\n--- checker
+        ---\\n'; sed -n '1,220p' deequ_check.py"
+      aggregated_output: "/tmp/codex_synth_lfxe72f0\ntotal 32\ndrwx------  7 hach13\
+        \ posix-nogroup   188 Sep 27 19:09 .\ndrwx------ 25 hach13 nobody        \
+        \ 4096 Sep 27 19:09 ..\ndr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 27 19:09\
+        \ .agents\ndr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 27 19:09 .codex\n\
+        dr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 27 19:09 .git\n-rw-r--r--  1\
+        \ hach13 posix-nogroup   937 Sep 27 19:09 AGENTS.md\ndrwxr-xr-x  2 hach13\
+        \ posix-nogroup    32 Sep 27 19:09 code\ndrwxr-xr-x  3 hach13 posix-nogroup\
+        \    28 Sep 27 19:09 data\n-rw-r--r--  1 hach13 posix-nogroup  4817 Sep 27\
+        \ 19:09 deequ_check.py\n-rw-r--r--  1 hach13 posix-nogroup  1337 Sep 27 19:09\
+        \ deequ_jars.txt\n-rw-r--r--  1 hach13 posix-nogroup 10053 Sep 27 19:09 task.txt\n\
+        # Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+        \ describing what\nthe program below assumes about its input data. If new\
+        \ data arrived that violated\none of your constraints, the program should\
+        \ be expected to misbehave -- crash,\nsilently produce a wrong number, or\
+        \ drop records it should have kept.\n\nYour output is a single file, `constraints.json`,\
+        \ in the current folder.\n\n# The program\n\nThis program consumes the dataset.\n\
+        \n```python\nimport argparse\nimport json\nimport os\n\nimport numpy as np\n\
+        import pandas as pd\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n\
+        \    parser.add_argument('--input', type=str, required=True)\n    parser.add_argument('--output',\
+        \ type=str, required=True)\n    args = parser.parse_args()\n\n    os.makedirs(args.output,\
+        \ exist_ok=True)\n\n    input_csv = os.path.join(args.input, 'new_data.csv')\n\
+        \    df = pd.read_csv(input_csv)\n\n    # Basic normalization of relevant\
+        \ fields\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'], errors='coerce')\n\
+        \    df['Released_Year'] = pd.to_numeric(df['Released_Year'], errors='coerce')\n\
+        \    df['Runtime'] = df['Runtime'].astype(str).str.strip()\n    # Normalize\
+        \ Gross to have NaN for missing/blank\n    if 'Gross' in df.columns:\n   \
+        \     gross_raw = df['Gross'].astype(str)\n        gross_raw = gross_raw.replace({\n\
+        \            '': np.nan,\n            'nan': np.nan,\n            'None':\
+        \ np.nan,\n            'NaN': np.nan\n        })\n        df['Gross'] = gross_raw\n\
+        \    else:\n        df['Gross'] = np.nan\n\n    # Score components configuration\n\
+        \    current_year = int(pd.Timestamp.today().year)\n    min_year = 1900\n\
+        \    min_runtime = 60\n    max_runtime = 240\n    ideal_runtime = 110\n  \
+        \  target_runtime_low = 80\n    target_runtime_high = 140\n    rating_score\
+        \ = df['IMDB_Rating'] / 10.0\n    year_span = float(current_year - min_year)\
+        \ if current_year > min_year else 1.0\n    recency_score = (df['Released_Year']\
+        \ - min_year) / year_span\n    runtime_min = df['Runtime'].str.extract(r'^([1-9][0-9]{1,2})\
+        \ min$')[0].astype(int)\n    runtime_deviation = (runtime_min - ideal_runtime).abs()\n\
+        \    # Linearly decay from ideal with tolerance window; negative clipped at\
+        \ 0\n    tolerance = 50.0\n    runtime_suitability = 1.0 - (runtime_deviation\
+        \ / tolerance)\n    runtime_suitability = runtime_suitability.clip(lower=0.0,\
+        \ upper=1.0)\n\n    present_mask = df['Gross'].notna() & (df['Gross'].astype(str).str.strip()\
+        \ != '')\n    gross_num = pd.to_numeric(df['Gross'].astype(str).str.replace(',',\
+        \ '', regex=False), errors='coerce')\n    # Impute missing revenue proxy with\
+        \ median to avoid biasing scores where Gross is absent\n    gross_filled =\
+        \ gross_num.fillna(gross_num.median())\n    if np.isfinite(gross_filled.max())\
+        \ and gross_filled.max() > 0:\n        revenue_score = np.log1p(gross_filled)\
+        \ / np.log1p(gross_filled.max())\n    else:\n        revenue_score = pd.Series(0.0,\
+        \ index=df.index)\n\n    # Composite score assembly\n    # Weights tuned to\
+        \ favor quality and recency for licensing\n    w_rating = 0.4\n    w_recency\
+        \ = 0.3\n    w_runtime = 0.15\n    w_revenue = 0.15\n    composite_score =\
+        \ (\n            w_rating * rating_score +\n            w_recency * recency_score\
+        \ +\n            w_runtime * runtime_suitability +\n            w_revenue\
+        \ * revenue_score\n    )\n\n    # Suitability filters for shortlist (keep\
+        \ code behavior dependent on valid assumptions)\n    runtime_in_target = runtime_min.between(target_runtime_low,\
+        \ target_runtime_high, inclusive='both')\n    quality_filter = df['IMDB_Rating']\
+        \ >= 7.0\n    filtered = df[quality_filter & runtime_in_target].copy()\n\n\
+        \    # Attach computed fields for ranking and auditing\n    filtered['runtime_min']\
+        \ = runtime_min.loc[filtered.index]\n    filtered['rating_score'] = rating_score.loc[filtered.index]\n\
+        \    filtered['recency_score'] = recency_score.loc[filtered.index]\n    filtered['revenue_score']\
+        \ = revenue_score.loc[filtered.index]\n    filtered['composite_score'] = composite_score.loc[filtered.index]\n\
+        \    # Rank and produce a mapping keyed by (title, year)\n    filtered['shortlist_rank']\
+        \ = filtered['composite_score'].rank(method='dense', ascending=False).astype(int)\n\
+        \    filtered.sort_values(['composite_score', 'No_of_Votes'], ascending=[False,\
+        \ False], inplace=True)\n\n    # Build a dict for downstream contracts that\
+        \ rely on unique keys\n    key_tuples = list(zip(filtered['Series_Title'].astype(str),\
+        \ filtered['Released_Year'].astype(int)))\n    score_map = dict(zip(key_tuples,\
+        \ filtered['composite_score'].round(6)))\n\n    # Outputs\n    shortlist_cols\
+        \ = [\n        'Series_Title', 'Released_Year', 'IMDB_Rating', 'Runtime',\
+        \ 'runtime_min',\n        'Gross', 'composite_score', 'shortlist_rank', 'No_of_Votes',\
+        \ 'Genre', 'Director'\n    ]\n    shortlist_path = os.path.join(args.output,\
+        \ 'licensing_shortlist.csv')\n    filtered[shortlist_cols].to_csv(shortlist_path,\
+        \ index=False)\n\n    scores_path = os.path.join(args.output, 'title_scores.csv')\n\
+        \    scored_df = df.copy()\n    scored_df['runtime_min'] = runtime_min\n \
+        \   scored_df['rating_score'] = rating_score\n    scored_df['recency_score']\
+        \ = recency_score\n    scored_df['revenue_score'] = revenue_score\n    scored_df['composite_score']\
+        \ = composite_score\n    scored_df.to_csv(scores_path, index=False)\n\n  \
+        \  mapping_path = os.path.join(args.output, 'score_map.json')\n    with open(mapping_path,\
+        \ 'w', encoding='utf-8') as f:\n        json.dump({f\"{k[0]} ({k[1]})\": float(v)\
+        \ for k, v in score_map.items()}, f, ensure_ascii=False, indent=2)\n\n\nif\
+        \ __name__ == '__main__':\n    main()\n\n```\n\nThe same program is on disk\
+        \ at `./code/general_task_35.py`, so you can run it against the\nstaged table,\
+        \ step through it, or search it, rather than working from the\nlisting alone.\n\
+        \n# The data\n\nThree rows sampled from the dataset the program consumes:\n\
+        \n[{'id': 200, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BZjZlZDlkYTktMmU1My00ZDBiLWFlNjEtYTBhNjVhOTM4ZjJjXkEyXkFqcGdeQXVyMTMxODk2OTU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Donnie Darko', 'Released_Year': 2001, 'Certificate': 'R',\
+        \ 'Runtime': '113 min', 'Genre': 'Drama, Mystery, Sci-Fi', 'IMDB_Rating':\
+        \ 8.0, 'Overview': 'After narrowly escaping a bizarre accident, a troubled\
+        \ teenager is plagued by visions of a man in a large rabbit suit who manipulates\
+        \ him to commit a series of crimes.', 'Meta_score': 88.0, 'Director': 'Richard\
+        \ Kelly', 'Star1': 'Jake Gyllenhaal', 'Star2': 'Jena Malone', 'Star3': 'Mary\
+        \ McDonnell', 'Star4': 'Holmes Osborne', 'No_of_Votes': 740086, 'Gross': '1,480,006'},\
+        \ {'id': 56, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BOWVmZGQ0MGYtMDI1Yy00MDkxLWJiYjQtMmZjZmQ0NDFmMDRhXkEyXkFqcGdeQXVyNjg3MDMxNzU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'The Peanut Butter Falcon', 'Released_Year': 2019, 'Certificate':\
+        \ 'PG-13', 'Runtime': '97 min', 'Genre': 'Adventure, Comedy, Drama', 'IMDB_Rating':\
+        \ 7.6, 'Overview': 'Zak runs away from his care home to make his dream of\
+        \ becoming a wrestler come true.', 'Meta_score': 70.0, 'Director': 'Tyler\
+        \ Nilson', 'Star1': 'Michael Schwartz', 'Star2': 'Zack Gottsagen', 'Star3':\
+        \ 'Ann Owens', 'Star4': 'Dakota Johnson', 'No_of_Votes': 66346, 'Gross': '13,122,642'},\
+        \ {'id': 43, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BMDU2ZWJlMjktMTRhMy00ZTA5LWEzNDgtYmNmZTEwZTViZWJkXkEyXkFqcGdeQXVyNDQ2OTk4MzI@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Toy Story', 'Released_Year': 1995, 'Certificate': 'U',\
+        \ 'Runtime': '81 min', 'Genre': 'Animation, Adventure, Comedy', 'IMDB_Rating':\
+        \ 8.3, 'Overview': \"A cowboy doll is profoundly threatened and jealous when\
+        \ a new spaceman figure supplants him as top toy in a boy's room.\", 'Meta_score':\
+        \ 95.0, 'Director': 'John Lasseter', 'Star1': 'Tom Hanks', 'Star2': 'Tim Allen',\
+        \ 'Star3': 'Don Rickles', 'Star4': 'Jim Varney', 'No_of_Votes': 887429, 'Gross':\
+        \ '191,796,233'}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\n\n--- files ---\ncode/general_task_35.py\ndata/tables/observed_data.csv\n\
+        \n--- checker ---\n\"\"\"Run PyDeequ constraint code against the example tables\
+        \ and report results.\"\"\"\nimport argparse\nimport json\nimport os\nimport\
+        \ sys\nfrom pathlib import Path\n\nimport prismadv  # noqa: F401\n\nos.environ.pop(\"\
+        OPENAI_API_KEY\", None)\n\nimport pandas as pd  # noqa: E402\nfrom prismadv.dq_manager\
+        \ import DeequDataQualityManager  # noqa: E402\n\nHERE = Path(__file__).resolve().parent\n\
+        TABLES_DIR = HERE / \"data\" / \"tables\"\nJARS_FILE = HERE / \"deequ_jars.txt\"\
+        \n\n\ndef build_spark():\n    \"\"\"A Spark session whose Deequ classpath\
+        \ is pinned to already-resolved jars.\n\n    The default session config asks\
+        \ Spark to fetch `spark.jars.packages` through\n    Ivy. That cannot work\
+        \ here: Ivy writes its resolution cache under $HOME, and\n    inside the agent's\
+        \ sandbox only the workspace is writable, so resolution dies\n    before the\
+        \ JVM starts and every check reports FAILS for a reason that has\n    nothing\
+        \ to do with the constraint. The jars were resolved once by the driver\n \
+        \   that staged this file; naming them directly removes the resolution step,\
+        \ and\n    with it the network and $HOME-write dependencies.\n    \"\"\"\n\
+        \    from pyspark.sql import SparkSession\n\n    jars = [line.strip() for\
+        \ line in JARS_FILE.read_text(encoding=\"utf-8\").split() if line.strip()]\n\
+        \    if not jars:\n        raise RuntimeError(f\"{JARS_FILE.name} is empty;\
+        \ the Deequ classpath cannot be pinned\")\n    # `spark.jars` takes URIs;\
+        \ the driver classpath takes plain filesystem paths.\n    local = [jar[len(\"\
+        file://\"):] if jar.startswith(\"file://\") else jar for jar in jars]\n  \
+        \  return (\n        SparkSession.builder.appName(\"deequ-local\")\n     \
+        \   .master(\"local[2]\")\n        .config(\"spark.driver.memory\", \"4g\"\
+        )\n        .config(\"spark.jars\", \",\".join(jars))\n        .config(\"spark.driver.extraClassPath\"\
+        , \":\".join(local))\n        .config(\"spark.executor.extraClassPath\", \"\
+        :\".join(local))\n        .config(\"spark.driver.host\", \"localhost\")\n\
+        \        .config(\"spark.ui.enabled\", \"false\")\n        .config(\"spark.sql.execution.arrow.pyspark.enabled\"\
+        , \"true\")\n        .getOrCreate()\n    )\n\n\ndef load_codes(path: Path)\
+        \ -> list[str]:\n    \"\"\"Accept JSON, or one constraint per line so quoting\
+        \ never blocks a check.\"\"\"\n    text = path.read_text(encoding=\"utf-8\"\
+        ).strip()\n    if not text:\n        return []\n    if text.lstrip()[0] in\
+        \ \"[{\":\n        try:\n            payload = json.loads(text)\n        except\
+        \ json.JSONDecodeError as exc:\n            print(f\"warning: {path.name}\
+        \ is not valid JSON ({exc}); \"\n                  f\"falling back to one-constraint-per-line\
+        \ parsing.\")\n            payload = None\n        if payload is not None:\n\
+        \            if isinstance(payload, dict):\n                payload = payload.get(\"\
+        constraints\", [])\n            codes = []\n            for item in payload:\n\
+        \                if isinstance(item, str):\n                    codes.append(item)\n\
+        \                else:\n                    codes.append(item.get(\"code_for_constraint\"\
+        ) or item.get(\"suggestion\"))\n            return [code for code in codes\
+        \ if code]\n    codes = []\n    for line in text.splitlines():\n        line\
+        \ = line.strip()\n        if not line or line.startswith(\"#\"):\n       \
+        \     continue\n        codes.append(line)\n    return codes\n\n\ndef main()\
+        \ -> int:\n    parser = argparse.ArgumentParser(description=__doc__)\n   \
+        \ parser.add_argument(\"--table\", required=True, help=\"Table name (file\
+        \ stem under data/tables).\")\n    parser.add_argument(\"--constraints\",\
+        \ required=True,\n                        help='JSON: [\"<code>\", ...] or\
+        \ {\"constraints\": [{\"code_for_constraint\": ...}]}')\n    args = parser.parse_args()\n\
+        \n    csv_path = TABLES_DIR / f\"{args.table}.csv\"\n    if not csv_path.exists():\n\
+        \        available = sorted(p.stem for p in TABLES_DIR.glob(\"*.csv\"))\n\
+        \        print(f\"no such table: {args.table}. available: {available}\")\n\
+        \        return 2\n\n    codes = load_codes(Path(args.constraints))\n    if\
+        \ not codes:\n        print(\"no constraint code found in the given file\"\
+        )\n        return 2\n\n    dataframe = pd.read_csv(csv_path)\n    manager\
+        \ = DeequDataQualityManager()\n    spark_df, spark = manager.spark_df_from_pandas_df(dataframe,\
+        \ spark_session=build_spark())\n    results = manager.validate_constraints_with_reasons(spark,\
+        \ spark_df, codes, isolated_check=True)\n\n    held = 0\n    for code, (is_valid,\
+        \ reason) in zip(codes, results):\n        held += int(bool(is_valid))\n \
+        \       print(f\"[{'HOLDS' if is_valid else 'FAILS'}] {code}\")\n        if\
+        \ not is_valid:\n            print(f\"          reason: {reason}\")\n    print(f\"\
+        \\n{held}/{len(codes)} constraint(s) hold on table '{args.table}' \"\n   \
+        \       f\"({len(dataframe)} rows).\")\n\n    try:\n        spark.sparkContext._gateway.shutdown_callback_server()\n\
+        \    except Exception:\n        pass\n    try:\n        spark.stop()\n   \
+        \ except Exception:\n        pass\n    return 0\n\n\nif __name__ == \"__main__\"\
+        :\n    code = main()\n    sys.stdout.flush()\n    os._exit(code)\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_3
+      type: command_execution
+      command: /usr/bin/bash -lc "cat task.txt; printf '\\n--- program ---\\n'; cat
+        code/general_task_35.py; printf '\\n--- data head ---\\n'; head -n 5 data/tables/observed_data.csv;
+        printf '\\n--- rows ---\\n'; wc -l data/tables/observed_data.csv"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_3
+      type: command_execution
+      command: /usr/bin/bash -lc "cat task.txt; printf '\\n--- program ---\\n'; cat
+        code/general_task_35.py; printf '\\n--- data head ---\\n'; head -n 5 data/tables/observed_data.csv;
+        printf '\\n--- rows ---\\n'; wc -l data/tables/observed_data.csv"
+      aggregated_output: "# Task\n\nYou are writing a **data unit test**: a set of\
+        \ PyDeequ constraints describing what\nthe program below assumes about its\
+        \ input data. If new data arrived that violated\none of your constraints,\
+        \ the program should be expected to misbehave -- crash,\nsilently produce\
+        \ a wrong number, or drop records it should have kept.\n\nYour output is a\
+        \ single file, `constraints.json`, in the current folder.\n\n# The program\n\
+        \nThis program consumes the dataset.\n\n```python\nimport argparse\nimport\
+        \ json\nimport os\n\nimport numpy as np\nimport pandas as pd\n\n\ndef main():\n\
+        \    parser = argparse.ArgumentParser()\n    parser.add_argument('--input',\
+        \ type=str, required=True)\n    parser.add_argument('--output', type=str,\
+        \ required=True)\n    args = parser.parse_args()\n\n    os.makedirs(args.output,\
+        \ exist_ok=True)\n\n    input_csv = os.path.join(args.input, 'new_data.csv')\n\
+        \    df = pd.read_csv(input_csv)\n\n    # Basic normalization of relevant\
+        \ fields\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'], errors='coerce')\n\
+        \    df['Released_Year'] = pd.to_numeric(df['Released_Year'], errors='coerce')\n\
+        \    df['Runtime'] = df['Runtime'].astype(str).str.strip()\n    # Normalize\
+        \ Gross to have NaN for missing/blank\n    if 'Gross' in df.columns:\n   \
+        \     gross_raw = df['Gross'].astype(str)\n        gross_raw = gross_raw.replace({\n\
+        \            '': np.nan,\n            'nan': np.nan,\n            'None':\
+        \ np.nan,\n            'NaN': np.nan\n        })\n        df['Gross'] = gross_raw\n\
+        \    else:\n        df['Gross'] = np.nan\n\n    # Score components configuration\n\
+        \    current_year = int(pd.Timestamp.today().year)\n    min_year = 1900\n\
+        \    min_runtime = 60\n    max_runtime = 240\n    ideal_runtime = 110\n  \
+        \  target_runtime_low = 80\n    target_runtime_high = 140\n    rating_score\
+        \ = df['IMDB_Rating'] / 10.0\n    year_span = float(current_year - min_year)\
+        \ if current_year > min_year else 1.0\n    recency_score = (df['Released_Year']\
+        \ - min_year) / year_span\n    runtime_min = df['Runtime'].str.extract(r'^([1-9][0-9]{1,2})\
+        \ min$')[0].astype(int)\n    runtime_deviation = (runtime_min - ideal_runtime).abs()\n\
+        \    # Linearly decay from ideal with tolerance window; negative clipped at\
+        \ 0\n    tolerance = 50.0\n    runtime_suitability = 1.0 - (runtime_deviation\
+        \ / tolerance)\n    runtime_suitability = runtime_suitability.clip(lower=0.0,\
+        \ upper=1.0)\n\n    present_mask = df['Gross'].notna() & (df['Gross'].astype(str).str.strip()\
+        \ != '')\n    gross_num = pd.to_numeric(df['Gross'].astype(str).str.replace(',',\
+        \ '', regex=False), errors='coerce')\n    # Impute missing revenue proxy with\
+        \ median to avoid biasing scores where Gross is absent\n    gross_filled =\
+        \ gross_num.fillna(gross_num.median())\n    if np.isfinite(gross_filled.max())\
+        \ and gross_filled.max() > 0:\n        revenue_score = np.log1p(gross_filled)\
+        \ / np.log1p(gross_filled.max())\n    else:\n        revenue_score = pd.Series(0.0,\
+        \ index=df.index)\n\n    # Composite score assembly\n    # Weights tuned to\
+        \ favor quality and recency for licensing\n    w_rating = 0.4\n    w_recency\
+        \ = 0.3\n    w_runtime = 0.15\n    w_revenue = 0.15\n    composite_score =\
+        \ (\n            w_rating * rating_score +\n            w_recency * recency_score\
+        \ +\n            w_runtime * runtime_suitability +\n            w_revenue\
+        \ * revenue_score\n    )\n\n    # Suitability filters for shortlist (keep\
+        \ code behavior dependent on valid assumptions)\n    runtime_in_target = runtime_min.between(target_runtime_low,\
+        \ target_runtime_high, inclusive='both')\n    quality_filter = df['IMDB_Rating']\
+        \ >= 7.0\n    filtered = df[quality_filter & runtime_in_target].copy()\n\n\
+        \    # Attach computed fields for ranking and auditing\n    filtered['runtime_min']\
+        \ = runtime_min.loc[filtered.index]\n    filtered['rating_score'] = rating_score.loc[filtered.index]\n\
+        \    filtered['recency_score'] = recency_score.loc[filtered.index]\n    filtered['revenue_score']\
+        \ = revenue_score.loc[filtered.index]\n    filtered['composite_score'] = composite_score.loc[filtered.index]\n\
+        \    # Rank and produce a mapping keyed by (title, year)\n    filtered['shortlist_rank']\
+        \ = filtered['composite_score'].rank(method='dense', ascending=False).astype(int)\n\
+        \    filtered.sort_values(['composite_score', 'No_of_Votes'], ascending=[False,\
+        \ False], inplace=True)\n\n    # Build a dict for downstream contracts that\
+        \ rely on unique keys\n    key_tuples = list(zip(filtered['Series_Title'].astype(str),\
+        \ filtered['Released_Year'].astype(int)))\n    score_map = dict(zip(key_tuples,\
+        \ filtered['composite_score'].round(6)))\n\n    # Outputs\n    shortlist_cols\
+        \ = [\n        'Series_Title', 'Released_Year', 'IMDB_Rating', 'Runtime',\
+        \ 'runtime_min',\n        'Gross', 'composite_score', 'shortlist_rank', 'No_of_Votes',\
+        \ 'Genre', 'Director'\n    ]\n    shortlist_path = os.path.join(args.output,\
+        \ 'licensing_shortlist.csv')\n    filtered[shortlist_cols].to_csv(shortlist_path,\
+        \ index=False)\n\n    scores_path = os.path.join(args.output, 'title_scores.csv')\n\
+        \    scored_df = df.copy()\n    scored_df['runtime_min'] = runtime_min\n \
+        \   scored_df['rating_score'] = rating_score\n    scored_df['recency_score']\
+        \ = recency_score\n    scored_df['revenue_score'] = revenue_score\n    scored_df['composite_score']\
+        \ = composite_score\n    scored_df.to_csv(scores_path, index=False)\n\n  \
+        \  mapping_path = os.path.join(args.output, 'score_map.json')\n    with open(mapping_path,\
+        \ 'w', encoding='utf-8') as f:\n        json.dump({f\"{k[0]} ({k[1]})\": float(v)\
+        \ for k, v in score_map.items()}, f, ensure_ascii=False, indent=2)\n\n\nif\
+        \ __name__ == '__main__':\n    main()\n\n```\n\nThe same program is on disk\
+        \ at `./code/general_task_35.py`, so you can run it against the\nstaged table,\
+        \ step through it, or search it, rather than working from the\nlisting alone.\n\
+        \n# The data\n\nThree rows sampled from the dataset the program consumes:\n\
+        \n[{'id': 200, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BZjZlZDlkYTktMmU1My00ZDBiLWFlNjEtYTBhNjVhOTM4ZjJjXkEyXkFqcGdeQXVyMTMxODk2OTU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Donnie Darko', 'Released_Year': 2001, 'Certificate': 'R',\
+        \ 'Runtime': '113 min', 'Genre': 'Drama, Mystery, Sci-Fi', 'IMDB_Rating':\
+        \ 8.0, 'Overview': 'After narrowly escaping a bizarre accident, a troubled\
+        \ teenager is plagued by visions of a man in a large rabbit suit who manipulates\
+        \ him to commit a series of crimes.', 'Meta_score': 88.0, 'Director': 'Richard\
+        \ Kelly', 'Star1': 'Jake Gyllenhaal', 'Star2': 'Jena Malone', 'Star3': 'Mary\
+        \ McDonnell', 'Star4': 'Holmes Osborne', 'No_of_Votes': 740086, 'Gross': '1,480,006'},\
+        \ {'id': 56, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BOWVmZGQ0MGYtMDI1Yy00MDkxLWJiYjQtMmZjZmQ0NDFmMDRhXkEyXkFqcGdeQXVyNjg3MDMxNzU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'The Peanut Butter Falcon', 'Released_Year': 2019, 'Certificate':\
+        \ 'PG-13', 'Runtime': '97 min', 'Genre': 'Adventure, Comedy, Drama', 'IMDB_Rating':\
+        \ 7.6, 'Overview': 'Zak runs away from his care home to make his dream of\
+        \ becoming a wrestler come true.', 'Meta_score': 70.0, 'Director': 'Tyler\
+        \ Nilson', 'Star1': 'Michael Schwartz', 'Star2': 'Zack Gottsagen', 'Star3':\
+        \ 'Ann Owens', 'Star4': 'Dakota Johnson', 'No_of_Votes': 66346, 'Gross': '13,122,642'},\
+        \ {'id': 43, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BMDU2ZWJlMjktMTRhMy00ZTA5LWEzNDgtYmNmZTEwZTViZWJkXkEyXkFqcGdeQXVyNDQ2OTk4MzI@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Toy Story', 'Released_Year': 1995, 'Certificate': 'U',\
+        \ 'Runtime': '81 min', 'Genre': 'Animation, Adventure, Comedy', 'IMDB_Rating':\
+        \ 8.3, 'Overview': \"A cowboy doll is profoundly threatened and jealous when\
+        \ a new spaceman figure supplants him as top toy in a boy's room.\", 'Meta_score':\
+        \ 95.0, 'Director': 'John Lasseter', 'Star1': 'Tom Hanks', 'Star2': 'Tim Allen',\
+        \ 'Star3': 'Don Rickles', 'Star4': 'Jim Varney', 'No_of_Votes': 887429, 'Gross':\
+        \ '191,796,233'}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\n\n--- program ---\nimport argparse\nimport json\nimport os\n\
+        \nimport numpy as np\nimport pandas as pd\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n\
+        \    parser.add_argument('--input', type=str, required=True)\n    parser.add_argument('--output',\
+        \ type=str, required=True)\n    args = parser.parse_args()\n\n    os.makedirs(args.output,\
+        \ exist_ok=True)\n\n    input_csv = os.path.join(args.input, 'new_data.csv')\n\
+        \    df = pd.read_csv(input_csv)\n\n    # Basic normalization of relevant\
+        \ fields\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'], errors='coerce')\n\
+        \    df['Released_Year'] = pd.to_numeric(df['Released_Year'], errors='coerce')\n\
+        \    df['Runtime'] = df['Runtime'].astype(str).str.strip()\n    # Normalize\
+        \ Gross to have NaN for missing/blank\n    if 'Gross' in df.columns:\n   \
+        \     gross_raw = df['Gross'].astype(str)\n        gross_raw = gross_raw.replace({\n\
+        \            '': np.nan,\n            'nan': np.nan,\n            'None':\
+        \ np.nan,\n            'NaN': np.nan\n        })\n        df['Gross'] = gross_raw\n\
+        \    else:\n        df['Gross'] = np.nan\n\n    # Score components configuration\n\
+        \    current_year = int(pd.Timestamp.today().year)\n    min_year = 1900\n\
+        \    min_runtime = 60\n    max_runtime = 240\n    ideal_runtime = 110\n  \
+        \  target_runtime_low = 80\n    target_runtime_high = 140\n    rating_score\
+        \ = df['IMDB_Rating'] / 10.0\n    year_span = float(current_year - min_year)\
+        \ if current_year > min_year else 1.0\n    recency_score = (df['Released_Year']\
+        \ - min_year) / year_span\n    runtime_min = df['Runtime'].str.extract(r'^([1-9][0-9]{1,2})\
+        \ min$')[0].astype(int)\n    runtime_deviation = (runtime_min - ideal_runtime).abs()\n\
+        \    # Linearly decay from ideal with tolerance window; negative clipped at\
+        \ 0\n    tolerance = 50.0\n    runtime_suitability = 1.0 - (runtime_deviation\
+        \ / tolerance)\n    runtime_suitability = runtime_suitability.clip(lower=0.0,\
+        \ upper=1.0)\n\n    present_mask = df['Gross'].notna() & (df['Gross'].astype(str).str.strip()\
+        \ != '')\n    gross_num = pd.to_numeric(df['Gross'].astype(str).str.replace(',',\
+        \ '', regex=False), errors='coerce')\n    # Impute missing revenue proxy with\
+        \ median to avoid biasing scores where Gross is absent\n    gross_filled =\
+        \ gross_num.fillna(gross_num.median())\n    if np.isfinite(gross_filled.max())\
+        \ and gross_filled.max() > 0:\n        revenue_score = np.log1p(gross_filled)\
+        \ / np.log1p(gross_filled.max())\n    else:\n        revenue_score = pd.Series(0.0,\
+        \ index=df.index)\n\n    # Composite score assembly\n    # Weights tuned to\
+        \ favor quality and recency for licensing\n    w_rating = 0.4\n    w_recency\
+        \ = 0.3\n    w_runtime = 0.15\n    w_revenue = 0.15\n    composite_score =\
+        \ (\n            w_rating * rating_score +\n            w_recency * recency_score\
+        \ +\n            w_runtime * runtime_suitability +\n            w_revenue\
+        \ * revenue_score\n    )\n\n    # Suitability filters for shortlist (keep\
+        \ code behavior dependent on valid assumptions)\n    runtime_in_target = runtime_min.between(target_runtime_low,\
+        \ target_runtime_high, inclusive='both')\n    quality_filter = df['IMDB_Rating']\
+        \ >= 7.0\n    filtered = df[quality_filter & runtime_in_target].copy()\n\n\
+        \    # Attach computed fields for ranking and auditing\n    filtered['runtime_min']\
+        \ = runtime_min.loc[filtered.index]\n    filtered['rating_score'] = rating_score.loc[filtered.index]\n\
+        \    filtered['recency_score'] = recency_score.loc[filtered.index]\n    filtered['revenue_score']\
+        \ = revenue_score.loc[filtered.index]\n    filtered['composite_score'] = composite_score.loc[filtered.index]\n\
+        \    # Rank and produce a mapping keyed by (title, year)\n    filtered['shortlist_rank']\
+        \ = filtered['composite_score'].rank(method='dense', ascending=False).astype(int)\n\
+        \    filtered.sort_values(['composite_score', 'No_of_Votes'], ascending=[False,\
+        \ False], inplace=True)\n\n    # Build a dict for downstream contracts that\
+        \ rely on unique keys\n    key_tuples = list(zip(filtered['Series_Title'].astype(str),\
+        \ filtered['Released_Year'].astype(int)))\n    score_map = dict(zip(key_tuples,\
+        \ filtered['composite_score'].round(6)))\n\n    # Outputs\n    shortlist_cols\
+        \ = [\n        'Series_Title', 'Released_Year', 'IMDB_Rating', 'Runtime',\
+        \ 'runtime_min',\n        'Gross', 'composite_score', 'shortlist_rank', 'No_of_Votes',\
+        \ 'Genre', 'Director'\n    ]\n    shortlist_path = os.path.join(args.output,\
+        \ 'licensing_shortlist.csv')\n    filtered[shortlist_cols].to_csv(shortlist_path,\
+        \ index=False)\n\n    scores_path = os.path.join(args.output, 'title_scores.csv')\n\
+        \    scored_df = df.copy()\n    scored_df['runtime_min'] = runtime_min\n \
+        \   scored_df['rating_score'] = rating_score\n    scored_df['recency_score']\
+        \ = recency_score\n    scored_df['revenue_score'] = revenue_score\n    scored_df['composite_score']\
+        \ = composite_score\n    scored_df.to_csv(scores_path, index=False)\n\n  \
+        \  mapping_path = os.path.join(args.output, 'score_map.json')\n    with open(mapping_path,\
+        \ 'w', encoding='utf-8') as f:\n        json.dump({f\"{k[0]} ({k[1]})\": float(v)\
+        \ for k, v in score_map.items()}, f, ensure_ascii=False, indent=2)\n\n\nif\
+        \ __name__ == '__main__':\n    main()\n\n--- data head ---\nid,Poster_Link,Series_Title,Released_Year,Certificate,Runtime,Genre,IMDB_Rating,Overview,Meta_score,Director,Star1,Star2,Star3,Star4,No_of_Votes,Gross\n\
+        0,\"https://m.media-amazon.com/images/M/MV5BMWQ2MjQ0OTctMWE1OC00NjZjLTk3ZDAtNTk3NTZiYWMxYTlmXkEyXkFqcGdeQXVyMTQxNzMzNDI@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Ying xiong,2002,PG-13,120 min,\"Action, Adventure, History\",7.9,\"A defense\
+        \ officer, Nameless, was summoned by the King of Qin regarding his success\
+        \ of terminating three warriors.\",85.0,Yimou Zhang,Jet Li,Tony Chiu-Wai Leung,Maggie\
+        \ Cheung,Ziyi Zhang,173999,\"53,710,019\"\n1,\"https://m.media-amazon.com/images/M/MV5BY2ViOTU5MDQtZTRiZi00YjViLWFiY2ItOTRhNWYyN2ZiMzUyXkEyXkFqcGdeQXVyNTAyODkwOQ@@._V1_UY98_CR1,0,67,98_AL_.jpg\"\
+        ,Chugyeokja,2008,,125 min,\"Action, Crime, Thriller\",7.8,A disgraced ex-policeman\
+        \ who runs a small ring of prostitutes finds himself in a race against time\
+        \ when one of his women goes missing.,64.0,Hong-jin Na,Kim Yoon-seok,Jung-woo\
+        \ Ha,Yeong-hie Seo,Yoo-Jeong Kim,58468,\n2,\"https://m.media-amazon.com/images/M/MV5BYWQ0MGNjOTYtMWJlNi00YWMxLWFmMzktYjAyNTVkY2U1NWNhL2ltYWdlL2ltYWdlXkEyXkFqcGdeQXVyNjc1NTYyMjg@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Brief Encounter,1945,U,86 min,\"Drama, Romance\",8.0,\"Meeting a stranger\
+        \ in a railway station, a woman is tempted to cheat on her husband.\",92.0,David\
+        \ Lean,Celia Johnson,Trevor Howard,Stanley Holloway,Joyce Carey,35601,\n3,\"\
+        https://m.media-amazon.com/images/M/MV5BMDI5ZWJhOWItYTlhOC00YWNhLTlkNzctNDU5YTI1M2E1MWZhXkEyXkFqcGdeQXVyNTIzOTk5ODM@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Casino Royale,2006,PG-13,144 min,\"Action, Adventure, Thriller\",8.0,\"After\
+        \ earning 00 status and a licence to kill, Secret Agent James Bond sets out\
+        \ on his first mission as 007. Bond must defeat a private banker funding terrorists\
+        \ in a high-stakes game of poker at Casino Royale, Montenegro.\",80.0,Martin\
+        \ Campbell,Daniel Craig,Eva Green,Judi Dench,Jeffrey Wright,582239,\"167,445,960\"\
+        \n\n--- rows ---\n600 data/tables/observed_data.csv\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_4
+      type: command_execution
+      command: '/usr/bin/bash -lc "sed -n ''105,210p'' task.txt; sed -n ''210,260p''
+        task.txt; python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv'')
+
+        print(x.shape); print(x.dtypes.to_string());print(x.isna().sum().to_string());
+        print(''years'',x.Released_Year.min(),x.Released_Year.max(),''rating'',x.IMDB_Rating.min(),x.IMDB_Rating.max(),''votes'',x.No_of_Votes.min(),x.No_of_Votes.max());print(''runtime'',x.Runtime.unique()[:20]);print(''gross
+        examples'',x.Gross.dropna().head(20).to_list());print(''dup keys'',x.duplicated([''Series_Title'',''Released_Year'']).sum());print(''missing
+        keys'',x[[''Series_Title'',''Released_Year'',''Genre'',''Director'',''No_of_Votes'']].isna().sum());print(''gross
+        min max'',pd.to_numeric(x.Gross.dropna().str.replace('','',''''),errors=''coerce'').agg([''min'',''max'']).to_string())
+
+        PY"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_4
+      type: command_execution
+      command: '/usr/bin/bash -lc "sed -n ''105,210p'' task.txt; sed -n ''210,260p''
+        task.txt; python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv'')
+
+        print(x.shape); print(x.dtypes.to_string());print(x.isna().sum().to_string());
+        print(''years'',x.Released_Year.min(),x.Released_Year.max(),''rating'',x.IMDB_Rating.min(),x.IMDB_Rating.max(),''votes'',x.No_of_Votes.min(),x.No_of_Votes.max());print(''runtime'',x.Runtime.unique()[:20]);print(''gross
+        examples'',x.Gross.dropna().head(20).to_list());print(''dup keys'',x.duplicated([''Series_Title'',''Released_Year'']).sum());print(''missing
+        keys'',x[[''Series_Title'',''Released_Year'',''Genre'',''Director'',''No_of_Votes'']].isna().sum());print(''gross
+        min max'',pd.to_numeric(x.Gross.dropna().str.replace('','',''''),errors=''coerce'').agg([''min'',''max'']).to_string())
+
+        PY"'
+      aggregated_output: "(599, 17)\nid                 int64\nPoster_Link       object\n\
+        Series_Title      object\nReleased_Year      int64\nCertificate       object\n\
+        Runtime           object\nGenre             object\nIMDB_Rating      float64\n\
+        Overview          object\nMeta_score       float64\nDirector          object\n\
+        Star1             object\nStar2             object\nStar3             object\n\
+        Star4             object\nNo_of_Votes        int64\nGross             object\n\
+        id                 0\nPoster_Link        0\nSeries_Title       0\nReleased_Year\
+        \      0\nCertificate       61\nRuntime            0\nGenre              0\n\
+        IMDB_Rating        0\nOverview           0\nMeta_score        86\nDirector\
+        \           0\nStar1              0\nStar2              0\nStar3         \
+        \     0\nStar4              0\nNo_of_Votes        0\nGross            103\n\
+        years 1924 2020 rating 7.6 9.3 votes 25198 2343110\nruntime ['120 min' '125\
+        \ min' '86 min' '144 min' '100 min' '117 min' '127 min'\n '72 min' '109 min'\
+        \ '118 min' '135 min' '184 min' '115 min' '104 min'\n '132 min' '116 min'\
+        \ '154 min' '102 min' '141 min' '107 min']\ngross examples ['53,710,019',\
+        \ '167,445,960', '380,843,261', '210,614,939', '402,453,882', '41,909,762',\
+        \ '32,000,000', '39,567', '1,782,795', '100,119', '24,633,730', '342,370',\
+        \ '46,357,676', '107,928,762', '177,002,924', '13,756,082', '1,436,000', '3,237,118',\
+        \ '85,433', '318,412,101']\ndup keys 0\nmissing keys Series_Title     0\n\
+        Released_Year    0\nGenre            0\nDirector         0\nNo_of_Votes  \
+        \    0\ndtype: int64\ngross min max min         6460\nmax    858373000\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_5
+      type: agent_message
+      text: The program relies on parseable score fields and unique title-year keys.
+        I’ll check the observed ranges before writing constraints.
+  - type: item.started
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile columns and program-sensitive edge cases
+        completed: false
+      - text: Write focused PyDeequ constraints JSON
+        completed: false
+      - text: Run checker and correct failing constraints
+        completed: false
+  - type: item.started
+    item:
+      id: item_7
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv''); r=x.Runtime.str.extract(r''"''^([1-9][0-9]{1,2})
+        min$''"'')[0]; print(''runtime invalid'',r.isna().sum(),''range'',r.astype(int).min(),r.astype(int).max());
+        print(''title empty'',x.Series_Title.astype(str).str.strip().eq('''').sum());
+        print(''year blank?'',x.Released_Year.isna().sum()); print(''gross invalid'',x.Gross.dropna().str.fullmatch(r''[1-9][0-9]{0,2}(,[0-9]{3})*'').value_counts());
+        print(''votes'',x.No_of_Votes.min()); print(''shortlist count'',((x.IMDB_Rating>=7)&r.astype(int).between(80,140)).sum());
+        print(''special titles'',x.Series_Title[x.Series_Title.str.contains(r''\\('',regex=True)].head(5).tolist());
+        print(''gross >= 0'',x.Gross.dropna().str.replace('','','''',regex=False).astype(int).min());
+        print(''table size'',len(x))
+
+        PY"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_7
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv''); r=x.Runtime.str.extract(r''"''^([1-9][0-9]{1,2})
+        min$''"'')[0]; print(''runtime invalid'',r.isna().sum(),''range'',r.astype(int).min(),r.astype(int).max());
+        print(''title empty'',x.Series_Title.astype(str).str.strip().eq('''').sum());
+        print(''year blank?'',x.Released_Year.isna().sum()); print(''gross invalid'',x.Gross.dropna().str.fullmatch(r''[1-9][0-9]{0,2}(,[0-9]{3})*'').value_counts());
+        print(''votes'',x.No_of_Votes.min()); print(''shortlist count'',((x.IMDB_Rating>=7)&r.astype(int).between(80,140)).sum());
+        print(''special titles'',x.Series_Title[x.Series_Title.str.contains(r''\\('',regex=True)].head(5).tolist());
+        print(''gross >= 0'',x.Gross.dropna().str.replace('','','''',regex=False).astype(int).min());
+        print(''table size'',len(x))
+
+        PY"'
+      aggregated_output: 'runtime invalid 0 range 45 238
+
+        title empty 0
+
+        year blank? 0
+
+        gross invalid Gross
+
+        True    496
+
+        Name: count, dtype: int64
+
+        votes 25198
+
+        shortlist count 458
+
+        special titles [''Birdman or (The Unexpected Virtue of Ignorance)'', ''(500)
+        Days of Summer'']
+
+        gross >= 0 6460
+
+        table size 599
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.updated
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile columns and program-sensitive edge cases
+        completed: true
+      - text: Write focused PyDeequ constraints JSON
+        completed: false
+      - text: Run checker and correct failing constraints
+        completed: false
+  - type: item.completed
+    item:
+      id: item_8
+      type: agent_message
+      text: The observed data fits those assumptions. I’ll write checks that keep
+        optional Gross values valid while catching malformed ones.
+  - type: item.started
+    item:
+      id: item_9
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isComplete(''Series_Title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"TRIM(Series_Title) <> ''''\\\",
+        ''nonblank_title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".isComplete(''Released_Year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Released_Year BETWEEN 1900
+        AND year(current_date())\\\", ''valid_release_year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".isComplete(''IMDB_Rating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"IMDB_Rating BETWEEN 0 AND
+        10\\\", ''rating_out_of_ten'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Runtime\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"TRIM(Runtime) RLIKE ''"''^[1-9][0-9]{1,2}
+        min$''"''\\\", ''parseable_runtime_minutes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Gross\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Gross IS NULL OR TRIM(Gross)
+        = '''' OR TRIM(Gross) RLIKE ''"''^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$''"''\\\",
+        ''parseable_optional_gross'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Gross\",
+
+        +      \"code_for_constraint\": \".hasCompleteness(''Gross'', lambda fraction:
+        fraction > 0)\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".isComplete(''No_of_Votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"No_of_Votes >= 0\\\", ''nonnegative_votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Genre\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Genre IS NOT NULL AND TRIM(Genre)
+        <> ''''\\\", ''present_genre'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Director\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Director IS NOT NULL AND
+        TRIM(Director) <> ''''\\\", ''present_director'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +    }
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_9
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isComplete(''Series_Title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"TRIM(Series_Title) <> ''''\\\",
+        ''nonblank_title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".isComplete(''Released_Year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Released_Year BETWEEN 1900
+        AND year(current_date())\\\", ''valid_release_year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".isComplete(''IMDB_Rating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"IMDB_Rating BETWEEN 0 AND
+        10\\\", ''rating_out_of_ten'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Runtime\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"TRIM(Runtime) RLIKE ''"''^[1-9][0-9]{1,2}
+        min$''"''\\\", ''parseable_runtime_minutes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Gross\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Gross IS NULL OR TRIM(Gross)
+        = '''' OR TRIM(Gross) RLIKE ''"''^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$''"''\\\",
+        ''parseable_optional_gross'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Gross\",
+
+        +      \"code_for_constraint\": \".hasCompleteness(''Gross'', lambda fraction:
+        fraction > 0)\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".isComplete(''No_of_Votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"No_of_Votes >= 0\\\", ''nonnegative_votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Genre\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Genre IS NOT NULL AND TRIM(Genre)
+        <> ''''\\\", ''present_genre'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Director\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Director IS NOT NULL AND
+        TRIM(Director) <> ''''\\\", ''present_director'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +    }
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: "SLF4J: Failed to load class \"org.slf4j.impl.StaticLoggerBinder\"\
+        .\nSLF4J: Defaulting to no-operation (NOP) logger implementation\nSLF4J: See\
+        \ http://www.slf4j.org/codes.html#StaticLoggerBinder for further details.\n\
+        SLF4J: Failed to load class \"org.slf4j.impl.StaticMDCBinder\".\nSLF4J: Defaulting\
+        \ to no-operation MDCAdapter implementation.\nSLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder\
+        \ for further details.\nPython Callback server started!\n[HOLDS] .isComplete('Series_Title')\n\
+        [HOLDS] .satisfies(\"TRIM(Series_Title) <> ''\", 'nonblank_title')\n[HOLDS]\
+        \ .isComplete('Released_Year')\n[HOLDS] .satisfies(\"Released_Year BETWEEN\
+        \ 1900 AND year(current_date())\", 'valid_release_year')\n[HOLDS] .isComplete('IMDB_Rating')\n\
+        [HOLDS] .satisfies(\"IMDB_Rating BETWEEN 0 AND 10\", 'rating_out_of_ten')\n\
+        [HOLDS] .satisfies(\"TRIM(Runtime) RLIKE '^[1-9][0-9]{1,2} min$'\", 'parseable_runtime_minutes')\n\
+        [HOLDS] .satisfies(\"Gross IS NULL OR TRIM(Gross) = '' OR TRIM(Gross) RLIKE\
+        \ '^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$'\", 'parseable_optional_gross')\n\
+        [HOLDS] .hasCompleteness('Gross', lambda fraction: fraction > 0)\n[HOLDS]\
+        \ .isComplete('No_of_Votes')\n[HOLDS] .satisfies(\"No_of_Votes >= 0\", 'nonnegative_votes')\n\
+        [HOLDS] .satisfies(\"Genre IS NOT NULL AND TRIM(Genre) <> ''\", 'present_genre')\n\
+        [HOLDS] .satisfies(\"Director IS NOT NULL AND TRIM(Director) <> ''\", 'present_director')\n\
+        [FAILS] .isUnique(['Series_Title', 'Released_Year'])\n          reason: Unable\
+        \ to instantiate constraint 'isUnique(['Series_Title', 'Released_Year'])':\
+        \ An error occurred while calling o148.isUnique. Trace:\npy4j.Py4JException:\
+        \ Method isUnique([class java.util.ArrayList, class scala.None$, class scala.None$])\
+        \ does not exist\n\tat py4j.reflection.ReflectionEngine.getMethod(ReflectionEngine.java:321)\n\
+        \tat py4j.reflection.ReflectionEngine.getMethod(ReflectionEngine.java:329)\n\
+        \tat py4j.Gateway.invoke(Gateway.java:274)\n\tat py4j.commands.AbstractCommand.invokeMethod(AbstractCommand.java:132)\n\
+        \tat py4j.commands.CallCommand.execute(CallCommand.java:79)\n\tat py4j.ClientServerConnection.waitForCommands(ClientServerConnection.java:182)\n\
+        \tat py4j.ClientServerConnection.run(ClientServerConnection.java:106)\n\t\
+        at java.base/java.lang.Thread.run(Thread.java:829)\n\n\n\n13/14 constraint(s)\
+        \ hold on table 'observed_data' (599 rows).\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_10
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv''); print(''duplicate titles'',x.Series_Title.duplicated().sum());print(x[x.Series_Title.duplicated(keep=False)][[''Series_Title'',''Released_Year'']].to_string(index=False))
+
+        PY"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_10
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv''); print(''duplicate titles'',x.Series_Title.duplicated().sum());print(x[x.Series_Title.duplicated(keep=False)][[''Series_Title'',''Released_Year'']].to_string(index=False))
+
+        PY"'
+      aggregated_output: 'duplicate titles 0
+
+        Empty DataFrame
+
+        Columns: [Series_Title, Released_Year]
+
+        Index: []
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_11
+      type: reasoning
+      text: '**Evaluating title uniqueness**
+
+
+        I’m considering that I don’t need to make the title overly strict; I’m aiming
+        for something composite instead. I should look into the .hasUniqueness list
+        to explore options. It seems like focusing on being unique without being too
+        rigid can create a more appealing title. Let’s brainstorm ideas that balance
+        those factors! I want the title to feel both distinct and fitting at the same
+        time.'
+  - type: item.completed
+    item:
+      id: item_12
+      type: agent_message
+      text: Thirteen checks pass. PyDeequ rejected the composite-key method call,
+        so I’ll try its supported uniqueness assertion.
+  - type: item.updated
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile columns and program-sensitive edge cases
+        completed: true
+      - text: Write focused PyDeequ constraints JSON
+        completed: true
+      - text: Run checker and correct failing constraints
+        completed: false
+  - type: item.started
+    item:
+      id: item_13
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Update File: constraints.json
+
+        @@
+
+        -      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +      \"code_for_constraint\": \".hasUniqueness([''Series_Title'', ''Released_Year''],
+        lambda fraction: fraction == 1.0)\"
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_13
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Update File: constraints.json
+
+        @@
+
+        -      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +      \"code_for_constraint\": \".hasUniqueness([''Series_Title'', ''Released_Year''],
+        lambda fraction: fraction == 1.0)\"
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: 'SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+
+        SLF4J: Defaulting to no-operation (NOP) logger implementation
+
+        SLF4J: See http://www.slf4j.org/codes.html#StaticLoggerBinder for further
+        details.
+
+        SLF4J: Failed to load class "org.slf4j.impl.StaticMDCBinder".
+
+        SLF4J: Defaulting to no-operation MDCAdapter implementation.
+
+        SLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder for further
+        details.
+
+        Python Callback server started!
+
+        [HOLDS] .isComplete(''Series_Title'')
+
+        [HOLDS] .satisfies("TRIM(Series_Title) <> ''''", ''nonblank_title'')
+
+        [HOLDS] .isComplete(''Released_Year'')
+
+        [HOLDS] .satisfies("Released_Year BETWEEN 1900 AND year(current_date())",
+        ''valid_release_year'')
+
+        [HOLDS] .isComplete(''IMDB_Rating'')
+
+        [HOLDS] .satisfies("IMDB_Rating BETWEEN 0 AND 10", ''rating_out_of_ten'')
+
+        [HOLDS] .satisfies("TRIM(Runtime) RLIKE ''^[1-9][0-9]{1,2} min$''", ''parseable_runtime_minutes'')
+
+        [HOLDS] .satisfies("Gross IS NULL OR TRIM(Gross) = '''' OR TRIM(Gross) RLIKE
+        ''^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$''", ''parseable_optional_gross'')
+
+        [HOLDS] .hasCompleteness(''Gross'', lambda fraction: fraction > 0)
+
+        [HOLDS] .isComplete(''No_of_Votes'')
+
+        [HOLDS] .satisfies("No_of_Votes >= 0", ''nonnegative_votes'')
+
+        [HOLDS] .satisfies("Genre IS NOT NULL AND TRIM(Genre) <> ''''", ''present_genre'')
+
+        [HOLDS] .satisfies("Director IS NOT NULL AND TRIM(Director) <> ''''", ''present_director'')
+
+        [HOLDS] .hasUniqueness([''Series_Title'', ''Released_Year''], lambda fraction:
+        fraction == 1.0)
+
+
+        14/14 constraint(s) hold on table ''observed_data'' (599 rows).
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_14
+      type: reasoning
+      text: '**Handling data completeness**
+
+
+        I’m looking into how to handle potential null values, particularly around
+        `IMDB_Rating`, which might be NaN after reading the data. It makes sense to
+        ensure `Runtime` is complete, as it''s required for all entries. The `Gross`
+        field is optional and can be zero, which we can handle explicitly. I think
+        I need to add checks to ensure revenue and gross data produce meaningful scores.
+        Overall, I want to make sure everything is clear and compliant.
+
+        **Ensuring year format compliance**
+
+
+        I need to address the `Released_Year` issue, particularly the string format
+        like "2020.1" that gets accepted but shouldn’t. I think using `.satisfies`
+        with a regex for validating a four-digit year is essential to ensure it matches
+        the correct integer format. Also, I need to convert it properly, as using
+        `pd.to_numeric` could lead to silent truncation. Enforcement of an integer
+        type is definitely necessary to avoid any inconsistencies down the line.'
+  - type: item.completed
+    item:
+      id: item_15
+      type: reasoning
+      text: '**Considering notation consistency**
+
+
+        I''m thinking about how potential scientific notation like ''1e6'' is fine
+        for pd.to_numeric to accept, but regex doesn''t seem to work consistently
+        with the units the user wants. It’s important to keep consistency with comma
+        units for clarity. I wonder how I can resolve this so that everything aligns
+        properly and meets the user''s expectations. It might take a little tweaking,
+        but I’ll figure it out!'
+  - type: item.completed
+    item:
+      id: item_16
+      type: agent_message
+      text: Composite-key uniqueness now passes. I’ll add explicit runtime completeness
+        and a whole-year check before the final run.
+  - type: item.started
+    item:
+      id: item_17
+      type: command_execution
+      command: "/usr/bin/bash -lc \"apply_patch <<'PATCH'\n*** Begin Patch\n*** Update\
+        \ File: constraints.json\n@@\n     {\n       \\\"column_name\\\": \\\"Released_Year\\\
+        \",\n       \\\"code_for_constraint\\\": \\\".satisfies(\\\\\\\"Released_Year\
+        \ BETWEEN 1900 AND year(current_date())\\\\\\\", 'valid_release_year')\\\"\
+        \n     },\n+    {\n+      \\\"column_name\\\": \\\"Released_Year\\\",\n+ \
+        \     \\\"code_for_constraint\\\": \\\".satisfies(\\\\\\\"Released_Year =\
+        \ FLOOR(Released_Year)\\\\\\\", 'whole_release_year')\\\"\n+    },\n@@\n \
+        \    {\n       \\\"column_name\\\": \\\"Runtime\\\",\n+      \\\"code_for_constraint\\\
+        \": \\\".isComplete('Runtime')\\\"\n+    },\n+    {\n+      \\\"column_name\\\
+        \": \\\"Runtime\\\",\n       \\\"code_for_constraint\\\": \\\".satisfies(\\\
+        \\\\\"TRIM(Runtime) RLIKE '\"'^[1-9][0-9]{1,2} min$'\"'\\\\\\\", 'parseable_runtime_minutes')\\\
+        \"\n*** End Patch\nPATCH\npython deequ_check.py --table observed_data --constraints\
+        \ constraints.json\""
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_17
+      type: command_execution
+      command: "/usr/bin/bash -lc \"apply_patch <<'PATCH'\n*** Begin Patch\n*** Update\
+        \ File: constraints.json\n@@\n     {\n       \\\"column_name\\\": \\\"Released_Year\\\
+        \",\n       \\\"code_for_constraint\\\": \\\".satisfies(\\\\\\\"Released_Year\
+        \ BETWEEN 1900 AND year(current_date())\\\\\\\", 'valid_release_year')\\\"\
+        \n     },\n+    {\n+      \\\"column_name\\\": \\\"Released_Year\\\",\n+ \
+        \     \\\"code_for_constraint\\\": \\\".satisfies(\\\\\\\"Released_Year =\
+        \ FLOOR(Released_Year)\\\\\\\", 'whole_release_year')\\\"\n+    },\n@@\n \
+        \    {\n       \\\"column_name\\\": \\\"Runtime\\\",\n+      \\\"code_for_constraint\\\
+        \": \\\".isComplete('Runtime')\\\"\n+    },\n+    {\n+      \\\"column_name\\\
+        \": \\\"Runtime\\\",\n       \\\"code_for_constraint\\\": \\\".satisfies(\\\
+        \\\\\"TRIM(Runtime) RLIKE '\"'^[1-9][0-9]{1,2} min$'\"'\\\\\\\", 'parseable_runtime_minutes')\\\
+        \"\n*** End Patch\nPATCH\npython deequ_check.py --table observed_data --constraints\
+        \ constraints.json\""
+      aggregated_output: 'SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+
+        SLF4J: Defaulting to no-operation (NOP) logger implementation
+
+        SLF4J: See http://www.slf4j.org/codes.html#StaticLoggerBinder for further
+        details.
+
+        SLF4J: Failed to load class "org.slf4j.impl.StaticMDCBinder".
+
+        SLF4J: Defaulting to no-operation MDCAdapter implementation.
+
+        SLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder for further
+        details.
+
+        Python Callback server started!
+
+        [HOLDS] .isComplete(''Series_Title'')
+
+        [HOLDS] .satisfies("TRIM(Series_Title) <> ''''", ''nonblank_title'')
+
+        [HOLDS] .isComplete(''Released_Year'')
+
+        [HOLDS] .satisfies("Released_Year BETWEEN 1900 AND year(current_date())",
+        ''valid_release_year'')
+
+        [HOLDS] .satisfies("Released_Year = FLOOR(Released_Year)", ''whole_release_year'')
+
+        [HOLDS] .isComplete(''IMDB_Rating'')
+
+        [HOLDS] .satisfies("IMDB_Rating BETWEEN 0 AND 10", ''rating_out_of_ten'')
+
+        [HOLDS] .isComplete(''Runtime'')
+
+        [HOLDS] .satisfies("TRIM(Runtime) RLIKE ''^[1-9][0-9]{1,2} min$''", ''parseable_runtime_minutes'')
+
+        [HOLDS] .satisfies("Gross IS NULL OR TRIM(Gross) = '''' OR TRIM(Gross) RLIKE
+        ''^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$''", ''parseable_optional_gross'')
+
+        [HOLDS] .hasCompleteness(''Gross'', lambda fraction: fraction > 0)
+
+        [HOLDS] .isComplete(''No_of_Votes'')
+
+        [HOLDS] .satisfies("No_of_Votes >= 0", ''nonnegative_votes'')
+
+        [HOLDS] .satisfies("Genre IS NOT NULL AND TRIM(Genre) <> ''''", ''present_genre'')
+
+        [HOLDS] .satisfies("Director IS NOT NULL AND TRIM(Director) <> ''''", ''present_director'')
+
+        [HOLDS] .hasUniqueness([''Series_Title'', ''Released_Year''], lambda fraction:
+        fraction == 1.0)
+
+
+        16/16 constraint(s) hold on table ''observed_data'' (599 rows).
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.updated
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile columns and program-sensitive edge cases
+        completed: true
+      - text: Write focused PyDeequ constraints JSON
+        completed: true
+      - text: Run checker and correct failing constraints
+        completed: true
+  - type: item.completed
+    item:
+      id: item_18
+      type: agent_message
+      text: 'Created `constraints.json` with checks for parseable scoring fields,
+        valid ranges, optional Gross values, required output fields, and unique title-year
+        keys.
+
+
+        Validation: **16/16 constraints hold** on `observed_data`.'
+  - type: item.completed
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile columns and program-sensitive edge cases
+        completed: true
+      - text: Write focused PyDeequ constraints JSON
+        completed: true
+      - text: Run checker and correct failing constraints
+        completed: true
+  - type: turn.completed
+    usage: *id001
+  stderr_tail: 'Reading additional input from stdin...
+
+    '
+constraints:
+  constraints:
+    Director:
+      code:
+      - - .satisfies("Director IS NOT NULL AND TRIM(Director) <> ''", 'present_director')
+        - Valid
+      assumptions: []
+      column_name: Director
+    Genre:
+      code:
+      - - .satisfies("Genre IS NOT NULL AND TRIM(Genre) <> ''", 'present_genre')
+        - Valid
+      assumptions: []
+      column_name: Genre
+    Gross:
+      code:
+      - - '.hasCompleteness(''Gross'', lambda fraction: fraction > 0)'
+        - Valid
+      - - .satisfies("Gross IS NULL OR TRIM(Gross) = '' OR TRIM(Gross) RLIKE '^(0|[1-9][0-9]*|[1-9][0-9]{0,2}(,[0-9]{3})+)$'",
+          'parseable_optional_gross')
+        - Valid
+      assumptions: []
+      column_name: Gross
+    IMDB_Rating:
+      code:
+      - - .isComplete('IMDB_Rating')
+        - Valid
+      - - .satisfies("IMDB_Rating BETWEEN 0 AND 10", 'rating_out_of_ten')
+        - Valid
+      assumptions: []
+      column_name: IMDB_Rating
+    No_of_Votes:
+      code:
+      - - .isComplete('No_of_Votes')
+        - Valid
+      - - .satisfies("No_of_Votes >= 0", 'nonnegative_votes')
+        - Valid
+      assumptions: []
+      column_name: No_of_Votes
+    Released_Year:
+      code:
+      - - .isComplete('Released_Year')
+        - Valid
+      - - .satisfies("Released_Year = FLOOR(Released_Year)", 'whole_release_year')
+        - Valid
+      - - .satisfies("Released_Year BETWEEN 1900 AND year(current_date())", 'valid_release_year')
+        - Valid
+      assumptions: []
+      column_name: Released_Year
+    Runtime:
+      code:
+      - - .isComplete('Runtime')
+        - Valid
+      - - .satisfies("TRIM(Runtime) RLIKE '^[1-9][0-9]{1,2} min$'", 'parseable_runtime_minutes')
+        - Valid
+      assumptions: []
+      column_name: Runtime
+    Series_Title:
+      code:
+      - - '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda fraction:
+          fraction == 1.0)'
+        - Valid
+      - - .isComplete('Series_Title')
+        - Valid
+      - - .satisfies("TRIM(Series_Title) <> ''", 'nonblank_title')
+        - Valid
+      assumptions: []
+      column_name: Series_Title

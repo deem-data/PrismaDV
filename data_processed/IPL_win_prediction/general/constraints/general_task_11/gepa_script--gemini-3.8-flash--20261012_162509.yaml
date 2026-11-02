@@ -1,0 +1,390 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261012_155256
+  final_program_round: final
+  final_program_val_score: 68.66
+  instructions:
+    generator: "markdown\nYou are an expert data quality engineer. Your task is to\
+      \ analyze an input dataset's profiling metadata (`columns_desc`), a data transformation\
+      \ script (`code_script`), and an optional downstream task description (`downstream_task_description`)\
+      \ to generate a comprehensive, highly calibrated set of data quality assumptions\
+      \ and PyDeequ validation checks.\n\nYour ultimate goal is to achieve an optimal\
+      \ Macro F1 score:\n1. **Catch Unsafe Batches (`\"level\": \"error\"`)**: Detect\
+      \ any data condition that causes runtime crashes, produces corrupted calculations\
+      \ (e.g., division by zero), or violates fundamental relational integrity required\
+      \ by the script.\n2. **Prevent False Alarms**: Safe batches must NEVER fail\
+      \ an `\"error\"` check or a brittle `\"warning\"` check. Baseline distributions\
+      \ in `columns_desc` dictate normal operational bounds.\n\n---\n\n### Critical\
+      \ Analysis Framework\n\n#### 1. Baseline Profiling Analysis (`columns_desc`)\n\
+      - **Baseline Completeness = 1.0**: Core structural columns (such as IDs, seasons/dates,\
+      \ primary entity names) that have 100% completeness in the baseline are non-negotiable.\
+      \ If they are used as identifiers, grouping keys, joining keys, or dictionary\
+      \ keys, add `.isComplete(...)` at `\"level\": \"error\"`.\n- **Baseline Completeness\
+      \ < 1.0**: If a column has nulls in the baseline (e.g., `0.989` or `0.025`),\
+      \ it is naturally nullable under certain domain conditions.\n  - NEVER set an\
+      \ unconditional `.isComplete(...)` at `\"level\": \"error\"` on naturally nullable\
+      \ columns.\n  - Formulate a conditional `.satisfies(...)` check if the nullability\
+      \ is restricted to specific branches (e.g., `result_margin` is only required\
+      \ when `result` is decisive).\n\n#### 2. Code Trace & Severity Level Decision\
+      \ Matrix\n\n| Code Operation Pattern | Data Defect | Downstream Impact | Severity\
+      \ Level |\n|---|---|---|---|\n| `int(row['x'])`, `float(row['x'])` | Null /\
+      \ Non-numeric | Unhandled `ValueError` / `TypeError` | `\"error\"` |\n| `int(float(row['x']))`\
+      \ | Null / Non-numeric / NaN | Unhandled `ValueError` / `TypeError` | `\"error\"\
+      ` |\n| `dict[row['key']]` or `dict[(season, team)]` | Missing / Unseen Key |\
+      \ Unhandled `KeyError` | `\"error\"` |\n| `row['x'].strip()`, `.split()` | Null\
+      \ / Non-string | Unhandled `AttributeError` | `\"error\"` |\n| `x / y` (even\
+      \ inside `np.where(...)`) | `y == 0` or `y IS NULL` | Division by zero / `inf`\
+      \ / corrupted metrics | `\"error\"` |\n| `winner` evaluated against `team1`/`team2`\
+      \ | `winner NOT IN (team1, team2)` | Relational corruption / `KeyError` / wrong\
+      \ standings | `\"error\"` |\n| Primary ID / Core Groupby Keys (`id`, `season`,\
+      \ `team1`, `team2`) | Missing / Null | Broken aggregations / Dropped groups\
+      \ / Index failure | `\"error\"` |\n| Explicit script constants / Enums (e.g.,\
+      \ `VALID_RESULTS = {...}`) | Unseen category | Unhandled outcome branch / Silent\
+      \ data omission | `\"error\"` |\n| Categorical fallbacks (`else: base = r`,\
+      \ `.isin()`) | Unseen category | Harmless fallthrough | `\"warning\"` |\n| Safe\
+      \ parsers (`errors='coerce'`) | Unparseable value | Coerced to `NaN`/`NaT` safely\
+      \ | `\"warning\"` |\n| Descriptive metadata (`city`, `venue`, `umpire1`, `player_of_match`)\
+      \ | Null / Missing | Non-critical informational fields | `\"warning\"` |\n\n\
+      ---\n\n### Detailed Check Formulation Guidelines\n\n#### 1. Divisors & Mathematical\
+      \ Calculations (Never Ignore Division by Zero)\n- In Python and NumPy, dividing\
+      \ by zero produces unhandled errors or invalid `inf`/`NaN` propagating downstream.\n\
+      - If the script computes `result_margin / target_overs` when `result == 'runs'`,\
+      \ `target_overs` MUST be non-null and strictly positive:\n  ```python\n  .satisfies(\"\
+      (`result` IS NULL OR `result` != 'runs') OR (`target_overs` IS NOT NULL AND\
+      \ `target_overs` > 0)\", \"target_overs_positive_when_runs\")\n  ```\n  Set\
+      \ `\"level\": \"error\"`.\n\n#### 2. Cross-Column & Relational Invariants\n\
+      - **Entity Consistency**: When a record references competing entities (`team1`,\
+      \ `team2`) and a victor (`winner` or `toss_winner`):\n  - If a match concludes\
+      \ decisively (e.g., `result IN ('runs', 'wickets')`), `winner` MUST NOT be NULL\
+      \ and MUST be either `team1` or `team2`:\n    ```python\n    .satisfies(\"(`result`\
+      \ IS NULL OR `result` NOT IN ('runs', 'wickets')) OR (`winner` IS NOT NULL AND\
+      \ (`winner` = `team1` OR `winner` = `team2`))\", \"winner_in_participating_teams_for_decisive\"\
+      )\n    ```\n    Set `\"level\": \"error\"`.\n  - `toss_winner` should always\
+      \ be one of the participating teams:\n    ```python\n    .satisfies(\"`toss_winner`\
+      \ IS NOT NULL AND (`toss_winner` = `team1` OR `toss_winner` = `team2`)\", \"\
+      toss_winner_in_teams\")\n    ```\n    Set `\"level\": \"error\"`.\n- **Conditional\
+      \ Numeric Fields**: If `result_margin` is evaluated or cast when `result IN\
+      \ ('runs', 'wickets')`:\n  ```python\n  .satisfies(\"(`result` IS NULL OR `result`\
+      \ NOT IN ('runs', 'wickets')) OR (`result_margin` IS NOT NULL AND `result_margin`\
+      \ >= 0)\", \"result_margin_valid_for_decisive\")\n  ```\n  Set `\"level\": \"\
+      error\"`.\n\n#### 3. Core Structural Keys vs. Auxiliary Metadata\n- **Primary\
+      \ / Groupby Keys**: Columns like `id`, `season`, `team1`, `team2` that have\
+      \ `completeness: 1.0` in the baseline profile and serve as groupings (`df.groupby(['season',\
+      \ 'team'])`) or match identifiers MUST have `.isComplete(...)` at `\"level\"\
+      : \"error\"`. A corrupt batch missing these values causes corrupted output tables\
+      \ or dropped groups.\n- **Categorical Integrity for Control Flow**: If `result`\
+      \ dictates control flow branches (e.g., `runs`, `wickets`, `tie`, `no result`),\
+      \ validate its completeness at `\"level\": \"error\"` and its allowed values\
+      \ with `.isContainedIn(...)`.\n- **Auxiliary Columns**: Columns like `city`,\
+      \ `venue`, `umpire1`, `umpire2`, `player_of_match` that are merely preserved\
+      \ in output CSVs or string summaries should be checked at `\"level\": \"warning\"\
+      ` or with relaxed constraints.\n\n#### 4. Spark SQL Three-Valued Logic & Backtick\
+      \ Escaping\nIn all `.satisfies(condition, name)` expressions:\n1. **Always escape\
+      \ column names with backticks**: e.g., `` `result` ``, `` `date` ``, `` `method`\
+      \ ``, `` `season` ``.\n2. **Guard against SQL three-valued logic**: In Spark\
+      \ SQL, `NULL NOT IN ('runs', 'wickets')` evaluates to `NULL` (falsy). To ensure\
+      \ the check does not fail when the gating column itself is null, write:\n  \
+      \ ``(`col` IS NULL OR `col` NOT IN ('val1', 'val2')) OR ...``\n3. **String Case\
+      \ & Trimming**: If the Python script performs `.str.strip().str.lower()`, normalize\
+      \ in SQL using `lower(trim(`col`))` when comparing string values.\n\n---\n\n\
+      ### Output JSON Format\n\nReturn ONLY a valid JSON array of objects conforming\
+      \ to the schema below:\n\n```json\n[\n  {\n    \"column_group\": \"col_name\"\
+      \ | [\"col_1\", \"col_2\"],\n    \"assumptions\": [\n      {\n        \"text\"\
+      : \"Precise description of the assumption rooted in script operations and data\
+      \ contracts.\",\n        \"sources\": [\n          {\n            \"start_line\"\
+      : 25,\n            \"end_line\": 30\n          }\n        ]\n      }\n    ],\n\
+      \    \"code\": [\n      {\n        \"suggestion\": \".satisfies(\\\"(`result`\
+      \ IS NULL OR `result` != 'runs') OR (`target_overs` IS NOT NULL AND `target_overs`\
+      \ > 0)\\\", \\\"target_overs_positive_when_runs\\\")\",\n        \"level\":\
+      \ \"error\",\n        \"linked_assumptions\": [0]\n      }\n    ]\n  }\n]\n\
+      ```\n\n### Self-Audit Verification Checklist\n1. **Did I flag all crash-prone\
+      \ operations as `\"error\"`?** Check every `int(...)`, `float(...)`, dictionary\
+      \ key access, division operation, and unhandled conditional conversion.\n2.\
+      \ **Did I check divisor non-zero status?** Any column in the denominator of\
+      \ a division (even within `np.where`) must be checked for `IS NOT NULL AND >\
+      \ 0` at `\"level\": \"error\"`.\n3. **Did I protect primary grouping keys?**\
+      \ Core entities with baseline completeness 1.0 (`id`, `season`, `team1`, `team2`)\
+      \ must have `.isComplete(...)` at `\"level\": \"error\"`.\n4. **Did I handle\
+      \ SQL three-valued logic?** Ensure all conditional `.satisfies()` checks explicitly\
+      \ account for `IS NULL` on the gating column.\n5. **Did I prevent false alarms?**\
+      \ Columns with baseline completeness < 1.0 must not have unconditional `.isComplete(...,\
+      \ level=\"error\")`."
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 1
+split_seed: 1
+constraints:
+  '["result","result_margin"]':
+    code:
+    - suggestion: .satisfies("(`result` IS NULL OR lower(trim(`result`)) NOT IN ('runs',
+        'wickets')) OR (`result_margin` IS NOT NULL AND `result_margin` >= 0)", "result_margin_required_for_decisive_results")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f7ed0d80-4f61-45c0-8b7d-44e3fb387404
+      source_assumptions:
+      - 930db06c-3b50-4672-90aa-7f107edf5ded
+    assumptions:
+    - text: When 'result' is 'runs' or 'wickets', 'result_margin' is converted via
+        int(row['margin_int']) in settlement_text. A null or unparseable margin causes
+        int(NA) / TypeError / ValueError. Therefore, result_margin must be present
+        and non-negative when result is 'runs' or 'wickets'.
+      sources:
+      - start_line: 41
+        end_line: 41
+        file: ''
+      - start_line: 57
+        end_line: 60
+        file: ''
+      uid: 930db06c-3b50-4672-90aa-7f107edf5ded
+  '["result","team1","team2","winner"]':
+    code:
+    - suggestion: .satisfies("(`result` IS NULL OR lower(trim(`result`)) NOT IN ('runs',
+        'wickets', 'tie')) OR (`winner` IS NOT NULL AND (`winner` = `team1` OR `winner`
+        = `team2`))", "winner_is_valid_team_for_decisive_results")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a55a6711-aab0-4179-866a-08e68c4a219d
+      source_assumptions:
+      - ef479b4e-0b8b-47a1-a907-5806d7660a43
+    assumptions:
+    - text: When 'result' is decisive ('runs' or 'wickets') or 'tie', a winner is
+        expected and must be one of the participating teams ('team1' or 'team2') so
+        that loser logic and settlement text format correctly.
+      sources:
+      - start_line: 44
+        end_line: 49
+        file: ''
+      - start_line: 55
+        end_line: 60
+        file: ''
+      uid: ef479b4e-0b8b-47a1-a907-5806d7660a43
+  '["team1","team2","toss_winner"]':
+    code:
+    - suggestion: .isComplete("`toss_winner`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8f1e375c-117a-4a57-afcf-a8e0ca53c93a
+      source_assumptions:
+      - 52e52fac-b5ff-4cd7-b9f4-b2ffe9c05cd9
+    - suggestion: .satisfies("`toss_winner` = `team1` OR `toss_winner` = `team2`",
+        "toss_winner_in_teams")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 35d7cc74-4e6a-4d2f-b050-3a2d03987149
+      source_assumptions:
+      - 52e52fac-b5ff-4cd7-b9f4-b2ffe9c05cd9
+    assumptions:
+    - text: '''toss_winner'' is compared against ''winner'' to compute ''toss_winner_won''.
+        It should be complete and match either team1 or team2.'
+      sources:
+      - start_line: 73
+        end_line: 73
+        file: ''
+      uid: 52e52fac-b5ff-4cd7-b9f4-b2ffe9c05cd9
+  '["team1","team2"]':
+    code:
+    - suggestion: .isComplete("`team1`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9779ef11-183d-4399-9626-d44a460b9fc4
+      source_assumptions:
+      - b5051575-71f4-4396-a632-f3c458e52536
+    - suggestion: .isComplete("`team2`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a2cded4f-7e53-4141-a5a5-663e75603a33
+      source_assumptions:
+      - b5051575-71f4-4396-a632-f3c458e52536
+    assumptions:
+    - text: '''team1'' and ''team2'' are primary participating team entities used
+        to determine the loser of a match. They must be complete.'
+      sources:
+      - start_line: 44
+        end_line: 49
+        file: ''
+      - start_line: 67
+        end_line: 67
+        file: ''
+      uid: b5051575-71f4-4396-a632-f3c458e52536
+  id:
+    code:
+    - suggestion: .isComplete("`id`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0ee55bfd-b6ab-4f13-a79e-76e7a9afaf26
+      source_assumptions:
+      - ca3c71cf-e682-44b7-a212-2c793aecfa4a
+    assumptions:
+    - text: '''id'' is the primary key identifying matches and used in match counting
+        aggregations. It must be complete.'
+      sources:
+      - start_line: 67
+        end_line: 67
+        file: ''
+      - start_line: 78
+        end_line: 78
+        file: ''
+      - start_line: 88
+        end_line: 88
+        file: ''
+      uid: ca3c71cf-e682-44b7-a212-2c793aecfa4a
+  result:
+    code:
+    - suggestion: .isComplete("`result`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 66a2b025-a0b5-471b-85cf-64f9af7b0214
+      source_assumptions:
+      - a8d55b67-163e-4cfe-a289-37aae9e2e207
+    - suggestion: .satisfies("lower(trim(`result`)) IN ('runs', 'wickets', 'tie',
+        'no result')", "valid_result_values")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 7e754c0f-354d-4894-810b-462de2bb632d
+      source_assumptions:
+      - a8d55b67-163e-4cfe-a289-37aae9e2e207
+    assumptions:
+    - text: '''result'' dictates control flow in settlement strings, masking, and
+        filtering. It must be complete and take one of the known values: ''runs'',
+        ''wickets'', ''tie'', ''no result''.'
+      sources:
+      - start_line: 36
+        end_line: 41
+        file: ''
+      - start_line: 53
+        end_line: 61
+        file: ''
+      - start_line: 72
+        end_line: 72
+        file: ''
+      uid: a8d55b67-163e-4cfe-a289-37aae9e2e207
+  season:
+    code:
+    - suggestion: .isComplete("`season`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 5d69f0ea-fcde-46ca-8d47-e2de17edaa36
+      source_assumptions:
+      - d7523db6-830e-4fcf-8ac6-ad380a3e874f
+    assumptions:
+    - text: '''season'' is parsed to numeric and used as the primary grouping key
+        for aggregations (''season_int''). It must be complete and non-null.'
+      sources:
+      - start_line: 34
+        end_line: 34
+        file: ''
+      - start_line: 77
+        end_line: 77
+        file: ''
+      - start_line: 86
+        end_line: 86
+        file: ''
+      uid: d7523db6-830e-4fcf-8ac6-ad380a3e874f
+  super_over:
+    code:
+    - suggestion: .satisfies("`super_over` IS NULL OR upper(trim(`super_over`)) IN
+        ('Y', 'N')", "valid_super_over_values")
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: b81f0e2a-6baf-48f0-a5ea-9b59b4b205f7
+      source_assumptions:
+      - 7e28f7d0-578b-4f15-9fe4-272d62aa4373
+    assumptions:
+    - text: '''super_over'' is normalized to uppercase and included in the settled
+        markets output. It typically takes values ''Y'' or ''N''.'
+      sources:
+      - start_line: 23
+        end_line: 23
+        file: ''
+      - start_line: 67
+        end_line: 67
+        file: ''
+      uid: 7e28f7d0-578b-4f15-9fe4-272d62aa4373
+  target_overs:
+    code:
+    - suggestion: .satisfies("`target_overs` IS NULL OR `target_overs` > 0", "target_overs_positive_when_present")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f7fac3df-dfab-47c1-bf9f-afbebdec309c
+      source_assumptions:
+      - f7e79d76-94d4-4ed0-ab7d-0492f97f3cc9
+    assumptions:
+    - text: '''req_run_rate'' divides target_runs by target_overs. When target_overs
+        is present, it must be strictly greater than 0 to prevent division by zero
+        / infinity.'
+      sources:
+      - start_line: 70
+        end_line: 70
+        file: ''
+      uid: f7e79d76-94d4-4ed0-ab7d-0492f97f3cc9
+  toss_decision:
+    code:
+    - suggestion: .isComplete("`toss_decision`")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 315cbbeb-3be6-4529-ac35-9bd56d4e8609
+      source_assumptions:
+      - 07f3f249-dfb4-4f06-96a1-25554a285bc5
+    - suggestion: .satisfies("lower(trim(`toss_decision`)) IN ('field', 'bat')", "valid_toss_decision")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 13210afb-e404-4ee5-b364-8ce1bc5deb14
+      source_assumptions:
+      - 07f3f249-dfb4-4f06-96a1-25554a285bc5
+    assumptions:
+    - text: '''toss_decision'' is normalized to lowercase and used in pivoting columns
+        (''field'', ''bat''). Values should be complete and within {''field'', ''bat''}.'
+      sources:
+      - start_line: 21
+        end_line: 21
+        file: ''
+      - start_line: 86
+        end_line: 92
+        file: ''
+      uid: 07f3f249-dfb4-4f06-96a1-25554a285bc5
+llm_usage:
+  task_lm:
+    cost: 0.013194
+    cost_spent: 0.013194
+    total_tokens: 8728
+    prompt_tokens: 6512
+    completion_tokens: 2216
+    cached_prompt_tokens: 0
+    reasoning_tokens: 0
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 11.525
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.013194
+    cost_spent: 0.013194
+    total_tokens: 8728
+    prompt_tokens: 6512
+    completion_tokens: 2216
+    cached_prompt_tokens: 0
+    reasoning_tokens: 0
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 11.525
+    api_seconds_saved: 0.0
+wall_clock_seconds: 17.318

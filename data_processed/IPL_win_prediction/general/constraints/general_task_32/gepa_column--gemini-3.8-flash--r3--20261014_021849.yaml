@@ -1,0 +1,522 @@
+sifta_generation:
+  program: gepa_column
+  run_dir: optimization_runs/gepa_column_run_20261014_005540
+  run_settings:
+    metric_type: f1_score
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 48.35
+  instructions:
+    dataflow_inspector: "markdown\nYou are an expert static code analysis assistant.\
+      \ Your task is to analyze a given Python script (`code_script`) and identify\
+      \ every line of code that touches a specified column (`target_column`).\n\n\
+      ### Definition of \"Touching\" the Target Column\nA line touches `target_column`\
+      \ if it:\n1. **Reads or accesses** the column (e.g., `df['col']`, `df.col`,\
+      \ `df[['col', ...]]`, `df.get('col')`).\n2. **Writes or creates** the column\
+      \ (e.g., `df['col'] = ...`, `df.rename(columns={...})`).\n3. **Filters or queries**\
+      \ based on the column (e.g., `df[df['col'] == val]`, `df.loc[df['col'].isin(...)]`,\
+      \ `df.query(...)`).\n4. **Transforms or uses** the column in expressions or\
+      \ functions (e.g., `np.where(df['col'] == ..., ...)`, `pd.to_datetime(df['col'])`,\
+      \ lambda functions, arithmetic).\n5. **Groups, aggregates, sorts, or merges**\
+      \ using the column (e.g., `df.groupby('col')`, `df.merge(..., on='col')`, `df.sort_values('col')`,\
+      \ agg specs referencing `'col'`).\n6. **Passes it along or defines schema lists**:\
+      \ Any list, tuple, set, dictionary, or data structure explicitly containing\
+      \ the string name of the target column for selection, projection, or copying\
+      \ (e.g., `base_cols = ['id', 'col', ...]`).\n\n*Note:* Do not include lines\
+      \ that merely reference derived variables or other columns unless they explicitly\
+      \ reference `target_column` itself.\n\n---\n\n### Strict Line Numbering Rules\n\
+      1. **1-based index**: The very first line of the provided `code_script` is line\
+      \ 1.\n2. **Exact counting**: Count every single line verbatim—including blank\
+      \ lines, comments, imports, docstrings, and decorators. Do not estimate, guess,\
+      \ or calculate offsets from memory.\n3. **Multi-line statements**: If a list,\
+      \ function call, or expression spanning multiple lines contains `target_column`,\
+      \ include the specific line(s) where `target_column` is referenced or manipulated.\n\
+      4. **Completeness**: Search the entire script thoroughly from top to bottom.\
+      \ Do not overlook repeated references (e.g., repeated usages across multiple\
+      \ splits, branches, or dataframes like `t1['col']` and `t2['col']`).\n5. **Contiguous\
+      \ merging**: Merge consecutive or adjacent line numbers into a single range\
+      \ (`{\"start_line\": N, \"end_line\": M}`). If a reference is on a single isolated\
+      \ line, set `start_line` and `end_line` to that same line number.\n6. **Order**:\
+      \ Ensure ranges are non-overlapping and sorted in ascending order by `start_line`.\n\
+      \n---\n\n### Output Format\nOutput **ONLY** a valid JSON object matching the\
+      \ following schema with no extra commentary, markdown text, or explanations:\n\
+      \n```json\n{\n  \"sources\": [\n    { \"start_line\": int, \"end_line\": int\
+      \ }\n  ]\n}\n```"
+    assumption_generation: 'Code makes assumptions about its input data, often without
+      stating them. For example, fillna on a column means the column may contain nulls,
+      and an assert sets a bound the data must meet. From the code that uses the target
+      column and the task description, write these assumptions as statements about
+      the input data that a Deequ check can test.
+
+
+      Output only valid JSON (numbers without leading zeros): { "assumptions": [{
+      "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }'
+    ir_generation: "markdown\n# Instructions for PyDeequ Constraint Generation Assistant\n\
+      \nYou are an expert Data Quality and Data Engineering Assistant. Your task is\
+      \ to translate data assumptions derived from Python/Pandas data pipelines into\
+      \ robust PyDeequ validation checks.\n\n---\n\n## 1. Input Specifications\n\n\
+      You will receive:\n1. `target_column`: The column under analysis.\n2. `target_column_desc`:\
+      \ Profiling metadata for `target_column` (completeness fraction, data type distribution,\
+      \ distinct value counts, value histogram).\n3. `code_snippet`: Python/Pandas\
+      \ code consuming the dataset.\n4. `downstream_task_description`: Context on\
+      \ downstream usage (if provided).\n5. `assumptions`: A numbered list of assumptions\
+      \ (indexed from 0) about `target_column`.\n\n---\n\n## 2. Output Specification\n\
+      \nReturn a single JSON object with the following schema:\n```json\n{\n  \"constraint_code\"\
+      : [\n    {\n      \"suggestion\": \"<PyDeequ constraint method starting with\
+      \ '.'>\",\n      \"level\": \"error\" | \"warning\",\n      \"linked assumptions\"\
+      : [<int index>, ...]\n    }\n  ]\n}\n```\n\n---\n\n## 3. Evaluation Mechanics\
+      \ & Critical Rules\n\nYour constraints will be evaluated against test suites\
+      \ containing both **safe batches** (valid data, possibly containing minor natural\
+      \ noise) and **unsafe batches** (data corrupted in ways that violate the assumptions).\n\
+      \n### A. The \"Level\" Rule (`error` vs `warning`)\n- **Unsafe batches are flagged\
+      \ ONLY by checks configured with `level: \"error\"`.**\n- If you mark critical\
+      \ checks as `\"warning\"`, **0 unsafe batches will be caught**, causing recall\
+      \ to drop to 0 and ruining Macro F1 (~0.34–0.43).\n- **Assign `\"error\"`**\
+      \ if data violating the assumption would crash the pipeline (e.g., `KeyError`\
+      \ from missing column selection `df[['col']]`, `ValueError`/`TypeError` from\
+      \ unhandled conversions like `int(row['val'])` on nulls, `.astype(int)` on NaNs,\
+      \ string methods on nulls, group-by/merge failures), or if the assumption represents\
+      \ a fundamental integrity contract for the target column.\n- **Assign `\"warning\"\
+      `** ONLY if the code handles missing/invalid values gracefully without crashing\
+      \ (e.g., `pd.to_datetime(..., errors='coerce')`, explicit `.fillna()`, non-breaking\
+      \ `np.where` fallbacks) AND the violation does not invalidate core downstream\
+      \ operations.\n\n### B. Never Use Trivial or Vacuous Assertions\n- Completeness,\
+      \ containment, and pattern fractions always lie in $[0.0, 1.0]$.\n- **NEVER**\
+      \ write vacuous lambdas like `lambda x: x >= 0` or `lambda x: True`. They evaluate\
+      \ to `True` for every batch (even completely null or missing columns), catching\
+      \ **0 errors** and rendering the check useless.\n- To enforce completeness,\
+      \ use `.isComplete('col')` or `.hasCompleteness('col', lambda x: x >= 0.99)`\
+      \ (depending on profiling completeness).\n\n### C. Preventing False Alarms on\
+      \ Safe Batches\n- Safe batches in production/testing may contain minor anomalies\
+      \ (e.g., 99.18% valid values instead of 100%).\n- If an exact categorical check\
+      \ like `.isContainedIn('col', ['a', 'b'])` is enforced with strict 100% requirement\
+      \ (default without lambda), a safe batch with 99.2% valid entries will fail\
+      \ and trigger a **false alarm**.\n- When appropriate for categorical or pattern\
+      \ validations where minor noise is tolerable, provide a high threshold assertion\
+      \ (e.g., `lambda x: x >= 0.98` or `lambda x: x >= 0.95`).\n- If an assumption\
+      \ strictly requires 100% validity (e.g. non-null primary keys or mandatory identifiers),\
+      \ use `.isComplete()` or exact assertions.\n\n---\n\n## 4. PyDeequ Function\
+      \ Selection & Best Practices\n\n1. **Column Existence & Non-Nullness**:\n  \
+      \ - If an assumption requires column presence or non-null values, use `.isComplete(column)`\
+      \ or `.hasCompleteness(column, lambda x: x >= threshold)`.\n2. **Value Inclusion\
+      \ / Categorical Constraints**:\n   - Use `.isContainedIn(column, allowed_values[,\
+      \ assertion])`.\n   - Ensure allowed value lists accurately reflect valid entries\
+      \ identified in the code/profiling.\n3. **Conditional Logic / Cross-Column Relations**:\n\
+      \   - Use `.satisfies(columnCondition, constraintName[, assertion])`.\n   -\
+      \ Write conditions using Spark SQL syntax. Escape column names using backticks:\
+      \ `` `col_name` ``.\n   - Always account for NULL semantics in SQL:\n     -\
+      \ Example: `` .satisfies(\"`result` NOT IN ('runs', 'wickets') OR `winner` IS\
+      \ NOT NULL\", \"winner_required_when_decided\") ``\n     - Example: `` .satisfies(\"\
+      `winner` IS NULL OR `winner` = `team1` OR `winner` = `team2`\", \"winner_is_valid_team\"\
+      ) ``\n4. **Data Types & Numeric Ranges**:\n   - Use `.hasDataType(column, ConstrainableDataTypes.<Type>)`\
+      \ for type enforcement.\n   - Use `.isNonNegative(column)` or `.isPositive(column)`\
+      \ for non-negative / positive numeric constraints.\n   - Use `.isLessThan`,\
+      \ `.isLessThanOrEqualTo`, etc., for pairwise column comparisons.\n\n---\n\n\
+      ## 5. Step-by-Step Translation Workflow\n\n1. **Inspect Code & Column Metadata**:\n\
+      \   - Identify how `target_column` is manipulated in `code_snippet` (indexing,\
+      \ casting, filtering, arithmetic).\n   - Check `target_column_desc` for expected\
+      \ completeness, data types, and value distribution.\n2. **Review Assumptions**:\n\
+      \   - For each assumption, determine the specific PyDeequ function that directly\
+      \ tests the condition.\n3. **Assess Failure Impact (`level`)**:\n   - Would\
+      \ violating this assumption cause a Python/Pandas crash or fatal pipeline breakdown?\
+      \ If yes $\\rightarrow$ `\"error\"`.\n   - Is it an informational or soft data\
+      \ quality issue that the code gracefully tolerates? If yes $\\rightarrow$ `\"\
+      warning\"`.\n4. **Link Assumptions**:\n   - Accurately map the 0-based indices\
+      \ of all assumptions tested by the constraint into `\"linked assumptions\"`.\n\
+      5. **Format Output**:\n   - Validate that each suggestion begins with `.` and\
+      \ conforms strictly to the JSON schema."
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+columns_considered:
+- date
+- id
+- match_type
+- result
+- result_margin
+- season
+- super_over
+- team1
+- team2
+- winner
+columns_failed: []
+constraints:
+  date:
+    code:
+    - suggestion: '.hasCompleteness(''date'', lambda x: x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4c27c361-721c-44dc-bf71-4756774c1e83
+      source_assumptions:
+      - fef58364-1bbc-4cf1-87d1-46882f1fcc5a
+    - suggestion: '.hasPattern(''date'', r''^\d{4}[-/]\d{2}[-/]\d{2}$'', lambda x:
+        x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: bd5224d6-8a4d-410f-9e74-f57cd2a92711
+      source_assumptions:
+      - fef58364-1bbc-4cf1-87d1-46882f1fcc5a
+    assumptions:
+    - text: The `date` column contains values that can be parsed as valid dates or
+        timestamps.
+      sources:
+      - start_line: 23
+        end_line: 23
+        file: ''
+      uid: fef58364-1bbc-4cf1-87d1-46882f1fcc5a
+  id:
+    code:
+    - suggestion: .isComplete('id')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e351e765-4b9f-4f82-a16b-81084c5dda14
+      source_assumptions:
+      - de5fc71e-a5d2-48eb-9584-82625de2bfc8
+    - suggestion: .isUnique('id')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 20f81471-07c6-4abb-9150-14695e7defd6
+      source_assumptions:
+      - a243b30d-41ad-4647-8067-e30c65118187
+    assumptions:
+    - text: '`id` must not contain null values (completeness of 1.0) so that aggregating
+        with `count` accurately counts all matches played per team.'
+      sources:
+      - start_line: 87
+        end_line: 87
+        file: ''
+      - start_line: 147
+        end_line: 147
+        file: ''
+      uid: de5fc71e-a5d2-48eb-9584-82625de2bfc8
+    - text: '`id` values should be unique across rows in the dataset, representing
+        distinct matches.'
+      sources:
+      - start_line: 87
+        end_line: 87
+        file: ''
+      - start_line: 167
+        end_line: 168
+        file: ''
+      - start_line: 179
+        end_line: 179
+        file: ''
+      uid: a243b30d-41ad-4647-8067-e30c65118187
+  match_type:
+    code:
+    - suggestion: .isComplete('match_type')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8046846c-70a1-46e9-956c-d50c267e5438
+      source_assumptions:
+      - 93667265-ef70-4f1d-b8ab-06fbfaca2945
+    assumptions:
+    - text: The column 'match_type' must exist in the input dataset.
+      sources:
+      - start_line: 166
+        end_line: 168
+        file: ''
+      uid: 93667265-ef70-4f1d-b8ab-06fbfaca2945
+  result:
+    code:
+    - suggestion: '.satisfies("LOWER(TRIM(`result`)) IN (''runs'', ''wickets'', ''tie'',
+        ''no result'')", "result_in_allowed_values", lambda x: x >= 0.98)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 91b41a81-640a-427d-b7eb-01173d7b3db1
+      source_assumptions:
+      - d344aa6a-7864-46e0-9983-695a87faeed2
+    assumptions:
+    - text: The 'result' column contains categorical values that, after trimming whitespace
+        and converting to lowercase, are restricted to 'runs', 'wickets', 'tie', and
+        'no result'.
+      sources:
+      - start_line: 20
+        end_line: 20
+        file: ''
+      - start_line: 26
+        end_line: 29
+        file: ''
+      uid: d344aa6a-7864-46e0-9983-695a87faeed2
+  result_margin:
+    code:
+    - suggestion: '.hasCompleteness(''result_margin'', lambda x: x >= 0.95)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 40a1cb9d-3a95-4791-9751-fe6f15855d5e
+      source_assumptions:
+      - 5573dab5-89af-4430-aad4-27e77d8dc82b
+    - suggestion: .satisfies("`result` IS NULL OR LOWER(TRIM(`result`)) != 'runs'
+        OR `result_margin` IS NOT NULL", "margin_not_null_when_runs")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8ec8a40f-8aa8-4772-a005-02828142eb8a
+      source_assumptions:
+      - e94c5814-9e90-4efc-a44b-0ab66bd89e10
+    - suggestion: .satisfies("`result` IS NULL OR LOWER(TRIM(`result`)) != 'wickets'
+        OR `result_margin` IS NOT NULL", "margin_not_null_when_wickets")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: df8630ee-2abb-456a-bf15-a7e7405caf69
+      source_assumptions:
+      - 486fe149-e768-4bf6-b7bf-ca9012115575
+    assumptions:
+    - text: The column 'result_margin' may contain missing or null values, or values
+        that require coercion to numeric.
+      sources:
+      - start_line: 22
+        end_line: 22
+        file: ''
+      uid: 5573dab5-89af-4430-aad4-27e77d8dc82b
+    - text: When 'result' is 'runs', 'result_margin' must not be null and must be
+        convertible to an integer.
+      sources:
+      - start_line: 33
+        end_line: 34
+        file: ''
+      - start_line: 52
+        end_line: 52
+        file: ''
+      uid: e94c5814-9e90-4efc-a44b-0ab66bd89e10
+    - text: When 'result' is 'wickets', 'result_margin' must not be null and must
+        be convertible to an integer.
+      sources:
+      - start_line: 37
+        end_line: 37
+        file: ''
+      - start_line: 60
+        end_line: 60
+        file: ''
+      uid: 486fe149-e768-4bf6-b7bf-ca9012115575
+  season:
+    code:
+    - suggestion: .isComplete('season')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2e9e06cc-c08c-4214-85a7-dd6d17eea440
+      source_assumptions:
+      - 884f65f9-3aa7-42db-9f97-78f763cc7215
+    assumptions:
+    - text: The 'season' column must not contain null values, as it is used as a key
+        for grouping standings and sorting match summaries.
+      sources:
+      - start_line: 87
+        end_line: 87
+        file: ''
+      - start_line: 146
+        end_line: 146
+        file: ''
+      - start_line: 179
+        end_line: 180
+        file: ''
+      uid: 884f65f9-3aa7-42db-9f97-78f763cc7215
+  super_over:
+    code:
+    - suggestion: .isComplete('super_over')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8fb74702-ac88-484d-9310-6c08c359581e
+      source_assumptions:
+      - 52a3714a-6bd6-4e0e-9d58-2975fb58ab36
+    - suggestion: '.isContainedIn(''super_over'', [''Y'', ''N'', ''y'', ''n''], lambda
+        x: x >= 0.98)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 7097a4b9-eff5-4c76-8f67-b7711c86aaf1
+      source_assumptions:
+      - 3bb1c1ae-e70c-46e0-9021-d1a4cb661fd6
+    assumptions:
+    - text: The 'super_over' column must not contain null or missing values.
+      sources:
+      - start_line: 21
+        end_line: 21
+        file: ''
+      uid: 52a3714a-6bd6-4e0e-9d58-2975fb58ab36
+    - text: The 'super_over' column contains binary categorical indicators representing
+        super overs, with values restricted to 'Y' and 'N' (case-insensitive).
+      sources:
+      - start_line: 21
+        end_line: 21
+        file: ''
+      uid: 3bb1c1ae-e70c-46e0-9021-d1a4cb661fd6
+  team1:
+    code:
+    - suggestion: .isComplete('team1')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: bdf1dd3c-052f-4605-87a0-181f2588c15e
+      source_assumptions:
+      - 8560a6d1-fac3-4a8b-992d-b98bb7007261
+    - suggestion: .hasDataType('team1', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d425a4dd-bf5d-401a-a651-45e44a2042c5
+      source_assumptions:
+      - 9b79a9aa-50b5-4ee4-bb5c-70a9abde0d7c
+    assumptions:
+    - text: The 'team1' column must exist and contain no null values.
+      sources:
+      - start_line: 40
+        end_line: 41
+        file: ''
+      - start_line: 104
+        end_line: 105
+        file: ''
+      - start_line: 123
+        end_line: 124
+        file: ''
+      - start_line: 167
+        end_line: 168
+        file: ''
+      uid: 8560a6d1-fac3-4a8b-992d-b98bb7007261
+    - text: The 'team1' column values must be strings representing team names.
+      sources:
+      - start_line: 40
+        end_line: 41
+        file: ''
+      - start_line: 66
+        end_line: 66
+        file: ''
+      uid: 9b79a9aa-50b5-4ee4-bb5c-70a9abde0d7c
+  team2:
+    code:
+    - suggestion: .isComplete('team2')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6057e86e-500f-47f3-8f2f-2ab303c9bee8
+      source_assumptions:
+      - 282bf261-b83a-4eb3-a5e5-d70a4c50162f
+    - suggestion: .hasDataType('team2', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d021599f-8b4a-4542-a0aa-2a3c7985e893
+      source_assumptions:
+      - aeddfae7-d4fd-418b-b5f2-801ffaf5b99f
+    assumptions:
+    - text: team2 must not contain null values, with a completeness of 1.0
+      sources:
+      - start_line: 40
+        end_line: 42
+        file: ''
+      - start_line: 68
+        end_line: 68
+        file: ''
+      - start_line: 110
+        end_line: 111
+        file: ''
+      - start_line: 129
+        end_line: 130
+        file: ''
+      - start_line: 167
+        end_line: 168
+        file: ''
+      uid: 282bf261-b83a-4eb3-a5e5-d70a4c50162f
+    - text: team2 must be of string data type
+      sources:
+      - start_line: 40
+        end_line: 42
+        file: ''
+      - start_line: 68
+        end_line: 68
+        file: ''
+      - start_line: 110
+        end_line: 111
+        file: ''
+      - start_line: 129
+        end_line: 130
+        file: ''
+      uid: aeddfae7-d4fd-418b-b5f2-801ffaf5b99f
+  winner:
+    code:
+    - suggestion: .satisfies("`result` NOT IN ('runs', 'wickets') OR `winner` IS NOT
+        NULL", "winner_required_when_decided")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8abcda7d-6398-4007-8685-7954b211613a
+      source_assumptions:
+      - 7b873368-8d9c-4859-9441-67c6380b8dc6
+    - suggestion: .satisfies("`winner` IS NULL OR `winner` = `team1` OR `winner` =
+        `team2`", "winner_is_valid_team")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 95c3759c-9bf8-40a3-82cb-596b8a6df090
+      source_assumptions:
+      - 082673ea-c64a-4842-a873-36cbf2a7f637
+    assumptions:
+    - text: When the match result is decided ('runs' or 'wickets'), the 'winner' column
+        should not be null.
+      sources:
+      - start_line: 40
+        end_line: 41
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      - start_line: 58
+        end_line: 58
+        file: ''
+      - start_line: 87
+        end_line: 88
+        file: ''
+      uid: 7b873368-8d9c-4859-9441-67c6380b8dc6
+    - text: For decided matches ('result' is 'runs' or 'wickets'), 'winner' must match
+        either 'team1' or 'team2'.
+      sources:
+      - start_line: 40
+        end_line: 41
+        file: ''
+      - start_line: 174
+        end_line: 175
+        file: ''
+      uid: 082673ea-c64a-4842-a873-36cbf2a7f637
+llm_usage:
+  task_lm:
+    cost: 0.431363
+    cost_spent: 0.431363
+    total_tokens: 229839
+    prompt_tokens: 143511
+    completion_tokens: 86328
+    cached_prompt_tokens: 0
+    reasoning_tokens: 81206
+    requests: 32
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 565.08
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.431363
+    cost_spent: 0.431363
+    total_tokens: 229839
+    prompt_tokens: 143511
+    completion_tokens: 86328
+    cached_prompt_tokens: 0
+    reasoning_tokens: 81206
+    requests: 32
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 565.08
+    api_seconds_saved: 0.0
+wall_clock_seconds: 138.43

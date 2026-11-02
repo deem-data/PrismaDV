@@ -1,0 +1,520 @@
+sifta_generation:
+  program: gepa_column
+  run_dir: optimization_runs/gepa_column_run_20261012_213930
+  run_settings:
+    metric_type: f1_score
+  final_program_round: final
+  final_program_val_score: 43.35
+  instructions:
+    dataflow_inspector: "You are an expert static analysis and data lineage tracking\
+      \ assistant. Your task is to identify every line in the provided Python script\
+      \ that interacts with or is influenced by the specified target column (complete\
+      \ dataflow and dependency slice).\n\nMerely searching for literal string matches\
+      \ of the column name is insufficient and leads to missing critical validation\
+      \ dependencies. You must perform full forward and backward dataflow tracking.\n\
+      \n### What lines to include:\n1. **Data Ingestion & Loading**:\n   - The line(s)\
+      \ where the input dataset containing the column is loaded into memory (e.g.,\
+      \ `pd.read_csv`, `pd.read_parquet`).\n2. **Direct Column Operations**:\n   -\
+      \ Direct reads, writes, projections, slicing, and selections (e.g., `df['col']`,\
+      \ `df[['col', ...]]`, `df.loc[:, 'col']`).\n3. **Variable Aliases & Loop Unpacking**:\n\
+      \   - Any variable holding the column Series, NumPy array, or individual extracted\
+      \ values (e.g., `x = df['col']`, `val = df['col'].iloc[...]`).\n   - Loop targets\
+      \ when iterating over the column or tuples containing it (e.g., `for pid, ...\
+      \ in df[['col', ...]].itertuples():`).\n   - All subsequent lines that read,\
+      \ evaluate, compute with, or transform these aliases/unpacked variables.\n4.\
+      \ **Derived Transformations & Downstream Propagation**:\n   - Any new column,\
+      \ intermediate metric, normalization, scaling, mask, or feature calculated using\
+      \ the target column (e.g., if `y = f(x)` where `x` is derived from the target\
+      \ column, track both the calculation of `y` and its downstream usage).\n5. **Structural\
+      \ Operations, Filtering & Merges**:\n   - Grouping (`df.groupby('col')`), sorting,\
+      \ joining, merging, or filtering operations that use the column or its derived\
+      \ variables as keys or predicates.\n6. **Subsets & Persisted Outputs**:\n  \
+      \ - Intermediate and final DataFrames (copies, subsets, filtered views) that\
+      \ retain the target column or data derived from it.\n   - Any export or write\
+      \ calls (e.g., `.to_csv()`, `.to_parquet()`) saving DataFrames or structures\
+      \ containing the target column.\n7. **Side-effects, Indexing, and Array Allocation**:\n\
+      \   - Any data structure sized, allocated, or indexed using the values or summary\
+      \ statistics of the target column (e.g., `max_id = df['col'].max()`, array initialization\
+      \ using `max_id`, and index access using column values `arr[val] = ...`).\n\n\
+      ### Output Requirements:\n- Use 1-based line numbers.\n- Consolidate contiguous/adjacent\
+      \ lines into single ranges (`{\"start_line\": X, \"end_line\": Y}`).\n- Ensure\
+      \ line ranges are sorted in ascending order and non-overlapping.\n- Output ONLY\
+      \ valid JSON in the following format with no markdown commentary:\n\n```json\n\
+      {\n  \"sources\": [\n    { \"start_line\": int, \"end_line\": int }\n  ]\n}\n\
+      ```"
+    assumption_generation: 'Code makes assumptions about its input data, often without
+      stating them. For example, fillna on a column means the column may contain nulls,
+      and an assert sets a bound the data must meet. From the code that uses the target
+      column and the task description, write these assumptions as statements about
+      the input data that a Deequ check can test.
+
+
+      Output only valid JSON (numbers without leading zeros): { "assumptions": [{
+      "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }'
+    ir_generation: "markdown\nYou are an expert data quality and data validation engineer.\
+      \ Your task is to translate inferred column-level assumptions into robust PyDeequ\
+      \ validation checks based on a target column, column profiling metadata, Python/Pandas\
+      \ processing code, and downstream task context.\n\n---\n\n### Task Description\n\
+      You will be provided with:\n1. `target_column`: Name of the target column.\n\
+      2. `target_column_desc`: Profiling metadata for the column (completeness, distinct\
+      \ values, data types, type counts, histograms, etc.).\n3. `code_snippet`: Python/Pandas/NumPy\
+      \ code that processes the dataset.\n4. `downstream_task_description`: Context\
+      \ of downstream consumers.\n5. `assumptions`: A numbered list of assumptions\
+      \ (from index 0) describing expected properties of `target_column`.\n\nFor each\
+      \ assumption (or group of related assumptions), generate appropriate PyDeequ\
+      \ constraints, set the check severity level (`\"error\"` vs. `\"warning\"`),\
+      \ and map each check to the corresponding assumption indices.\n\n---\n\n###\
+      \ Critical Syntactical & API Rules (Avoid Common Evaluation Failures)\n\n1.\
+      \ **Column Name Escaping (Backticks vs. Plain Strings)**:\n   - **Row-level\
+      \ PyDeequ API methods** (`.isComplete()`, `.hasDataType()`, `.isNonNegative()`,\
+      \ `.isPositive()`, `.isContainedIn()`, `.isUnique()`, `.hasPattern()`, etc.)\
+      \ take the **raw column name string without backticks**:\n     - Correct: `.isComplete('Sleep\
+      \ Duration')`\n     - Incorrect: `.isComplete('`Sleep Duration`')` (Using backticks\
+      \ in API column arguments causes Deequ to look for a literal column containing\
+      \ backtick characters, causing checks to fail or behave incorrectly).\n   -\
+      \ **SQL expressions inside `.satisfies()`** MUST use backticks for column names\
+      \ with spaces or special characters:\n     - Correct: `.satisfies('`Sleep Duration`\
+      \ >= 0 AND `Sleep Duration` <= 24', 'sleep_duration_range')`\n     - Incorrect:\
+      \ `.satisfies('Sleep Duration >= 0', 'sleep_duration_range')`\n\n2. **Differentiating\
+      \ Generic Checks vs. Effective Domain Validation**:\n   - Notice why generic\
+      \ `.isComplete()` and `.hasDataType()` alone fail to catch unsafe corrupted\
+      \ batches (resulting in 0 of 25 unsafe batches caught and poor F1 scores):\n\
+      \     - Unsafe corruptions often include out-of-range anomalies, negative values\
+      \ where positive/zero is required, zero values where division occurs, impossible\
+      \ domain values, or unexpected string values that survive type casting.\n  \
+      \   - When an assumption implies a valid range, domain bounds, or non-negativity\
+      \ (e.g., step counts, sleep duration, ages, physical activity, blood pressure,\
+      \ percentages, scale ratings 1–10), **ALWAYS generate specific range or value\
+      \ checks** (e.g., `.isNonNegative()`, `.isPositive()`, or `.satisfies('`col`\
+      \ >= min_val AND `col` <= max_val', 'constraint_name')`) in addition to completeness\
+      \ and type checks.\n   - Look at the downstream code snippet to infer practical\
+      \ boundaries:\n     - Step counts, duration, activity level, ages cannot be\
+      \ negative: use `.isNonNegative('col')` or domain `.satisfies()`.\n     - Quantities\
+      \ used as divisors: must be strictly positive or non-zero (`.isPositive('col')`\
+      \ or `.satisfies('`col` != 0', 'col_non_zero')`).\n     - Scores/Ratings (e.g.,\
+      \ Quality of Sleep 1–10, Stress Level 1–10): use `.satisfies('`col` >= 0 AND\
+      \ `col` <= 10', 'col_range')`.\n\n3. **Appropriate PyDeequ Data Types**:\n \
+      \  - `ConstrainableDataTypes.Numeric` matches any numeric type (Integral or\
+      \ Fractional).\n   - `ConstrainableDataTypes.Integral` matches integer types.\n\
+      \   - `ConstrainableDataTypes.Fractional` matches floating point numbers.\n\
+      \   - `ConstrainableDataTypes.String` matches string/text fields.\n   - Match\
+      \ the datatype based on `target_column_desc.dataType` and code expectations.\n\
+      \n4. **Regex Patterns**:\n   - Always use raw strings (`r\"...\"`) for regex\
+      \ patterns when using `.hasPattern()`.\n\n---\n\n### Output Format\nReturn a\
+      \ single JSON object with the following schema:\n```json\n{\n  \"constraint_code\"\
+      : [\n    {\n      \"suggestion\": \".<PyDeequFunction>(...)\",\n      \"level\"\
+      : \"error\" | \"warning\",\n      \"linked assumptions\": [0]\n    }\n  ]\n\
+      }\n```\n- `suggestion`: A valid PyDeequ check method starting with `.` (e.g.,\
+      \ `.isComplete('col')`) chaining onto a PyDeequ `Check` object.\n- `level`:\
+      \ `\"error\"` or `\"warning\"`.\n- `linked assumptions`: A list of 0-based integer\
+      \ indices of the assumptions addressed by this constraint.\n\n---\n\n### Severity\
+      \ Level Assignment (`error` vs. `warning`)\nThe validation framework evaluates\
+      \ data batches for safety:\n- **Evaluation Mechanism**: Unsafe batches violating\
+      \ required assumptions are ONLY caught when the failing check is set to `\"\
+      error\"`. Checks set to `\"warning\"` do NOT flag unsafe batches and result\
+      \ in 0 errors caught, heavily penalizing recall and Macro F1.\n- Safe batches\
+      \ adhere strictly to clean data profiles. False alarms on clean data are practically\
+      \ zero.\n- **Default to `\"error\"`**:\n  - Always assign `\"error\"` to any\
+      \ check addressing code dependencies, completeness, data type, domain bounds/ranges,\
+      \ non-negativity, allowed categories, and uniqueness.\n- **Use `\"warning\"\
+      ` ONLY for**:\n  - Soft distribution checks (e.g., `.hasMean`, `.hasStandardDeviation`,\
+      \ `.hasApproxQuantile`) where deviations do not cause code crashes or corrupt\
+      \ analytical logic.\n\n---\n\n### Complete PyDeequ Function Reference\n\n####\
+      \ Row-Level Functions:\n- `isComplete(column)`: Validates that a column contains\
+      \ no null values. (Do NOT use backticks in column name).\n- `hasCompleteness(column,\
+      \ assertion)`: Validates completeness ratio (e.g., `lambda x: x >= 0.99`).\n\
+      - `satisfies(columnCondition, constraintName, [assertion])`: Validates custom\
+      \ SQL WHERE condition. (ALWAYS backtick columns with spaces).\n- `hasPattern(column,\
+      \ pattern, [assertion, name])`: Matches column values against a regex pattern\
+      \ (use `r\"...\"`).\n- `hasDataType(column, datatype, [assertion])`: Validates\
+      \ data types using `ConstrainableDataTypes.*`.\n- `isNonNegative(column, [assertion])`:\
+      \ Validates values >= 0.\n- `isPositive(column, [assertion])`: Validates values\
+      \ > 0.\n- `isLessThan(columnA, columnB, [assertion])`: ColumnA < ColumnB.\n\
+      - `isLessThanOrEqualTo(columnA, columnB, [assertion])`: ColumnA <= ColumnB.\n\
+      - `isGreaterThan(columnA, columnB, [assertion])`: ColumnA > ColumnB.\n- `isGreaterThanOrEqualTo(columnA,\
+      \ columnB, [assertion])`: ColumnA >= ColumnB.\n- `isContainedIn(column, allowed_values,\
+      \ [assertion])`: Validates values exist within an allowed list.\n\n#### Aggregate-Level\
+      \ Functions:\n- `hasSize(assertion)`: Validates total row count (e.g., `lambda\
+      \ x: x >= 100`).\n- `isUnique(column)`: Validates that every value in a column\
+      \ is unique.\n- `hasUniqueness(columns, assertion)`: Validates uniqueness ratio.\n\
+      - `hasNumberOfDistinctValues(column, assertion)`: Validates distinct count.\n\
+      - `hasMin(column, assertion)`: Validates minimum value.\n- `hasMax(column, assertion)`:\
+      \ Validates maximum value.\n- `hasMean(column, assertion)`: Validates mean value.\n\
+      - `hasStandardDeviation(column, assertion)`: Validates standard deviation.\n\
+      - `hasApproxQuantile(column, quantile, assertion)`: Validates quantile value.\n\
+      - `hasMinLength(column, assertion)`: Validates minimum string length.\n- `hasMaxLength(column,\
+      \ assertion)`: Validates maximum string length.\n\n---\n\n### Mapping Instructions\n\
+      - Every assumption in the provided input must be mapped to at least one constraint\
+      \ unless it is completely subsumed by another check.\n- If an assumption asserts\
+      \ both existence/completeness and range/type, create distinct, targeted constraints\
+      \ and link the assumption index to both.\n- Ensure only valid JSON is returned."
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 1
+split_seed: 1
+columns_considered:
+- Blood Pressure
+- Daily Steps
+- Person ID
+- Physical Activity Level
+- Quality of Sleep
+- Sleep Disorder
+- Sleep Duration
+- Stress Level
+columns_failed: []
+constraints:
+  Blood Pressure:
+    code:
+    - suggestion: .isComplete('Blood Pressure')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: df0c6210-c333-4675-a30b-46ebdb3da9b2
+      source_assumptions:
+      - f0764529-9ee7-4059-9c18-3532b5151d6f
+    - suggestion: .hasPattern('Blood Pressure', r'^\d+/\d+$')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9712cfca-5c70-4bdc-b8fa-bce3d8ad2830
+      source_assumptions:
+      - 145b548c-25d9-4fbb-a1a5-7742cdd4836d
+    assumptions:
+    - text: The 'Blood Pressure' column must not contain null values, as missing values
+        would lead to invalid string representations or parsing errors when extracting
+        systolic and diastolic values.
+      sources:
+      - start_line: 46
+        end_line: 49
+        file: ''
+      uid: f0764529-9ee7-4059-9c18-3532b5151d6f
+    - text: Each value in the 'Blood Pressure' column must match the pattern '^\d+/\d+$'
+        containing two integer components separated by a forward slash ('/'), so that
+        splitting on '/' yields at least two elements that can both be cast to integers.
+      sources:
+      - start_line: 46
+        end_line: 49
+        file: ''
+      uid: 145b548c-25d9-4fbb-a1a5-7742cdd4836d
+  Daily Steps:
+    code:
+    - suggestion: .isComplete('Daily Steps')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 42b5a268-1851-4964-b99e-dcd5b099232c
+      source_assumptions:
+      - 76c2b1c9-c68f-4570-aaf3-0e7ce6dc5e9f
+    - suggestion: .hasDataType('Daily Steps', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 603a6418-b711-4505-85a9-a10b2d899112
+      source_assumptions:
+      - 846dd2e0-ac1b-45c0-addf-4b172fb92106
+    - suggestion: .isNonNegative('Daily Steps')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9f810bb3-9ecd-46a3-bb95-9d852808cf0c
+      source_assumptions:
+      - 846dd2e0-ac1b-45c0-addf-4b172fb92106
+    assumptions:
+    - text: Daily Steps must not contain null values, as np.percentile and np.asarray(...,
+        dtype=float) require valid numerical data.
+      sources:
+      - start_line: 38
+        end_line: 40
+        file: ''
+      uid: 76c2b1c9-c68f-4570-aaf3-0e7ce6dc5e9f
+    - text: Daily Steps must be convertible to a numeric (float) data type.
+      sources:
+      - start_line: 22
+        end_line: 22
+        file: ''
+      - start_line: 38
+        end_line: 40
+        file: ''
+      uid: 846dd2e0-ac1b-45c0-addf-4b172fb92106
+  Person ID:
+    code:
+    - suggestion: .isComplete('Person ID')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e8c77681-cc82-4b65-99d7-3ae158614dac
+      source_assumptions:
+      - 9b3cdc8a-de0f-4521-8420-ecdb5c759462
+      - 97114d5d-b4ce-4f40-bb52-8bd11b9423fc
+    assumptions:
+    - text: The column 'Person ID' must exist in the input dataset.
+      sources:
+      - start_line: 90
+        end_line: 96
+        file: ''
+      uid: 9b3cdc8a-de0f-4521-8420-ecdb5c759462
+    - text: The column 'Person ID' should be completely non-null to serve as a valid
+        identifier in the output dataset.
+      sources:
+      - start_line: 90
+        end_line: 96
+        file: ''
+      uid: 97114d5d-b4ce-4f40-bb52-8bd11b9423fc
+  Physical Activity Level:
+    code:
+    - suggestion: .isComplete('Physical Activity Level')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: bf900cb5-c5bf-42b3-8a49-8c3491f629bf
+      source_assumptions:
+      - 1dc5555c-491f-4046-8ab3-302782b22b11
+    - suggestion: .hasDataType('Physical Activity Level', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4d306cb6-b856-4b00-9beb-5bec94971f7e
+      source_assumptions:
+      - 1dc5555c-491f-4046-8ab3-302782b22b11
+    - suggestion: .satisfies('`Physical Activity Level` >= 0 AND `Physical Activity
+        Level` <= 100', 'physical_activity_level_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 05f255a3-8768-4bb0-b71e-60649e6ff891
+      source_assumptions:
+      - b722b09e-a066-4918-bd4a-f37d96f415c1
+    assumptions:
+    - text: The 'Physical Activity Level' column must contain non-null numeric values.
+      sources:
+      - start_line: 22
+        end_line: 25
+        file: ''
+      - start_line: 41
+        end_line: 43
+        file: ''
+      uid: 1dc5555c-491f-4046-8ab3-302782b22b11
+    - text: The values in 'Physical Activity Level' are expected to be between 0 and
+        100 inclusive.
+      sources:
+      - start_line: 41
+        end_line: 43
+        file: ''
+      uid: b722b09e-a066-4918-bd4a-f37d96f415c1
+  Quality of Sleep:
+    code:
+    - suggestion: .isComplete('Quality of Sleep')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 971db80e-368e-418e-85d8-ef1f9fafdca7
+      source_assumptions:
+      - 6488e607-a94a-4b81-966e-dd4f13894782
+    - suggestion: .hasDataType('Quality of Sleep', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: de35f98f-cdbd-4346-b575-c01856814504
+      source_assumptions:
+      - d3984d44-a898-4207-892e-00373b258c71
+    - suggestion: .satisfies('`Quality of Sleep` >= 0 AND `Quality of Sleep` <= 10',
+        'quality_of_sleep_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 049981c2-8922-4bd2-acbd-d5be2fe6b0e9
+      source_assumptions:
+      - ffbe808e-ac02-4e29-9696-855ccd283694
+    assumptions:
+    - text: '"Quality of Sleep" must not contain null values.'
+      sources:
+      - start_line: 37
+        end_line: 37
+        file: ''
+      uid: 6488e607-a94a-4b81-966e-dd4f13894782
+    - text: '"Quality of Sleep" must be numeric or convertible to float.'
+      sources:
+      - start_line: 37
+        end_line: 37
+        file: ''
+      uid: d3984d44-a898-4207-892e-00373b258c71
+    - text: '"Quality of Sleep" is expected to have values between 0 and 10.'
+      sources:
+      - start_line: 37
+        end_line: 37
+        file: ''
+      - start_line: 58
+        end_line: 59
+        file: ''
+      uid: ffbe808e-ac02-4e29-9696-855ccd283694
+  Sleep Disorder:
+    code:
+    - suggestion: .hasDataType('Sleep Disorder', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c2b20b1c-ed88-4e4d-bec2-816099193f6c
+      source_assumptions:
+      - 7a4a217d-5372-4aee-9790-ea7a81e62901
+    - suggestion: .satisfies("`Sleep Disorder` IS NULL OR `Sleep Disorder` = '' OR
+        `Sleep Disorder` IN ('Insomnia', 'Sleep Apnea')", "sleep_disorder_valid_values")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6aa00762-d55d-4571-9554-f221703accb0
+      source_assumptions:
+      - b2e54829-7971-4979-adc1-1d1d8d77958f
+      - 7a4a217d-5372-4aee-9790-ea7a81e62901
+    assumptions:
+    - text: The column 'Sleep Disorder' can contain missing or null values.
+      sources:
+      - start_line: 66
+        end_line: 66
+        file: ''
+      uid: b2e54829-7971-4979-adc1-1d1d8d77958f
+    - text: The values in 'Sleep Disorder', when present and not empty, can match
+        'Insomnia' or 'Sleep Apnea'.
+      sources:
+      - start_line: 66
+        end_line: 66
+        file: ''
+      uid: 7a4a217d-5372-4aee-9790-ea7a81e62901
+  Sleep Duration:
+    code:
+    - suggestion: .isComplete('Sleep Duration')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 13c1b992-90eb-43a1-8a0b-180ef330ddb7
+      source_assumptions:
+      - 7ed5bc43-f99a-4f3a-8a65-77f5d6d2d26e
+      - c53d147e-567c-4dc0-a6e5-a0030e0da75c
+    - suggestion: .hasDataType('Sleep Duration', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 58ad920b-9016-4a57-96b3-ce36d46c31d7
+      source_assumptions:
+      - ff4fd031-ddd6-493d-b2e3-91234e08f0a8
+    - suggestion: .isNonNegative('Sleep Duration')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c1fc3107-60e5-459b-a39b-897002e28f2b
+      source_assumptions:
+      - ca9ec49e-3733-4199-9b3b-0abc6a0d162b
+    assumptions:
+    - text: The column 'Sleep Duration' must exist in the input dataset.
+      sources:
+      - start_line: 36
+        end_line: 36
+        file: ''
+      uid: 7ed5bc43-f99a-4f3a-8a65-77f5d6d2d26e
+    - text: The column 'Sleep Duration' must not contain missing or null values.
+      sources:
+      - start_line: 36
+        end_line: 36
+        file: ''
+      - start_line: 64
+        end_line: 64
+        file: ''
+      uid: c53d147e-567c-4dc0-a6e5-a0030e0da75c
+    - text: The column 'Sleep Duration' must be castable to float.
+      sources:
+      - start_line: 8
+        end_line: 9
+        file: ''
+      - start_line: 36
+        end_line: 36
+        file: ''
+      - start_line: 64
+        end_line: 64
+        file: ''
+      uid: ff4fd031-ddd6-493d-b2e3-91234e08f0a8
+    - text: The values in 'Sleep Duration' must be non-negative.
+      sources:
+      - start_line: 8
+        end_line: 18
+        file: ''
+      - start_line: 36
+        end_line: 36
+        file: ''
+      - start_line: 77
+        end_line: 78
+        file: ''
+      uid: ca9ec49e-3733-4199-9b3b-0abc6a0d162b
+  Stress Level:
+    code:
+    - suggestion: .isComplete('Stress Level')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e90844e0-3ee3-47db-b2d0-ea4f91b01baa
+      source_assumptions:
+      - ca0ca528-f5d8-4534-a76f-4b009ccdd3c7
+    - suggestion: .hasDataType('Stress Level', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e24f43fa-4310-4da7-9da5-bca8af71adf8
+      source_assumptions:
+      - e6a436f8-2584-4fcf-9599-7c0966cc925b
+    - suggestion: .satisfies('`Stress Level` >= 0 AND `Stress Level` <= 10', 'stress_level_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d028908b-e10e-49b3-8a44-6c665bfd41fa
+      source_assumptions:
+      - e6a436f8-2584-4fcf-9599-7c0966cc925b
+    assumptions:
+    - text: The 'Stress Level' column must not contain null values.
+      sources:
+      - start_line: 52
+        end_line: 52
+        file: ''
+      uid: ca0ca528-f5d8-4534-a76f-4b009ccdd3c7
+    - text: The 'Stress Level' column must be convertible to a numeric float data
+        type.
+      sources:
+      - start_line: 9
+        end_line: 9
+        file: ''
+      - start_line: 22
+        end_line: 22
+        file: ''
+      - start_line: 52
+        end_line: 52
+        file: ''
+      uid: e6a436f8-2584-4fcf-9599-7c0966cc925b
+llm_usage:
+  task_lm:
+    cost: 0.495118
+    cost_spent: 0.485116
+    total_tokens: 202969
+    prompt_tokens: 88672
+    completion_tokens: 114297
+    cached_prompt_tokens: 0
+    reasoning_tokens: 109803
+    requests: 28
+    cache_served_requests: 2
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 707.356
+    api_seconds_saved: 11.645
+  total:
+    cost: 0.495118
+    cost_spent: 0.485116
+    total_tokens: 202969
+    prompt_tokens: 88672
+    completion_tokens: 114297
+    cached_prompt_tokens: 0
+    reasoning_tokens: 109803
+    requests: 28
+    cache_served_requests: 2
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 707.356
+    api_seconds_saved: 11.645
+wall_clock_seconds: 295.293

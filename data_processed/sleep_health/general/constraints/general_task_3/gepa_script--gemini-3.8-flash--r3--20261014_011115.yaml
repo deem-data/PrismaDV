@@ -1,0 +1,503 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261014_005314
+  run_settings: {}
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 69.9
+  instructions:
+    generator: "You are an expert data quality and pipeline validation assistant.\
+      \ Your goal is to analyze Python data processing scripts and input dataset schemas,\
+      \ identify operational assumptions and failure modes, and generate robust PyDeequ\
+      \ validation checks.\n\n---\n\n### Task Context & Workflow\n\nGiven:\n1. `columns_desc`:\
+      \ Summary statistics, completeness rates, data types, and value distributions\
+      \ for each column in the input data.\n2. `code_script`: Python code processing\
+      \ the dataset.\n3. `downstream_task_description`: Context regarding downstream\
+      \ consumers or target tasks (if any).\n\nYou must inspect the code and data\
+      \ profiles to identify:\n- Explicit constraints (e.g., explicit type castings\
+      \ like `.astype(int)`, mathematical operations like `np.log`, `np.sqrt`, or\
+      \ regex operations).\n- Implicit constraints (e.g., operations expecting non-null\
+      \ data, linear fits requiring finite numbers, categorical lookups via `.map()`).\n\
+      \nFor every input column (or tightly coupled pair/group of columns) used in\
+      \ the script, produce structured constraint recommendations.\n\n---\n\n### Step-by-Step\
+      \ Instructions\n\n#### 1. Trace Column References (Line Tracking)\n- Trace every\
+      \ line where the column is read, transformed, filtered, cast, merged, or written\
+      \ to output.\n- Group consecutive lines into ranges using 1-based indexing (e.g.,\
+      \ lines 16 to 18 becomes `{'start_line': 16, 'end_line': 18}`).\n\n#### 2. Formulate\
+      \ Verifiable Assumptions\n- Express what the input data *must satisfy* for the\
+      \ code to run correctly and produce valid downstream outputs.\n- Ground every\
+      \ assumption with the exact source line ranges.\n- Identify specific failure\
+      \ modes:\n  - **Integer/Type Casting Failures**: Methods like `.astype(int)`\
+      \ crash on `NaN` (raising `ValueError` / `IntCastingNaNError`) and fail on unparseable\
+      \ string formats.\n  - **Mathematical Bounds**:\n    - `np.log(x)` requires\
+      \ `x > 0` (or `x - threshold > 0`). Values $\\le 0$ produce `-inf` or `NaN`.\n\
+      \    - `np.sqrt(x)` requires `x >= 0`. Negative values produce `NaN`.\n    -\
+      \ Denominators (division/normalization) must not evaluate to zero unless safeguarded.\n\
+      \  - **Machine Learning / Fitting Functions**:\n    - `np.polyfit()`, `np.corrcoef()`,\
+      \ or rank/covariance models crash or output all `NaN` if any input row has `NaN`\
+      \ or infinite values unless explicitly masked beforehand.\n  - **Categorical\
+      \ Mappings & Set Membership**:\n    - `.map(dict)` or `.isin(set)` without explicit\
+      \ fallback handling will create unexpected nulls or silent miscalculations if\
+      \ values deviate from expected sets.\n\n#### 3. Determine Check Severity Level\
+      \ (`error` vs. `warning`)\nTo maximize detection of unsafe data batches while\
+      \ avoiding false alarms on safe batches:\n- **`level: 'error'` (Unsafe / Crash\
+      \ / High Risk)**:\n  - Set to `error` if violation causes the script to raise\
+      \ an unhandled exception or crash (e.g., `.astype(int)` on nulls or unparseable\
+      \ regex, `np.polyfit` failing on missing values, string split operations expecting\
+      \ exact delimiters).\n  - Set to `error` if a violation mathematically invalidates\
+      \ the entire downstream dataset (e.g., illegal arguments to mathematical transforms\
+      \ causing `NaN`/`inf` cascades into final outputs).\n- **`level: 'warning'`\
+      \ (Degraded Quality / Suspicious Data)**:\n  - Set to `warning` if the script\
+      \ uses safe coercion (e.g., `pd.to_numeric(..., errors='coerce')` without immediate\
+      \ risky downcasting), masks missing values (e.g., `.notna()`), or provides defaults\
+      \ (e.g., `.fillna()` or `.get(..., default)`).\n  - Set to `warning` for business\
+      \ domain boundaries (e.g., expected step counts $\\le 50,000$, standard scale\
+      \ bounds $0 \\le \\text{PAL} \\le 100$) where data outside the range degrades\
+      \ quality or clips scores, but does not crash execution.\n  - Set to `warning`\
+      \ for identifier uniqueness (`isUnique`), unless a duplicate ID is explicitly\
+      \ guaranteed to crash an index or join downstream.\n\n#### 4. Map Assumptions\
+      \ to PyDeequ Checks\nTranslate each assumption to an appropriate PyDeequ check\
+      \ function from the available library. Always use raw strings (`r\"...\"`) for\
+      \ regex patterns in `hasPattern`.\n\n---\n\n### Available PyDeequ API Functions\n\
+      \n#### Row-Level Constraints:\n- `.isComplete(column)`: Column contains no null\
+      \ values.\n- `.hasCompleteness(column, assertion)`: Ratio of non-null values\
+      \ meets condition (e.g., `lambda x: x >= 0.95`).\n- `.areComplete(columns)`:\
+      \ All specified columns are complete.\n- `.haveCompleteness(columns, assertion)`:\
+      \ Completeness across a set of columns meets condition.\n- `.areAnyComplete(columns)`:\
+      \ At least one column in the set is complete.\n- `.satisfies(columnCondition,\
+      \ constraintName, assertion=None)`: SQL condition (e.g., ``'`Daily Steps` >=\
+      \ 0'``, ``'`Sleep Duration` > 2.99'``).\n- `.hasPattern(column, pattern, assertion=None,\
+      \ name=None)`: Regex match (e.g., `.hasPattern('Blood Pressure', r'^\\d+/\\\
+      d+$')`).\n- `.hasDataType(column, datatype, assertion=None)`: Validates type\
+      \ (`ConstrainableDataTypes.Integral`, `ConstrainableDataTypes.Fractional`, `ConstrainableDataTypes.Numeric`,\
+      \ `ConstrainableDataTypes.String`, `ConstrainableDataTypes.Boolean`).\n- `.isNonNegative(column,\
+      \ assertion=None)`: Values $\\ge 0$.\n- `.isPositive(column, assertion=None)`:\
+      \ Values $> 0$.\n- `.isLessThan(colA, colB, assertion=None)`, `.isLessThanOrEqualTo(colA,\
+      \ colB, assertion=None)`\n- `.isGreaterThan(colA, colB, assertion=None)`, `.isGreaterThanOrEqualTo(colA,\
+      \ colB, assertion=None)`\n- `.isContainedIn(column, allowed_values, assertion=None)`:\
+      \ Non-null values are in allowed list.\n\n#### Aggregate-Level Constraints:\n\
+      - `.hasSize(assertion)`: Validates dataframe row count (e.g., `lambda x: x >=\
+      \ 1`).\n- `.isUnique(column)`: All values are unique.\n- `.hasUniqueness(columns,\
+      \ assertion)`: Fraction of unique values meets threshold.\n- `.hasDistinctness(columns,\
+      \ assertion)`: Distinct values / total rows meets threshold.\n- `.hasMin(column,\
+      \ assertion)`: Min value meets lambda condition.\n- `.hasMax(column, assertion)`:\
+      \ Max value meets lambda condition.\n- `.hasMean(column, assertion)`: Mean meets\
+      \ lambda condition.\n- `.hasStandardDeviation(column, assertion)`: Standard\
+      \ deviation meets lambda condition.\n- `.hasCorrelation(colA, colB, assertion)`:\
+      \ Pearson correlation meets lambda condition.\n\n---\n\n### Output JSON Format\n\
+      \nOutput a single valid JSON list of objects conforming to the following structure:\n\
+      \n```json\n[\n  {\n    \"column_group\": \"Column Name or [\\\"ColA\\\", \\\"\
+      ColB\\\"]\",\n    \"assumptions\": [\n      {\n        \"text\": \"Detailed\
+      \ description of the assumption and why the code requires it.\",\n        \"\
+      sources\": [\n          {\n            \"start_line\": 16,\n            \"end_line\"\
+      : 18\n          }\n        ]\n      }\n    ],\n    \"code\": [\n      {\n  \
+      \      \"suggestion\": \".isComplete('Column Name')\",\n        \"level\": \"\
+      error\",\n        \"linked_assumptions\": [0]\n      }\n    ]\n  }\n]\n```\n\
+      \nEnsure all JSON brackets, quotation marks, and regex escapes are syntactically\
+      \ valid. Provide only the JSON output without extra explanatory text."
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+constraints:
+  Age:
+    code:
+    - suggestion: .isComplete('Age')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 085c3bd3-4638-4d1f-9d66-32bd5429c627
+      source_assumptions:
+      - 3877cd83-a2e5-4ab0-9ae7-06d0e7d9f488
+    - suggestion: .isPositive('Age')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 2b3bf9f2-9472-4b9c-ae64-62cb31d9e33c
+      source_assumptions:
+      - 9531274c-2ca5-494e-8369-b071b507c190
+    assumptions:
+    - text: Age is used directly to compute age_factor in apnea_risk. If null, apnea_risk
+        contains NaNs, causing np.quantile to return NaN and breaking triage classification.
+      sources:
+      - start_line: 118
+        end_line: 119
+        file: ''
+      - start_line: 124
+        end_line: 124
+        file: ''
+      - start_line: 139
+        end_line: 139
+        file: ''
+      uid: 3877cd83-a2e5-4ab0-9ae7-06d0e7d9f488
+    - text: Age must be a positive integer/number representing person age.
+      sources:
+      - start_line: 118
+        end_line: 119
+        file: ''
+      uid: 9531274c-2ca5-494e-8369-b071b507c190
+  BMI Category:
+    code:
+    - suggestion: .isContainedIn('BMI Category', ['Obese', 'Overweight', 'Normal',
+        'Normal Weight'])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: ddfead23-f52e-4c1f-8979-1e1a418016bc
+      source_assumptions:
+      - d2ed8dca-13dd-418e-93ac-8f8f4cf24da9
+    assumptions:
+    - text: BMI Category is mapped to numerical values using a predefined dictionary
+        ('Obese', 'Overweight', 'Normal', 'Normal Weight'). Unmapped values default
+        to 0.0 via fillna, potentially distorting apnea risk.
+      sources:
+      - start_line: 116
+        end_line: 117
+        file: ''
+      uid: d2ed8dca-13dd-418e-93ac-8f8f4cf24da9
+  Blood Pressure:
+    code:
+    - suggestion: .isComplete('Blood Pressure')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0be9f8ab-d9ec-4268-bdce-0b5b24772a4d
+      source_assumptions:
+      - 285a87bf-28ec-4acd-947f-429a72b62e62
+    - suggestion: .hasPattern('Blood Pressure', r'^\d{2,3}/\d{2,3}$')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: b7862a08-1552-496f-bdb4-4251055ded9b
+      source_assumptions:
+      - 285a87bf-28ec-4acd-947f-429a72b62e62
+    assumptions:
+    - text: Blood Pressure must not be null and must match the format '<Systolic>/<Diastolic>'
+        with 2 to 3 digits each. Otherwise, extraction yields NaN, which causes an
+        unhandled exception when calling .astype(int) on Systolic and Diastolic at
+        lines 153-154.
+      sources:
+      - start_line: 63
+        end_line: 65
+        file: ''
+      - start_line: 153
+        end_line: 154
+        file: ''
+      uid: 285a87bf-28ec-4acd-947f-429a72b62e62
+  Daily Steps:
+    code:
+    - suggestion: .isComplete('Daily Steps')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8d34f13f-abd1-4631-8c17-9df7b845e865
+      source_assumptions:
+      - 0aa72c40-bf5a-422b-8690-107f42f2d8d0
+    - suggestion: .isNonNegative('Daily Steps')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2a65262b-23c1-4070-9e88-9f5de02d50d7
+      source_assumptions:
+      - 6a20f2ce-010a-4a9a-986c-3b45ad1aa847
+    assumptions:
+    - text: Daily Steps is directly cast to float and used without NaN masking in
+        blended step calculation and insomnia risk scoring. Missing values cascade
+        NaNs into np.quantile, invalidating triage thresholds.
+      sources:
+      - start_line: 43
+        end_line: 43
+        file: ''
+      - start_line: 130
+        end_line: 131
+        file: ''
+      - start_line: 140
+        end_line: 140
+        file: ''
+      uid: 0aa72c40-bf5a-422b-8690-107f42f2d8d0
+    - text: Daily step counts must be non-negative real values.
+      sources:
+      - start_line: 43
+        end_line: 43
+        file: ''
+      - start_line: 130
+        end_line: 130
+        file: ''
+      uid: 6a20f2ce-010a-4a9a-986c-3b45ad1aa847
+  Heart Rate:
+    code:
+    - suggestion: .isComplete('Heart Rate')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: ac107ad0-8fe5-4c66-803d-a55171a6c623
+      source_assumptions:
+      - 997d1961-4155-4df7-af40-b6bbd7836685
+    - suggestion: .isPositive('Heart Rate')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 0dd82514-4eb6-48ee-9b2d-340d82b24b8b
+      source_assumptions:
+      - 8acf4f1f-351d-45dd-89c6-dec9ec1d73aa
+    assumptions:
+    - text: Heart Rate is directly used in hr_factor calculation for apnea_risk. Null
+        values propagate into np.quantile.
+      sources:
+      - start_line: 120
+        end_line: 121
+        file: ''
+      - start_line: 124
+        end_line: 124
+        file: ''
+      - start_line: 139
+        end_line: 139
+        file: ''
+      uid: 997d1961-4155-4df7-af40-b6bbd7836685
+    - text: Heart Rate must be positive.
+      sources:
+      - start_line: 120
+        end_line: 121
+        file: ''
+      uid: 8acf4f1f-351d-45dd-89c6-dec9ec1d73aa
+  Person ID:
+    code:
+    - suggestion: .isComplete('Person ID')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 5a8ffadb-7651-4935-a0a9-18c5e476048c
+      source_assumptions:
+      - 8c8dbf36-9258-4bd5-9ef8-90c9c5d8c2ad
+    - suggestion: .isUnique('Person ID')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 76ed9076-55a1-4826-8f13-435fb01eb9ab
+      source_assumptions:
+      - ff3fe9ef-a828-431b-8c22-79e655710dc4
+    assumptions:
+    - text: Person ID is directly passed to the output dataframe to uniquely identify
+        participant records and must be complete.
+      sources:
+      - start_line: 146
+        end_line: 148
+        file: ''
+      uid: 8c8dbf36-9258-4bd5-9ef8-90c9c5d8c2ad
+    - text: Person ID represents unique individuals and should ideally be unique across
+        records.
+      sources:
+      - start_line: 146
+        end_line: 148
+        file: ''
+      uid: ff3fe9ef-a828-431b-8c22-79e655710dc4
+  Physical Activity Level:
+    code:
+    - suggestion: .isComplete('Physical Activity Level')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 699453e7-74d9-4dbe-b26c-cc3239125a81
+      source_assumptions:
+      - bac2eddd-91ba-462c-8c7e-1c4039998f1d
+    - suggestion: .isNonNegative('Physical Activity Level')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 06bd0b63-77fd-4d95-bfd7-724326363774
+      source_assumptions:
+      - 021acdcb-9d2c-47c3-8b55-1e665f4c7155
+    assumptions:
+    - text: Physical Activity Level is used to compute linear regression weights and
+        predict step activity. Missing values cause pal_pred_steps to produce NaNs
+        and invalidate downstream risk scores.
+      sources:
+      - start_line: 34
+        end_line: 40
+        file: ''
+      - start_line: 42
+        end_line: 43
+        file: ''
+      uid: bac2eddd-91ba-462c-8c7e-1c4039998f1d
+    - text: Physical Activity Level should be non-negative.
+      sources:
+      - start_line: 42
+        end_line: 43
+        file: ''
+      uid: 021acdcb-9d2c-47c3-8b55-1e665f4c7155
+  Quality of Sleep:
+    code:
+    - suggestion: .isComplete('Quality of Sleep')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 30e7687e-e281-473e-85e8-17094f43d17f
+      source_assumptions:
+      - be4fec73-5339-466a-a518-180cc71adb69
+    - suggestion: .satisfies("`Quality of Sleep` >= 1 AND `Quality of Sleep` <= 10",
+        "qos_in_range")
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 96ee815b-edfb-42a3-8f16-78fd8453d6e6
+      source_assumptions:
+      - 911e6206-5c91-4da7-a442-f9b9fad4705e
+    assumptions:
+    - text: Quality of Sleep is used unmasked in residual scoring, quality score normalization,
+        and insomnia risk modeling. Null values corrupt np.quantile calculations downstream.
+      sources:
+      - start_line: 56
+        end_line: 56
+        file: ''
+      - start_line: 89
+        end_line: 90
+        file: ''
+      - start_line: 128
+        end_line: 131
+        file: ''
+      - start_line: 140
+        end_line: 140
+        file: ''
+      uid: be4fec73-5339-466a-a518-180cc71adb69
+    - text: Quality of Sleep is expected to follow a standard 1-10 rating scale (centered
+        around 3-9 in normalization).
+      sources:
+      - start_line: 88
+        end_line: 90
+        file: ''
+      uid: 911e6206-5c91-4da7-a442-f9b9fad4705e
+  Sleep Disorder:
+    code:
+    - suggestion: .isContainedIn('Sleep Disorder', ['Sleep Apnea', 'Insomnia'])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 3518c676-89f8-4de8-ac40-687d4d5d10a0
+      source_assumptions:
+      - 156ca5f8-2995-424c-b5c9-dcd2b4945a6a
+    assumptions:
+    - text: Sleep Disorder is partially populated, but when present, it is filtered
+        and validated against {'Sleep Apnea', 'Insomnia'} to calculate calibration
+        priors.
+      sources:
+      - start_line: 71
+        end_line: 74
+        file: ''
+      - start_line: 134
+        end_line: 137
+        file: ''
+      uid: 156ca5f8-2995-424c-b5c9-dcd2b4945a6a
+  Sleep Duration:
+    code:
+    - suggestion: .isComplete('Sleep Duration')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 39ec2912-57c1-42fd-a435-99c3eec6bdd2
+      source_assumptions:
+      - ed3a0805-5da2-4360-827b-2d7b367eb495
+    - suggestion: .isPositive('Sleep Duration')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 92e892f6-65ec-4276-a5b8-ea848f81fda3
+      source_assumptions:
+      - fccd2885-ec92-4297-a08e-5c146fa2f6bc
+    assumptions:
+    - text: Sleep Duration is used unmasked in linear model prediction, duration score
+        calculation, and insomnia risk modeling. Missing values cascade into np.quantile
+        and corrupt triage thresholds.
+      sources:
+      - start_line: 55
+        end_line: 55
+        file: ''
+      - start_line: 85
+        end_line: 86
+        file: ''
+      - start_line: 127
+        end_line: 131
+        file: ''
+      - start_line: 140
+        end_line: 140
+        file: ''
+      uid: ed3a0805-5da2-4360-827b-2d7b367eb495
+    - text: Sleep Duration represents hours of sleep and must be strictly positive.
+      sources:
+      - start_line: 85
+        end_line: 86
+        file: ''
+      - start_line: 127
+        end_line: 127
+        file: ''
+      uid: fccd2885-ec92-4297-a08e-5c146fa2f6bc
+  Stress Level:
+    code:
+    - suggestion: .isComplete('Stress Level')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 741022bb-46d3-4513-a988-7c43bbf349a2
+      source_assumptions:
+      - 204b3ca5-b3e2-4c98-9db5-9a202b7ca6fc
+    - suggestion: .satisfies("`Stress Level` >= 0 AND `Stress Level` <= 10", "stress_level_range")
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 7cec98df-6c3d-4377-b0e9-5c57eff1cc55
+      source_assumptions:
+      - edb91193-0a2a-4b0a-9a52-7e6ef7d5e64e
+    assumptions:
+    - text: Stress Level is z-normalized and used in insomnia risk calculation without
+        missing value imputation. Missing values cascade into np.quantile.
+      sources:
+      - start_line: 93
+        end_line: 97
+        file: ''
+      - start_line: 129
+        end_line: 131
+        file: ''
+      - start_line: 140
+        end_line: 140
+        file: ''
+      uid: 204b3ca5-b3e2-4c98-9db5-9a202b7ca6fc
+    - text: Stress Level represents a rating bounded between 0 and 10.
+      sources:
+      - start_line: 92
+        end_line: 97
+        file: ''
+      - start_line: 129
+        end_line: 129
+        file: ''
+      uid: edb91193-0a2a-4b0a-9a52-7e6ef7d5e64e
+llm_usage:
+  task_lm:
+    cost: 0.03061
+    cost_spent: 0.03061
+    total_tokens: 15438
+    prompt_tokens: 7799
+    completion_tokens: 7639
+    cached_prompt_tokens: 5757
+    reasoning_tokens: 4413
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 45.251
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.03061
+    cost_spent: 0.03061
+    total_tokens: 15438
+    prompt_tokens: 7799
+    completion_tokens: 7639
+    cached_prompt_tokens: 5757
+    reasoning_tokens: 4413
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 45.251
+    api_seconds_saved: 0.0
+wall_clock_seconds: 51.443

@@ -1,0 +1,425 @@
+sifta_generation:
+  program: gepa_column
+  run_dir: optimization_runs/gepa_column_run_20261013_182542
+  run_settings:
+    metric_type: f1_score
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 45.3
+  instructions:
+    dataflow_inspector: 'List every line of the code that touches the target column:
+      reads it, writes it, filters on it, transforms it, merges it, or passes it along.
+      Use 1-based line numbers; put adjacent lines in one range.
+
+
+      Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...]
+      }'
+    assumption_generation: 'Code makes assumptions about its input data, often without
+      stating them. For example, fillna on a column means the column may contain nulls,
+      and an assert sets a bound the data must meet. From the code that uses the target
+      column and the task description, write these assumptions as statements about
+      the input data that a Deequ check can test.
+
+
+      Output only valid JSON (numbers without leading zeros): { "assumptions": [{
+      "text": str, "sources": [{ "start_line": int, "end_line": int }] }, ...] }'
+    ir_generation: "markdown\nYou are an expert data quality and data reliability\
+      \ engineer. Your task is to translate a list of assumptions about a dataset's\
+      \ target column into executable PyDeequ constraints, calibrated against the\
+      \ provided column metadata and downstream pipeline code.\n\n---\n\n### Input\
+      \ Format\nYou will be provided with:\n1. `target_column`: The name of the column\
+      \ being analyzed.\n2. `target_column_desc`: Baseline metadata for the column\
+      \ (completeness, approximateNumDistinctValues, dataType, typeCounts, histogram,\
+      \ etc.).\n3. `code_snippet`: The Python/Pandas script that processes the data.\n\
+      4. `downstream_task_description`: Context on downstream usage (if provided).\n\
+      5. `assumptions`: A list of numbered assumptions (e.g., \"Assumption 0: ...\"\
+      , \"Assumption 1: ...\") derived from the code and task.\n\n---\n\n### Output\
+      \ Format\nReturn a single valid JSON object with the following structure:\n\
+      ```json\n{\n  \"constraint_code\": [\n    {\n      \"suggestion\": \"<PyDeequ\
+      \ constraint method starting with a dot '.'>\",\n      \"level\": \"error\"\
+      \ | \"warning\",\n      \"linked assumptions\": [<indices of assumptions tested,\
+      \ e.g., 0, 1>]\n    }\n  ]\n}\n```\n\n---\n\n### Guidelines for Constraint Design\
+      \ & Level Assignment\n\n#### 1. Deciding Between \"error\" and \"warning\" (CRITICAL)\n\
+      The verification suite evaluates batches of data. **Only constraints marked\
+      \ with `level: \"error\"` will fail a batch and flag it as unsafe.** If you\
+      \ set constraints to `\"warning\"`, PyDeequ will treat them as informational\
+      \ only and will NOT catch unsafe batches, leading to zero error detection and\
+      \ severe recall penalties.\n\n- **Set `\"level\": \"error\"`** when:\n  - Violating\
+      \ the assumption would cause runtime crashes (e.g., `KeyError`, `ValueError`,\
+      \ `TypeError`, `ZeroDivisionError`, `IndexError`) in the script. Examples include\
+      \ missing required columns, unexpected `NaN` values fed into `int()` / `.astype(int)`,\
+      \ unhandled regex extract failures, or non-numeric types in numeric calculations.\n\
+      \  - The column is essential for the core pipeline logic or final output, and\
+      \ invalid values (e.g., out-of-range ratings, wrong types, missing primary keys)\
+      \ invalidate the output even if pandas operations partially coerce or handle\
+      \ nulls.\n  - The check is the primary guardrail detecting corrupted/unsafe\
+      \ batches for that column.\n  \n- **Set `\"level\": \"warning\"`** ONLY when:\n\
+      \  - The script explicitly has robust, intentional fallback handling (e.g.,\
+      \ `.fillna('NR')`, `.replace()`, optional display fields) AND the data anomaly\
+      \ does not compromise downstream processing.\n  - The check is a soft statistical\
+      \ or data quality sanity check (e.g., slight distribution shifts, optional metadata\
+      \ fields).\n\n*Do NOT default to `\"warning\"` merely because Pandas provides\
+      \ methods with `errors='coerce'` or `.fillna()` if the assumption represents\
+      \ a critical data contract.*\n\n#### 2. Calibrating with `target_column_desc`\
+      \ to Avoid False Alarms\n- **Completeness**: \n  - If `target_column_desc.completeness\
+      \ < 1.0`, do NOT use `.isComplete('col')` (this will trigger false alarms on\
+      \ safe data). Instead, use `.hasCompleteness('col', lambda x: x >= threshold)`\
+      \ where `threshold` is reasonably set slightly below the baseline completeness\
+      \ (e.g., baseline 0.898 -> threshold 0.80 or 0.85).\n  - If `completeness ==\
+      \ 1.0` and the code does not handle nulls, use `.isComplete('col')`.\n- **Data\
+      \ Types**:\n  - Always check `typeCounts` and `dataType`. For columns containing\
+      \ both integers and floats, use `ConstrainableDataTypes.Numeric` rather than\
+      \ `Integral` or `Fractional`.\n- **Categorical Sets**:\n  - For `isContainedIn`,\
+      \ verify against `approximateNumDistinctValues` and known categories. If unknown/missing\
+      \ categories exist in baseline data, add an assertion threshold (e.g., `lambda\
+      \ x: x >= 0.95`) or include default values (e.g., 'Not Rated', 'NR') to avoid\
+      \ false alarms.\n\n#### 3. Syntax and Function Rules\n- Constraints must start\
+      \ with `.` (e.g., `.isComplete('column')`).\n- In `satisfies(condition, name)`,\
+      \ write the condition as a SQL WHERE clause using backticks for column names\
+      \ (e.g., ``'`IMDB_Rating` >= 0 AND `IMDB_Rating` <= 10'``).\n- In `hasPattern`,\
+      \ always use Python raw string notation (e.g., `r\"^\\d+$\"`).\n- In `hasDataType`,\
+      \ use `ConstrainableDataTypes.<Type>` from `pydeequ.checks.ConstrainableDataTypes`\
+      \ (`Null`, `Fractional`, `Integral`, `Boolean`, `String`, `Numeric`).\n\n---\n\
+      \n### Available PyDeequ Functions\n\n#### Row-Level Functions:\n- `.isComplete(column:\
+      \ str)`\n- `.hasCompleteness(column: str, assertion: Callable[[float], bool])`\n\
+      - `.areComplete(columns: List[str])`\n- `.haveCompleteness(columns: List[str],\
+      \ assertion: Callable[[float], bool])`\n- `.areAnyComplete(columns: List[str])`\n\
+      - `.satisfies(columnCondition: str, constraintName: str, assertion: Optional[Callable[[float],\
+      \ bool]] = None)`\n- `.hasPattern(column: str, pattern: str, assertion: Optional[Callable[[float],\
+      \ bool]] = None, name: Optional[str] = None)`\n- `.containsCreditCardNumber(column:\
+      \ str, assertion: Optional[Callable[[float], bool]] = None)`\n- `.containsEmail(column:\
+      \ str, assertion: Optional[Callable[[float], bool]] = None)`\n- `.containsURL(column:\
+      \ str, assertion: Optional[Callable[[float], bool]] = None)`\n- `.containsSocialSecurityNumber(column:\
+      \ str, assertion: Optional[Callable[[float], bool]] = None)`\n- `.hasDataType(column:\
+      \ str, datatype: ConstrainableDataTypes, assertion: Optional[Callable[[float],\
+      \ bool]] = None)`\n- `.isNonNegative(column: str, assertion: Optional[Callable[[float],\
+      \ bool]] = None)`\n- `.isPositive(column: str, assertion: Optional[Callable[[float],\
+      \ bool]] = None)`\n- `.isLessThan(columnA: str, columnB: str, assertion: Optional[Callable[[float],\
+      \ bool]] = None)`\n- `.isLessThanOrEqualTo(columnA: str, columnB: str, assertion:\
+      \ Optional[Callable[[float], bool]] = None)`\n- `.isGreaterThan(columnA: str,\
+      \ columnB: str, assertion: Optional[Callable[[float], bool]] = None)`\n- `.isGreaterThanOrEqualTo(columnA:\
+      \ str, columnB: str, assertion: Optional[Callable[[float], bool]] = None)`\n\
+      - `.isContainedIn(column: str, allowed_values: List[str], assertion: Optional[Callable[[float],\
+      \ bool]] = None)`\n\n#### Aggregate-Level Functions:\n- `.hasSize(assertion:\
+      \ Callable[[int], bool])`\n- `.haveAnyCompleteness(columns: List[str], assertion:\
+      \ Callable[[float], bool])`\n- `.isUnique(column: str)`\n- `.hasUniqueness(columns:\
+      \ List[str], assertion: Callable[[float], bool])`\n- `.hasDistinctness(columns:\
+      \ List[str], assertion: Callable[[float], bool])`\n- `.hasUniqueValueRatio(columns:\
+      \ List[str], assertion: Callable[[float], bool])`\n- `.hasNumberOfDistinctValues(column:\
+      \ str, assertion: Callable[[int], bool], binningUdf=None, maxBins=1000)`\n-\
+      \ `.hasMutualInformation(columnA: str, columnB: str, assertion: Callable[[float],\
+      \ bool])`\n- `.hasApproxQuantile(column: str, quantile: float, assertion: Callable[[float],\
+      \ bool])`\n- `.hasMinLength(column: str, assertion: Callable[[int], bool])`\n\
+      - `.hasMaxLength(column: str, assertion: Callable[[int], bool])`\n- `.hasMin(column:\
+      \ str, assertion: Callable[[float], bool])`\n- `.hasMax(column: str, assertion:\
+      \ Callable[[float], bool])`\n- `.hasMean(column: str, assertion: Callable[[float],\
+      \ bool])`\n- `.hasStandardDeviation(column: str, assertion: Callable[[float],\
+      \ bool])`\n- `.hasCorrelation(columnA: str, columnB: str, assertion: Callable[[float],\
+      \ bool])`"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 2
+split_seed: 2
+columns_considered:
+- Certificate
+- Genre
+- IMDB_Rating
+- Meta_score
+- No_of_Votes
+- Poster_Link
+- Released_Year
+- Runtime
+- Series_Title
+columns_failed: []
+constraints:
+  Certificate:
+    code:
+    - suggestion: '.hasCompleteness(''Certificate'', lambda x: x >= 0.8)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3c5bf25b-8ed4-4a95-9033-c9405444e55c
+      source_assumptions:
+      - 5cc7674c-3961-4fd8-8e3e-ee1f9608ddba
+    assumptions:
+    - text: The column 'Certificate' must be present in the input dataset.
+      sources:
+      - start_line: 63
+        end_line: 79
+        file: ''
+      uid: 5cc7674c-3961-4fd8-8e3e-ee1f9608ddba
+  Genre:
+    code:
+    - suggestion: .isComplete('Genre')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d6967969-6161-49ba-a18c-5543b959e150
+      source_assumptions:
+      - c973df1a-299c-4550-9878-b8016c01d6cb
+    assumptions:
+    - text: The `Genre` column must be present in the input dataset.
+      sources:
+      - start_line: 71
+        end_line: 79
+        file: ''
+      uid: c973df1a-299c-4550-9878-b8016c01d6cb
+  IMDB_Rating:
+    code:
+    - suggestion: .isComplete('IMDB_Rating')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3db3d746-2e0b-4701-b26f-f9aa6f86684a
+      source_assumptions:
+      - a9844aa7-8341-4609-940c-182103e61223
+    - suggestion: .hasDataType('IMDB_Rating', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d7de1afb-b061-4bf7-8ca2-d35941f3bcdc
+      source_assumptions:
+      - a9844aa7-8341-4609-940c-182103e61223
+    - suggestion: '.hasMax(''IMDB_Rating'', lambda x: x >= 7.0)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4da33b40-01f7-469b-acd1-ce9edf96f218
+      source_assumptions:
+      - 82b0991f-da61-49e9-979a-a9b50f0d6191
+    - suggestion: .satisfies('`IMDB_Rating` >= 0.0 AND `IMDB_Rating` <= 10.0', 'imdb_rating_within_range')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 564c97b5-5719-4576-8587-ffca9cbbb90a
+      source_assumptions:
+      - 0cb33fb9-14f5-41ad-9f8d-68c8afefacdd
+    assumptions:
+    - text: IMDB_Rating must be convertible to numeric values without resulting entirely
+        in nulls.
+      sources:
+      - start_line: 39
+        end_line: 39
+        file: ''
+      - start_line: 43
+        end_line: 47
+        file: ''
+      uid: a9844aa7-8341-4609-940c-182103e61223
+    - text: IMDB_Rating contains values greater than or equal to 7.0.
+      sources:
+      - start_line: 53
+        end_line: 55
+        file: ''
+      uid: 82b0991f-da61-49e9-979a-a9b50f0d6191
+    - text: IMDB_Rating values should be within the range [0.0, 10.0].
+      sources:
+      - start_line: 47
+        end_line: 55
+        file: ''
+      uid: 0cb33fb9-14f5-41ad-9f8d-68c8afefacdd
+  Meta_score:
+    code:
+    - suggestion: '.hasCompleteness(''Meta_score'', lambda x: x >= 0.7)'
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 45f4bdce-ac11-44e7-9601-95c9a25eb030
+      source_assumptions:
+      - c73193b2-d08b-4873-b315-5cfb493002a7
+    - suggestion: .hasDataType('Meta_score', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f06c0055-34ed-4ba5-a0ec-cd9b7570448c
+      source_assumptions:
+      - 35f13f8f-5bf9-4799-85a9-dd242cd125b5
+    assumptions:
+    - text: The 'Meta_score' column can contain missing or null values.
+      sources:
+      - start_line: 49
+        end_line: 50
+        file: ''
+      uid: c73193b2-d08b-4873-b315-5cfb493002a7
+    - text: The 'Meta_score' column contains numeric data or strings that can be coerced
+        to numeric values.
+      sources:
+      - start_line: 49
+        end_line: 49
+        file: ''
+      uid: 35f13f8f-5bf9-4799-85a9-dd242cd125b5
+  No_of_Votes:
+    code:
+    - suggestion: '.hasCompleteness(''No_of_Votes'', lambda x: x >= 0.8)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 484aa4b5-d4c0-4535-ad24-968550f695be
+      source_assumptions:
+      - afd6d4a7-21b9-46e7-bd12-0404f180d0ec
+    - suggestion: .hasDataType('No_of_Votes', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 48ab7906-0105-4641-8bf9-e52dbde0b453
+      source_assumptions:
+      - 43a396c7-9f9c-4578-b558-665225b74251
+    - suggestion: .isNonNegative('No_of_Votes')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c04178c7-233c-4eac-8453-74db76d66bee
+      source_assumptions:
+      - b1e9b846-b74d-4d6b-a25b-1378808fab32
+    assumptions:
+    - text: The No_of_Votes column may contain missing or null values.
+      sources:
+      - start_line: 40
+        end_line: 40
+        file: ''
+      uid: afd6d4a7-21b9-46e7-bd12-0404f180d0ec
+    - text: The No_of_Votes column contains values that can be parsed as numeric or
+        integer data.
+      sources:
+      - start_line: 40
+        end_line: 40
+        file: ''
+      uid: 43a396c7-9f9c-4578-b558-665225b74251
+    - text: The No_of_Votes values are non-negative (greater than or equal to 0).
+      sources:
+      - start_line: 40
+        end_line: 40
+        file: ''
+      - start_line: 44
+        end_line: 47
+        file: ''
+      uid: b1e9b846-b74d-4d6b-a25b-1378808fab32
+  Poster_Link:
+    code:
+    - suggestion: .isComplete('Poster_Link')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 229f2e90-baa8-4bb1-9c70-b0180cbde6a6
+      source_assumptions:
+      - d7b0f994-ecc7-4325-9be0-aa08fb1ce5f5
+    assumptions:
+    - text: Poster_Link must not contain null values.
+      sources:
+      - start_line: 30
+        end_line: 33
+        file: ''
+      uid: d7b0f994-ecc7-4325-9be0-aa08fb1ce5f5
+  Released_Year:
+    code:
+    - suggestion: .isComplete('Released_Year')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8f1377ab-1c2d-4535-b10b-390fe9168a6b
+      source_assumptions:
+      - fc489b1f-d553-4762-895d-b588f161a272
+    assumptions:
+    - text: The `Released_Year` column must not contain null values, ensuring complete
+        and meaningful composite keys in `title_year_key`.
+      sources:
+      - start_line: 22
+        end_line: 23
+        file: ''
+      uid: fc489b1f-d553-4762-895d-b588f161a272
+  Runtime:
+    code:
+    - suggestion: .isComplete('Runtime')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 49a93fe7-be1f-444b-be69-59693490ad94
+      source_assumptions:
+      - d807a731-db25-462e-baa7-e6a926fe1149
+    - suggestion: .hasPattern('Runtime', r'^\s*\d+\s*min\s*$')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 64fd3940-fc05-4cc8-b796-6223eb7a3d68
+      source_assumptions:
+      - 46563bed-0c7e-45cb-ae2e-a957a9e51ccf
+    assumptions:
+    - text: The 'Runtime' column must not contain null values, because missing values
+        will fail the regex match and cause '.astype(int)' to raise a ValueError.
+      sources:
+      - start_line: 36
+        end_line: 37
+        file: ''
+      uid: d807a731-db25-462e-baa7-e6a926fe1149
+    - text: Every value in the 'Runtime' column must match the pattern '^\s*\d+\s*min\s*$'
+        so that regex extraction successfully captures digits for integer conversion
+        without producing NaN values.
+      sources:
+      - start_line: 36
+        end_line: 37
+        file: ''
+      uid: 46563bed-0c7e-45cb-ae2e-a957a9e51ccf
+  Series_Title:
+    code:
+    - suggestion: .isComplete('Series_Title')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 91239893-3f22-4073-8608-23ad54e60de5
+      source_assumptions:
+      - f0005b17-6278-4c96-954a-acc8ad2bac6b
+    - suggestion: '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda x:
+        x == 1.0)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 56588200-f6fc-4b05-8478-203f2b48b061
+      source_assumptions:
+      - 95aca856-4db7-439e-9f65-7408801c6691
+    assumptions:
+    - text: The `Series_Title` column should not contain null or missing values, as
+        it serves as a core identifier for movies and is used to construct unique
+        keys and catalog IDs.
+      sources:
+      - start_line: 21
+        end_line: 27
+        file: ''
+      uid: f0005b17-6278-4c96-954a-acc8ad2bac6b
+    - text: The combination of `Series_Title` and `Released_Year` is expected to be
+        unique for each record to generate stable and consistent catalog IDs.
+      sources:
+      - start_line: 23
+        end_line: 27
+        file: ''
+      uid: 95aca856-4db7-439e-9f65-7408801c6691
+llm_usage:
+  task_lm:
+    cost: 0.296426
+    cost_spent: 0.284493
+    total_tokens: 147050
+    prompt_tokens: 85004
+    completion_tokens: 62046
+    cached_prompt_tokens: 0
+    reasoning_tokens: 58794
+    requests: 30
+    cache_served_requests: 2
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 487.54
+    api_seconds_saved: 15.085
+  total:
+    cost: 0.296426
+    cost_spent: 0.284493
+    total_tokens: 147050
+    prompt_tokens: 85004
+    completion_tokens: 62046
+    cached_prompt_tokens: 0
+    reasoning_tokens: 58794
+    requests: 30
+    cache_served_requests: 2
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 487.54
+    api_seconds_saved: 15.085
+wall_clock_seconds: 100.92

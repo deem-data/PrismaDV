@@ -1,0 +1,1205 @@
+sifta_generation:
+  program: gepa_column
+  run_dir: optimization_runs/gepa_column_run_20261014_005516
+  run_settings:
+    metric_type: f1_score
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 33.43
+  instructions:
+    dataflow_inspector: 'List every line of the code that touches the target column:
+      reads it, writes it, filters on it, transforms it, merges it, or passes it along.
+      Use 1-based line numbers; put adjacent lines in one range.
+
+
+      Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...]
+      }'
+    assumption_generation: "markdown\nYou are an expert data quality, data validation,\
+      \ and data engineering assistant. Your task is to analyze Python data processing\
+      \ code, column profiling metadata, and pipeline context to deduce implicit data\
+      \ quality assumptions about a designated `target_column`. You will formalize\
+      \ these assumptions into precise specifications that directly map to Amazon\
+      \ Deequ verification checks.\n\n---\n\n### Input Data Structure\nYou will receive:\n\
+      1. `target_column`: Name of the column under inspection.\n2. `target_column_desc`:\
+      \ Profiling metadata for `target_column`, including:\n   - `completeness` (float,\
+      \ e.g., 1.0)\n   - `dataType` (`Integral`, `Fractional`, `String`, `Boolean`,\
+      \ etc.)\n   - `approximateNumDistinctValues` (int)\n   - `histogram` / value\
+      \ distributions (when applicable)\n3. `focused_code`: Line-numbered Python/pandas\
+      \ code. Relevant lines often have `-**->` markers.\n4. `downstream_task_description`:\
+      \ Context regarding downstream consumption.\n\n---\n\n### Core Deequ Verification\
+      \ Mapping Rules & Phrasing Conventions\nEach assumption must be framed using\
+      \ exact, standardized templates to enable automated mapping to Deequ constraints:\n\
+      \n1. **Completeness (`.isComplete`)**:\n   - **Target statement**: `\"<target_column>\
+      \ must be complete and contain no null or missing values.\"`\n   - **Trigger\
+      \ cues**:\n     - Column is used as a join key, `groupby` grouping column, `pivot_table`\
+      \ index/column, or `set_index` key.\n     - Column is cast via `pd.to_numeric(...,\
+      \ errors='coerce')` without subsequent fill/filter, or passed to mathematical\
+      \ transformations (e.g., `np.log`, division, square roots) where nulls propagate\
+      \ to corrupted outputs or NaN aggregations.\n     - Metadata shows `completeness:\
+      \ 1.0` and the column is essential for row-level transformations or exported\
+      \ reports.\n\n2. **Data Type (`.hasDataType`)**:\n   - **Numeric**:\n     -\
+      \ **Target statement**: `\"<target_column> must have a numeric (integral/fractional)\
+      \ data type.\"`\n     - **Deequ mapping**: `.hasDataType('<target_column>',\
+      \ ConstrainableDataTypes.Numeric)`\n     - **Trigger cues**: Mathematical expressions\
+      \ (`+`, `-`, `*`, `/`), math functions (`np.log`, `np.sqrt`, `np.minimum`),\
+      \ numeric comparisons (`<`, `<=`, `>`, `>=`), numeric binning (`pd.cut`), or\
+      \ explicit `pd.to_numeric` conversions. Metadata shows `dataType: Integral`\
+      \ or `dataType: Fractional`.\n   - **String**:\n     - **Target statement**:\
+      \ `\"<target_column> must have a string data type.\"`\n     - **Deequ mapping**:\
+      \ `.hasDataType('<target_column>', ConstrainableDataTypes.String)`\n     - **Trigger\
+      \ cues**: String methods, dictionary key lookups (`map(dict)`), categorical/text\
+      \ aggregations, or metadata `dataType: String`.\n   - **Boolean**:\n     - **Target\
+      \ statement**: `\"<target_column> must have a boolean data type.\"`\n     -\
+      \ **Deequ mapping**: `.hasDataType('<target_column>', ConstrainableDataTypes.Boolean)`\n\
+      \n3. **Positivity & Non-negativity (`.isPositive`, `.isNonNegative`)**:\n  \
+      \ - **Strictly Positive (`> 0`)**:\n     - **Target statement**: `\"<target_column>\
+      \ values must be strictly positive (greater than 0).\"`\n     - **Deequ mapping**:\
+      \ `.isPositive('<target_column>')`\n     - **Trigger cues**:\n       - Column\
+      \ is used inside logarithms (e.g., `np.log(df['target_column'])`, where `<=\
+      \ 0` produces `-inf` or `nan`).\n       - Column is a denominator in division\
+      \ or ratio calculations without a zero-fallback.\n       - Column is used in\
+      \ strict lower-bound conditions like `s > 0` or binning intervals with `bins\
+      \ = [0, ...]`, `include_lowest=False`.\n       - Metrics where zero is invalid\
+      \ in real-world domains (e.g., income, salary, active tenure when division follows).\n\
+      \   - **Non-negative (`>= 0`)**:\n     - **Target statement**: `\"<target_column>\
+      \ values must be non-negative (greater than or equal to 0).\"`\n     - **Deequ\
+      \ mapping**: `.isNonNegative('<target_column>')`\n     - **Trigger cues**:\n\
+      \       - Physical or business counts, percentages, tenure metrics, or amounts\
+      \ where zero is legitimate (e.g., `YearsSinceLastPromotion`, `PercentSalaryHike`,\
+      \ headcount, gap calculations like `TotalWorkingYears - YearsAtCompany` before\
+      \ `np.sqrt`).\n\n4. **Allowed Value Set / Membership (`.isContainedIn`)**:\n\
+      \   - **Target statement**: `\"<target_column> values must be contained in the\
+      \ allowed set: [<val1>, <val2>, ...].\"`\n   - **Deequ mapping**: `.isContainedIn('<target_column>',\
+      \ Array(<val1>, <val2>, ...))`\n   - **Trigger cues**:\n     - Lookups through\
+      \ explicit dictionaries (e.g., `dict.keys()`), `pd.CategoricalDtype(categories=[...])`,\
+      \ or discrete filter masks (`.isin([...])`).\n     - Look for categories present\
+      \ in `target_column_desc.histogram` when the code relies on closed-world categorical\
+      \ domain mappings.\n\n5. **Value Bounds / Range (`.hasMin`, `.hasMax`)**:\n\
+      \   - **Target statement**: `\"<target_column> values must be between <min>\
+      \ and <max>.\"` (or separate min/max statements).\n   - **Trigger cues**: Hard\
+      \ boundaries implied by domain rules (e.g., ratings 1 to 5, percentages 0 to\
+      \ 100, age bins starting at 18).\n\n6. **Uniqueness (`.isUnique`)**:\n   - **Target\
+      \ statement**: `\"<target_column> values must be unique across all rows.\"`\n\
+      \   - **Trigger cues**: Target column is an entity identifier (`EmpID`, `EmployeeNumber`),\
+      \ unique key used to index (`set_index(..., drop=False)`), or 1:1 merge key.\n\
+      \n---\n\n### Analysis & Derivation Strategy\n\n1. **Identify Multi-Layer Constraints**:\n\
+      \   - Do **not** stop after generating a single assumption. A column typically\
+      \ requires multiple complementary constraints. For example:\n     - A monetary\
+      \ feature like `MonthlyIncome` passed to `np.log` requires:\n       1. Completeness\
+      \ (`.isComplete`)\n       2. Data type (`.hasDataType` Numeric)\n       3. Strict\
+      \ positivity (`.isPositive`)\n     - An identifier column like `EmpID` requires:\n\
+      \       1. Completeness (`.isComplete`)\n       2. Uniqueness (`.isUnique`)\n\
+      \     - A rate or hike column like `PercentSalaryHike` requires:\n       1.\
+      \ Completeness (`.isComplete`)\n       2. Data type (`.hasDataType` Numeric)\n\
+      \       3. Non-negativity (`.isNonNegative`)\n\n2. **Audit Code Vulnerabilities**:\n\
+      \   - Check what would cause silent data corruption or runtime crashes:\n  \
+      \   - `pd.to_numeric(..., errors='coerce')`: Null values will silently be injected\
+      \ if non-numeric strings appear, contaminating subsequent averages/sums. This\
+      \ is an explicit cue for both `.hasDataType(Numeric)` and `.isComplete`.\n \
+      \    - `np.log(col)`: Negative values yield `NaN`, zero yields `-inf`. This\
+      \ strictly necessitates `.isPositive`.\n     - `df.pivot_table(..., columns=col)`\
+      \ or `df.groupby(col)`: Missing values are dropped or create unintended null\
+      \ buckets, requiring `.isComplete`.\n     - `dict.map(col)`: Unmapped values\
+      \ become `NaN`, leading to downstream aggregation corruption. This necessitates\
+      \ `.isContainedIn` and `.isComplete`.\n\n3. **Trace Exact Code Lines (`sources`)**:\n\
+      \   - Anchor each assumption to the specific line numbers that define, enforce,\
+      \ or expose the code to that assumption. If an assumption is established across\
+      \ multiple functions or lines (e.g., type casting at line 50 and mathematical\
+      \ operation at line 60), include all relevant disjoint or contiguous line ranges\
+      \ in the `sources` list.\n\n---\n\n### Output Format\nOutput **ONLY** a valid\
+      \ JSON object matching the schema below. Do not include markdown commentary\
+      \ or text outside the JSON code block.\n\n```json\n{\n  \"assumptions\": [\n\
+      \    {\n      \"text\": \"<Target phrasing matching Deequ check conventions>\"\
+      ,\n      \"sources\": [\n        {\n          \"start_line\": <int>,\n     \
+      \     \"end_line\": <int>\n        }\n      ]\n    }\n  ]\n}\n```"
+    ir_generation: "markdown\nYou are an expert data quality and data reliability\
+      \ engineer. Your task is to translate a list of assumptions about a dataset's\
+      \ target column into executable PyDeequ verification checks, accurately determining\
+      \ the severity level (`error` vs `warning`) for each check based on downstream\
+      \ code execution and data integrity risks.\n\n---\n\n### Task Description\n\n\
+      Given:\n1. `target_column`: The name of the column being validated.\n2. `target_column_desc`:\
+      \ Profiling metadata for the target column (data type, completeness, distinct\
+      \ values count, histograms, etc.).\n3. `code_snippet`: The downstream Python\
+      \ script (typically using pandas, numpy, etc.) that ingests and processes the\
+      \ dataset.\n4. `downstream_task_description`: Contextual information on how\
+      \ outputs of the script are used.\n5. `assumptions`: A numbered list (starting\
+      \ from index 0) of data assumptions regarding the target column, along with\
+      \ source line references in the script.\n\nGenerate a JSON object containing\
+      \ the translated PyDeequ constraints in the exact schema:\n```json\n{\n  \"\
+      constraint_code\": [\n    {\n      \"suggestion\": \"<PyDeequ method chain starting\
+      \ with '.'>\",\n      \"level\": \"error\" | \"warning\",\n      \"linked assumptions\"\
+      : [0, 1]\n    }\n  ]\n}\n```\n\n---\n\n### Critical Severity Calibration (`error`\
+      \ vs `warning`)\n\nAn automated evaluation framework tests your generated checks\
+      \ against both **safe batches** (clean data conforming to the baseline) and\
+      \ **unsafe batches** (data injected with corruptions that violate assumptions\
+      \ and break downstream processing).\n\n- **Only checks with `level = \"error\"\
+      ` can flag unsafe batches.** If an assumption violation is marked as `warning`,\
+      \ the validation suite does not intercept the unsafe batch, leading to 0 errors\
+      \ caught and severely penalizing the quality score (Macro F1).\n- Safe batches\
+      \ already conform to valid baseline data. Formulating valid integrity checks\
+      \ as `error` does **not** trigger false alarms on safe batches.\n- **Do not\
+      \ assume pandas silently handling `NaN` or invalid types makes a constraint\
+      \ safe to demote to `warning`.** Even if pandas aggregations (e.g., `.mean()`,\
+      \ `.sum()`, `groupby(..., dropna=False)`) technically execute without raising\
+      \ an unhandled exception, corrupting these values invalidates business logic,\
+      \ distorts downstream metrics, propagates unmapped `NaN` values, or triggers\
+      \ downstream crashes.\n\n---\n\n### Severity Level Guidelines\n\n#### Set `level\
+      \ = \"error\"` for Structural & Integrity Requirements:\nAssign `level = \"\
+      error\"` to any check that validates a foundational assumption required for\
+      \ reliable downstream execution:\n1. **Completeness (`.isComplete`)**:\n   -\
+      \ The column is used in grouping (`groupby`), pivoting (`pivot_table`), categorical\
+      \ conversions (`.astype(pd.CategoricalDtype)`), dictionary mappings (`.map()`),\
+      \ filtering, or arithmetic/relational operations without explicit imputation/fallback\
+      \ handling.\n   - The column is a primary entity attribute or key metric.\n\
+      2. **Data Types (`.hasDataType`)**:\n   - The column undergoes arithmetic operations,\
+      \ numeric comparisons (`<`, `<=`, `>`, `>=`), categorical typing, or string\
+      \ methods. Type mismatches (e.g., string injected into an integer tenure column)\
+      \ break operations or crash the script.\n3. **Categorical Domains (`.isContainedIn`)**:\n\
+      \   - The column has an enumerated set of allowed values used in dictionary\
+      \ lookups (`dict[val]` or `.map(dict)`), ordered/unordered categorical types\
+      \ (`pd.CategoricalDtype(categories=[...])`), or fixed cohort segmentation. Unexpected\
+      \ categories cause silent mapping drops to `NaN`, missing aggregation buckets,\
+      \ or downstream errors.\n4. **Domain Boundaries & Validity (`.isNonNegative`,\
+      \ `.isPositive`, `.satisfies`)**:\n   - The column represents physical, logical,\
+      \ or temporal quantities (e.g., age, tenure, years since event, salary, counts)\
+      \ used in conditional readiness flags, ratio denominators, or thresholds. Negative\
+      \ or invalid boundary values violate domain logic and produce invalid analytical\
+      \ states.\n\n#### Set `level = \"warning\"` ONLY for Soft Heuristics & Statistical\
+      \ Checks:\nReserve `level = \"warning\"` strictly for non-critical guidelines\
+      \ where a violation indicates slight data drift rather than corrupted or breaking\
+      \ data:\n1. **Statistical Distributions**:\n   - Checks on distribution parameters:\
+      \ `.hasMean()`, `.hasStandardDeviation()`, `.hasApproxQuantile()`, `.hasCorrelation()`.\n\
+      2. **Cardinality & Uniqueness Heuristics**:\n   - Approximate distinct value\
+      \ counts or uniqueness ratios (`.hasNumberOfDistinctValues()`, `.hasDistinctness()`,\
+      \ `.hasUniqueValueRatio()`) when the column is not a strict unique primary key.\n\
+      3. **Soft Thresholds**:\n   - Fractional completeness checks with relaxed tolerances\
+      \ (e.g., `.hasCompleteness(..., lambda x: x >= 0.90)`).\n   - String length\
+      \ boundary heuristics (`.hasMinLength()`, `.hasMaxLength()`) that are informative\
+      \ rather than strict schema requirements.\n\n---\n\n### Constraint Construction\
+      \ Rules\n\n1. **Syntax**:\n   - Each `suggestion` must be a valid PyDeequ method\
+      \ chain call starting with `.` (e.g., `.isComplete('col')`, `.hasDataType('col',\
+      \ ConstrainableDataTypes.Numeric)`).\n   - Use raw string literals (`r\"...\"\
+      `) for regular expressions in `.hasPattern()`.\n   - Match the data types in\
+      \ `.isContainedIn()`: if the column is string-based, provide list of strings;\
+      \ if numeric/integral, provide numbers matching the schema.\n2. **Data Types**:\n\
+      \   - In `.hasDataType()`, only use members of `ConstrainableDataTypes`:\n \
+      \    - `ConstrainableDataTypes.Null`\n     - `ConstrainableDataTypes.Fractional`\n\
+      \     - `ConstrainableDataTypes.Integral`\n     - `ConstrainableDataTypes.Boolean`\n\
+      \     - `ConstrainableDataTypes.String`\n     - `ConstrainableDataTypes.Numeric`\n\
+      \   - Map `Integral` to `ConstrainableDataTypes.Integral` (or `Numeric`), `Fractional`\
+      \ to `ConstrainableDataTypes.Fractional` (or `Numeric`), and `String` to `ConstrainableDataTypes.String`.\n\
+      3. **Linked Assumptions**:\n   - Each constraint must include a list of 0-based\
+      \ integer indices referencing the specific assumptions it validates.\n\n---\n\
+      \n### Available PyDeequ Functions Reference\n\n#### Row-Level Functions:\n-\
+      \ `.isComplete(column)`: Validates that a column contains no null values.\n\
+      - `.hasCompleteness(column, assertion)`: Validates completeness fraction (0.0\
+      \ to 1.0) matches lambda.\n- `.areComplete(columns)`: Validates that all specified\
+      \ columns contain no null values.\n- `.haveCompleteness(columns, assertion)`:\
+      \ Validates completeness fraction across a list of columns.\n- `.areAnyComplete(columns)`:\
+      \ Validates that at least one column in a list contains no null values.\n- `.satisfies(columnCondition,\
+      \ constraintName, assertion=None)`: Validates a SQL WHERE clause condition.\
+      \ Example: `.satisfies('`credits_completed` <= `credits_attempted`', 'completed_le_attempted')`\n\
+      - `.hasPattern(column, pattern, assertion=None, name=None)`: Validates regex\
+      \ match. Example: `.hasPattern('student_id', r'^id_\\d+$')`\n- `.containsCreditCardNumber(column,\
+      \ assertion=None)`\n- `.containsEmail(column, assertion=None)`\n- `.containsURL(column,\
+      \ assertion=None)`\n- `.containsSocialSecurityNumber(column, assertion=None)`\n\
+      - `.hasDataType(column, datatype, assertion=None)`: Validates data type using\
+      \ `ConstrainableDataTypes`.\n- `.isNonNegative(column, assertion=None)`: Validates\
+      \ column >= 0.\n- `.isPositive(column, assertion=None)`: Validates column >\
+      \ 0.\n- `.isLessThan(columnA, columnB, assertion=None)`: Validates columnA <\
+      \ columnB.\n- `.isLessThanOrEqualTo(columnA, columnB, assertion=None)`: Validates\
+      \ columnA <= columnB.\n- `.isGreaterThan(columnA, columnB, assertion=None)`:\
+      \ Validates columnA > columnB.\n- `.isGreaterThanOrEqualTo(columnA, columnB,\
+      \ assertion=None)`: Validates columnA >= columnB.\n- `.isContainedIn(column,\
+      \ allowed_values, assertion=None)`: Validates values belong to an allowed set.\
+      \ Example: `.isContainedIn('dept', ['HR', 'Sales'])`\n\n#### Aggregate-Level\
+      \ Functions:\n- `.hasSize(assertion)`: Validates total row count. Example: `.hasSize(lambda\
+      \ x: x >= 1000)`\n- `.isUnique(column)`: Validates that all values in a column\
+      \ are unique.\n- `.hasUniqueness(columns, assertion)`: Validates ratio of unique\
+      \ values.\n- `.hasDistinctness(columns, assertion)`: Validates ratio of distinct\
+      \ values to total rows.\n- `.hasUniqueValueRatio(columns, assertion)`: Validates\
+      \ ratio of unique values to distinct values.\n- `.hasNumberOfDistinctValues(column,\
+      \ assertion, binningUdf=None, maxBins=1000)`: Validates count of distinct values.\n\
+      - `.hasMutualInformation(columnA, columnB, assertion)`: Validates mutual information\
+      \ between two columns.\n- `.hasApproxQuantile(column, quantile, assertion)`:\
+      \ Validates quantile value. Example: `.hasApproxQuantile('gpa', 0.5, lambda\
+      \ x: x >= 3.0)`\n- `.hasMinLength(column, assertion)`: Validates minimum string\
+      \ length.\n- `.hasMaxLength(column, assertion)`: Validates maximum string length.\n\
+      - `.hasMin(column, assertion)`: Validates minimum numeric value.\n- `.hasMax(column,\
+      \ assertion)`: Validates maximum numeric value.\n- `.hasMean(column, assertion)`:\
+      \ Validates mean of a numeric column.\n- `.hasStandardDeviation(column, assertion)`:\
+      \ Validates standard deviation.\n- `.hasCorrelation(columnA, columnB, assertion)`:\
+      \ Validates Pearson correlation (-1.0 to 1.0).\n\n---\n\n### Output Format\n\
+      \nRespond strictly with valid JSON conforming to the following structure. Do\
+      \ not output any markdown text or explanations outside the JSON object:\n```json\n\
+      {\n  \"constraint_code\": [\n    {\n      \"suggestion\": \".isComplete('col')\"\
+      ,\n      \"level\": \"error\",\n      \"linked assumptions\": [0]\n    }\n \
+      \ ]\n}\n```"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+columns_considered:
+- Age
+- AgeGroup
+- Attrition
+- BusinessTravel
+- Department
+- EmpID
+- EmployeeCount
+- EmployeeNumber
+- JobLevel
+- JobRole
+- MonthlyIncome
+- OverTime
+- PercentSalaryHike
+- PerformanceRating
+- SalarySlab
+- StandardHours
+- TotalWorkingYears
+- YearsAtCompany
+- YearsInCurrentRole
+- YearsSinceLastPromotion
+- YearsWithCurrManager
+columns_failed: []
+constraints:
+  Age:
+    code:
+    - suggestion: .isComplete('Age')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4713a420-d7fa-41ba-bd07-afe81946eb41
+      source_assumptions:
+      - 0c08c9ea-4194-427b-add2-96c591539354
+    - suggestion: .hasDataType('Age', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3a5ac937-dab8-4c30-a274-2fa7ab7aae22
+      source_assumptions:
+      - 54f9db50-3e82-4852-99e5-83cbca26c12b
+    - suggestion: .isPositive('Age')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1c72b687-aa2c-45cf-9dde-6aab67642183
+      source_assumptions:
+      - 8b4a37c0-5715-4afa-a4c4-288adef9a86d
+    assumptions:
+    - text: Age must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 0c08c9ea-4194-427b-add2-96c591539354
+    - text: Age must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 54f9db50-3e82-4852-99e5-83cbca26c12b
+    - text: Age values must be strictly positive (greater than 0).
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 8b4a37c0-5715-4afa-a4c4-288adef9a86d
+  AgeGroup:
+    code:
+    - suggestion: .isComplete('AgeGroup')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4076af6c-e68f-4816-9058-51fb47a6396b
+      source_assumptions:
+      - f54d44b6-7e37-488e-b9fd-5973b798939c
+    - suggestion: .hasDataType('AgeGroup', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 670dc2a4-14e6-40d1-b67b-2afef19b9ccd
+      source_assumptions:
+      - d4a4d583-7338-44e8-b0dc-3db5ea065895
+    - suggestion: .isContainedIn('AgeGroup', ['18-25', '26-35', '36-45', '46-55',
+        '55+'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: ed047eed-5dec-4924-8ab0-f71ff3c97002
+      source_assumptions:
+      - daafc9a8-7781-42f5-9a82-ca221f551461
+    assumptions:
+    - text: AgeGroup must be complete and contain no null or missing values.
+      sources:
+      - start_line: 32
+        end_line: 33
+        file: ''
+      uid: f54d44b6-7e37-488e-b9fd-5973b798939c
+    - text: AgeGroup must have a string data type.
+      sources:
+      - start_line: 32
+        end_line: 33
+        file: ''
+      uid: d4a4d583-7338-44e8-b0dc-3db5ea065895
+    - text: 'AgeGroup values must be contained in the allowed set: [''18-25'', ''26-35'',
+        ''36-45'', ''46-55'', ''55+''].'
+      sources:
+      - start_line: 32
+        end_line: 33
+        file: ''
+      uid: daafc9a8-7781-42f5-9a82-ca221f551461
+  Attrition:
+    code:
+    - suggestion: .isComplete('Attrition')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3abafe8b-4cd0-4174-b27f-c3ee89ab747c
+      source_assumptions:
+      - d2a3116e-2725-4685-9067-956b05aea1b7
+    - suggestion: .hasDataType('Attrition', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0b102b04-8ace-45b5-b1aa-334f11a44b99
+      source_assumptions:
+      - 46e938f7-25d2-441a-baff-0232d432fe31
+    - suggestion: .isContainedIn('Attrition', ['No', 'Yes'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 78c7b90b-839f-4fcd-b7e7-e06bbb2eb4dc
+      source_assumptions:
+      - b8829d4a-bdf6-41ef-b4dd-12710ce78c08
+    assumptions:
+    - text: Attrition must be complete and contain no null or missing values.
+      sources:
+      - start_line: 67
+        end_line: 67
+        file: ''
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: d2a3116e-2725-4685-9067-956b05aea1b7
+    - text: Attrition must have a string data type.
+      sources:
+      - start_line: 67
+        end_line: 67
+        file: ''
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: 46e938f7-25d2-441a-baff-0232d432fe31
+    - text: 'Attrition values must be contained in the allowed set: [''No'', ''Yes''].'
+      sources:
+      - start_line: 67
+        end_line: 67
+        file: ''
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: b8829d4a-bdf6-41ef-b4dd-12710ce78c08
+  BusinessTravel:
+    code:
+    - suggestion: .isComplete('BusinessTravel')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 522eab99-66b7-41bd-81f8-209beb773747
+      source_assumptions:
+      - c71acdc7-455c-4160-afec-693ca1bad1dc
+    - suggestion: .hasDataType('BusinessTravel', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: aa501062-37ff-4efb-a401-b8db3bd4efb3
+      source_assumptions:
+      - da15901e-ed37-4ccd-9eb3-dfb0127ca4fa
+    - suggestion: .isContainedIn('BusinessTravel', ['Non-Travel', 'TravelRarely',
+        'Travel_Frequently', 'Travel_Rarely'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 71094144-36b7-4d4e-8273-13d2c3eccbdf
+      source_assumptions:
+      - f6f23968-e2ed-41ff-baab-56476c94a2c6
+    assumptions:
+    - text: BusinessTravel must be complete and contain no null or missing values.
+      sources:
+      - start_line: 30
+        end_line: 36
+        file: ''
+      uid: c71acdc7-455c-4160-afec-693ca1bad1dc
+    - text: BusinessTravel must have a string data type.
+      sources:
+      - start_line: 30
+        end_line: 36
+        file: ''
+      uid: da15901e-ed37-4ccd-9eb3-dfb0127ca4fa
+    - text: 'BusinessTravel values must be contained in the allowed set: [''Non-Travel'',
+        ''TravelRarely'', ''Travel_Frequently'', ''Travel_Rarely''].'
+      sources:
+      - start_line: 30
+        end_line: 36
+        file: ''
+      uid: f6f23968-e2ed-41ff-baab-56476c94a2c6
+  Department:
+    code:
+    - suggestion: .isComplete('Department')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3a62895b-d910-425d-ae74-217ff5981e34
+      source_assumptions:
+      - 85e26568-e11a-4cf8-90cf-9150677e55b9
+    - suggestion: .hasDataType('Department', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6a4787b3-5be2-4a93-9751-e9fb687e8d3c
+      source_assumptions:
+      - 27ec9f5f-94cc-4b96-bd8f-481e3b725d33
+    - suggestion: .isContainedIn('Department', ['Sales', 'Research & Development',
+        'Human Resources'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c68d7f9e-348e-430f-85f1-7094d6448e6d
+      source_assumptions:
+      - aa1d5bff-3e66-420f-ac5d-471ea8dc284d
+    assumptions:
+    - text: Department must be complete and contain no null or missing values.
+      sources:
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: 85e26568-e11a-4cf8-90cf-9150677e55b9
+    - text: Department must have a string data type.
+      sources:
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: 27ec9f5f-94cc-4b96-bd8f-481e3b725d33
+    - text: 'Department values must be contained in the allowed set: [''Sales'', ''Research
+        & Development'', ''Human Resources''].'
+      sources:
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: aa1d5bff-3e66-420f-ac5d-471ea8dc284d
+  EmpID:
+    code:
+    - suggestion: .isComplete('EmpID')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4f470b75-1359-4165-a876-7606c58d5549
+      source_assumptions:
+      - f5fc9c53-69d9-403b-afba-84f1a0d82b89
+    - suggestion: .hasDataType('EmpID', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 46222446-04b7-4b8b-917c-907e1831ebd2
+      source_assumptions:
+      - d0d5804e-bf56-4baf-82cb-f5e1331ea66f
+    - suggestion: .isUnique('EmpID')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 70e24712-fbfd-461a-90ad-e697cb383fea
+      source_assumptions:
+      - 37f714a4-d9bc-421c-af4e-1de8f0fecdc8
+    assumptions:
+    - text: EmpID must be complete and contain no null or missing values.
+      sources:
+      - start_line: 28
+        end_line: 29
+        file: ''
+      uid: f5fc9c53-69d9-403b-afba-84f1a0d82b89
+    - text: EmpID must have a string data type.
+      sources:
+      - start_line: 28
+        end_line: 29
+        file: ''
+      uid: d0d5804e-bf56-4baf-82cb-f5e1331ea66f
+    - text: EmpID values must be unique across all rows.
+      sources:
+      - start_line: 28
+        end_line: 29
+        file: ''
+      uid: 37f714a4-d9bc-421c-af4e-1de8f0fecdc8
+  EmployeeCount:
+    code:
+    - suggestion: .isComplete('EmployeeCount')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2b60675b-680c-4c2c-8d78-b04b16b9d96d
+      source_assumptions:
+      - c1185b45-246f-43d7-a1e8-8b7365cd25a1
+    - suggestion: .hasDataType('EmployeeCount', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: eafc247a-84f3-48fe-b1b1-9683592a7dc5
+      source_assumptions:
+      - e9c76ef2-20d3-4683-9d26-2b288543edd0
+    - suggestion: .isPositive('EmployeeCount')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3a02cd4d-e98c-432a-9e64-7038dd50ded9
+      source_assumptions:
+      - 593543d7-dc54-4681-9365-33bc7e90047c
+    assumptions:
+    - text: EmployeeCount must be complete and contain no null or missing values.
+      sources:
+      - start_line: 25
+        end_line: 27
+        file: ''
+      - start_line: 70
+        end_line: 75
+        file: ''
+      uid: c1185b45-246f-43d7-a1e8-8b7365cd25a1
+    - text: EmployeeCount must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 70
+        end_line: 72
+        file: ''
+      uid: e9c76ef2-20d3-4683-9d26-2b288543edd0
+    - text: EmployeeCount values must be strictly positive (greater than 0).
+      sources:
+      - start_line: 70
+        end_line: 75
+        file: ''
+      uid: 593543d7-dc54-4681-9365-33bc7e90047c
+  EmployeeNumber:
+    code:
+    - suggestion: .isComplete('EmployeeNumber')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0e43ff1b-b913-46b0-a187-7236cc1834f4
+      source_assumptions:
+      - 42575e8c-ccff-440f-a11c-a607d8b36156
+    - suggestion: .hasDataType('EmployeeNumber', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 67f8b68c-5d80-47bb-9610-43ad92081e6f
+      source_assumptions:
+      - decd29e4-9489-4833-ad66-3e0681111143
+    - suggestion: .isUnique('EmployeeNumber')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e23ce682-60bb-4c78-af8b-002f8f84ff24
+      source_assumptions:
+      - 9317226c-9d1d-42c2-ab6f-459032ea6a27
+    assumptions:
+    - text: EmployeeNumber must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 42575e8c-ccff-440f-a11c-a607d8b36156
+    - text: EmployeeNumber must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: decd29e4-9489-4833-ad66-3e0681111143
+    - text: EmployeeNumber values must be unique across all rows.
+      sources:
+      - start_line: 21
+        end_line: 21
+        file: ''
+      uid: 9317226c-9d1d-42c2-ab6f-459032ea6a27
+  JobLevel:
+    code:
+    - suggestion: .isComplete('JobLevel')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6d359d1e-368f-4d13-80ad-3763cb219cee
+      source_assumptions:
+      - b2bde9d7-8720-4ec6-89c7-a8920db2f1cd
+    - suggestion: .hasDataType('JobLevel', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e1c5f6e0-054a-4c01-bff3-248c533642c6
+      source_assumptions:
+      - 33c56324-33da-4168-ae35-68d1e32e3cdf
+    - suggestion: .isPositive('JobLevel')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f8db7b10-404a-4b66-9b13-d7a08f427976
+      source_assumptions:
+      - 2ac30cdb-c130-4be0-accf-d5afd39e67c1
+    assumptions:
+    - text: JobLevel must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 44
+        end_line: 44
+        file: ''
+      - start_line: 52
+        end_line: 62
+        file: ''
+      uid: b2bde9d7-8720-4ec6-89c7-a8920db2f1cd
+    - text: JobLevel must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 44
+        end_line: 44
+        file: ''
+      uid: 33c56324-33da-4168-ae35-68d1e32e3cdf
+    - text: JobLevel values must be strictly positive (greater than 0).
+      sources:
+      - start_line: 44
+        end_line: 44
+        file: ''
+      uid: 2ac30cdb-c130-4be0-accf-d5afd39e67c1
+  JobRole:
+    code:
+    - suggestion: .isComplete('JobRole')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 49159ccc-2249-4765-940b-eece408980b2
+      source_assumptions:
+      - b04fef27-12c5-4d75-bf0e-9fb0cca90c8a
+    - suggestion: .hasDataType('JobRole', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1dea1252-ccf4-4c4c-ba36-9143eff30694
+      source_assumptions:
+      - 4629fd46-9de8-414a-80db-1872ee819f26
+    assumptions:
+    - text: JobRole must be complete and contain no null or missing values.
+      sources:
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: b04fef27-12c5-4d75-bf0e-9fb0cca90c8a
+    - text: JobRole must have a string data type.
+      sources:
+      - start_line: 70
+        end_line: 74
+        file: ''
+      uid: 4629fd46-9de8-414a-80db-1872ee819f26
+  MonthlyIncome:
+    code:
+    - suggestion: .isComplete('MonthlyIncome')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9dfd0662-2d6f-42aa-b80a-89995f941a39
+      source_assumptions:
+      - ab8340bb-8e4c-4062-9405-8e48567504da
+    - suggestion: .hasDataType('MonthlyIncome', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: fc2f0a94-b6c7-4f87-8ea4-e2353b140eb7
+      source_assumptions:
+      - 486830f6-94f9-4178-a413-208f154faf89
+    - suggestion: .isPositive('MonthlyIncome')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 96a0876c-e002-483c-9267-659937d3556c
+      source_assumptions:
+      - 8350fbb0-8f69-4bae-bf64-85be4226eb21
+    assumptions:
+    - text: MonthlyIncome must be complete and contain no null or missing values.
+      sources:
+      - start_line: 25
+        end_line: 27
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: ab8340bb-8e4c-4062-9405-8e48567504da
+    - text: MonthlyIncome must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 25
+        end_line: 27
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 486830f6-94f9-4178-a413-208f154faf89
+    - text: MonthlyIncome values must be strictly positive (greater than 0).
+      sources:
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 8350fbb0-8f69-4bae-bf64-85be4226eb21
+  OverTime:
+    code:
+    - suggestion: .isComplete('OverTime')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f001b0a4-de27-4103-9d9f-ea960427ae61
+      source_assumptions:
+      - 3582c61e-fde3-4236-a777-8d64e6b4f193
+    - suggestion: .hasDataType('OverTime', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 81f759f6-112a-42d0-8e26-acdeacc6bdb0
+      source_assumptions:
+      - 5c28a19e-bebd-4f41-bbb0-2d996001ec3c
+    - suggestion: .isContainedIn('OverTime', ['No', 'Yes'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9f20629c-438b-4f64-b0d0-7f2a30a474b0
+      source_assumptions:
+      - 015fbac0-4b8a-4f22-90ca-2ea00b286b42
+    assumptions:
+    - text: OverTime must be complete and contain no null or missing values.
+      sources:
+      - start_line: 38
+        end_line: 39
+        file: ''
+      uid: 3582c61e-fde3-4236-a777-8d64e6b4f193
+    - text: OverTime must have a string data type.
+      sources:
+      - start_line: 38
+        end_line: 39
+        file: ''
+      uid: 5c28a19e-bebd-4f41-bbb0-2d996001ec3c
+    - text: 'OverTime values must be contained in the allowed set: [''No'', ''Yes''].'
+      sources:
+      - start_line: 38
+        end_line: 39
+        file: ''
+      uid: 015fbac0-4b8a-4f22-90ca-2ea00b286b42
+  PercentSalaryHike:
+    code:
+    - suggestion: .isComplete('PercentSalaryHike')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a6d52fd8-152e-44cd-ac38-973c99ff0192
+      source_assumptions:
+      - 5ebb23bf-1c19-4687-9d2d-e77b455ae5bd
+    - suggestion: .hasDataType('PercentSalaryHike', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 634f5427-a6a1-492b-a25d-e2daf17cc827
+      source_assumptions:
+      - 330e7242-eac0-4b0f-90af-2a3e22a2c0e7
+    - suggestion: .isNonNegative('PercentSalaryHike')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3abe3361-047d-4c75-aef4-73f9857d57c1
+      source_assumptions:
+      - 86c6c3f1-3c4e-470d-88c1-d984a628ab64
+    assumptions:
+    - text: PercentSalaryHike must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 5ebb23bf-1c19-4687-9d2d-e77b455ae5bd
+    - text: PercentSalaryHike must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 330e7242-eac0-4b0f-90af-2a3e22a2c0e7
+    - text: PercentSalaryHike values must be non-negative (greater than or equal to
+        0).
+      sources:
+      - start_line: 50
+        end_line: 50
+        file: ''
+      uid: 86c6c3f1-3c4e-470d-88c1-d984a628ab64
+  PerformanceRating:
+    code:
+    - suggestion: .isComplete('PerformanceRating')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: becdaeb8-9224-46b4-ac72-4cc47f41bf92
+      source_assumptions:
+      - 3dc8d55a-a422-46cb-aee5-d31c140ac4eb
+    - suggestion: .hasDataType('PerformanceRating', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 61237495-0b2d-4a24-ad2e-3410a44824f6
+      source_assumptions:
+      - 512f2a79-a5fd-47b1-b3fa-44f0fbd7b75a
+    assumptions:
+    - text: PerformanceRating must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 3dc8d55a-a422-46cb-aee5-d31c140ac4eb
+    - text: PerformanceRating must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 512f2a79-a5fd-47b1-b3fa-44f0fbd7b75a
+  SalarySlab:
+    code:
+    - suggestion: .isComplete('SalarySlab')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d668f572-21ff-416c-8531-9ee9b511b1e3
+      source_assumptions:
+      - 972ce6a6-f199-410a-8b06-43311e89ef06
+    - suggestion: .hasDataType('SalarySlab', ConstrainableDataTypes.String)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: b4d91426-a3a0-418d-abea-765dfa133c2d
+      source_assumptions:
+      - 89b18974-4fa6-43a5-995e-a50f6a679a95
+    - suggestion: .isContainedIn('SalarySlab', ['Upto 5k', '5k-10k', '10k-15k', '15k+'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6f44b48d-98d5-46c1-b4bb-0600abd2ee8c
+      source_assumptions:
+      - c978966e-8b34-445a-b41c-56d04af169c8
+    assumptions:
+    - text: SalarySlab must be complete and contain no null or missing values.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      - start_line: 52
+        end_line: 62
+        file: ''
+      uid: 972ce6a6-f199-410a-8b06-43311e89ef06
+    - text: SalarySlab must have a string data type.
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      uid: 89b18974-4fa6-43a5-995e-a50f6a679a95
+    - text: 'SalarySlab values must be contained in the allowed set: [''Upto 5k'',
+        ''5k-10k'', ''10k-15k'', ''15k+''].'
+      sources:
+      - start_line: 41
+        end_line: 42
+        file: ''
+      uid: c978966e-8b34-445a-b41c-56d04af169c8
+  StandardHours:
+    code:
+    - suggestion: .isComplete('StandardHours')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 45701b71-dba1-4eab-969d-f1c0dbb409fc
+      source_assumptions:
+      - 42a7e9f7-ceae-4f72-81fb-1e2705f76976
+    - suggestion: .hasDataType('StandardHours', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 5028798d-4c2a-4113-9631-abd5f92974c3
+      source_assumptions:
+      - 88558672-52a5-48b5-8d1c-6c5fb0d21f37
+    - suggestion: .isPositive('StandardHours')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e5fe7f91-61d4-4cf4-bb4a-1de75377d035
+      source_assumptions:
+      - 5481264e-e1d7-4775-a050-7c97efbc09f3
+    assumptions:
+    - text: StandardHours must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 48
+        end_line: 48
+        file: ''
+      uid: 42a7e9f7-ceae-4f72-81fb-1e2705f76976
+    - text: StandardHours must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 48
+        end_line: 48
+        file: ''
+      uid: 88558672-52a5-48b5-8d1c-6c5fb0d21f37
+    - text: StandardHours values must be strictly positive (greater than 0).
+      sources:
+      - start_line: 48
+        end_line: 48
+        file: ''
+      - start_line: 52
+        end_line: 62
+        file: ''
+      uid: 5481264e-e1d7-4775-a050-7c97efbc09f3
+  TotalWorkingYears:
+    code:
+    - suggestion: .isComplete('TotalWorkingYears')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 13b4a352-0556-4b13-b2cb-e1f818e82a19
+      source_assumptions:
+      - cc19adbd-17d7-45b9-a6d8-52e41e69b24d
+    - suggestion: .hasDataType('TotalWorkingYears', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8d6bc7b7-0992-41fa-983e-9cf3e333135c
+      source_assumptions:
+      - 4d107f8c-3a66-417e-9b4e-b4a16aec160d
+    - suggestion: .isNonNegative('TotalWorkingYears')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 0c32e009-dd32-4a00-9022-c082dfbaa310
+      source_assumptions:
+      - 1e531466-2573-4636-ac30-441660e77033
+    assumptions:
+    - text: TotalWorkingYears must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: cc19adbd-17d7-45b9-a6d8-52e41e69b24d
+    - text: TotalWorkingYears must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 4d107f8c-3a66-417e-9b4e-b4a16aec160d
+    - text: TotalWorkingYears values must be non-negative (greater than or equal to
+        0).
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 1e531466-2573-4636-ac30-441660e77033
+  YearsAtCompany:
+    code:
+    - suggestion: .hasDataType('YearsAtCompany', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 549da30a-20ed-4c7c-a3d8-8970702bc36b
+      source_assumptions:
+      - d083f624-16e6-4700-9bbb-e50b79924d48
+    - suggestion: .isComplete('YearsAtCompany')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c6857b61-47d6-4a0b-bace-c227829b71ba
+      source_assumptions:
+      - f9c9e66b-7348-4ce1-a7b2-3d05f9a0d9df
+    - suggestion: .isNonNegative('YearsAtCompany')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 89edff7f-f60b-4a75-a4d9-a9c6e206b9b6
+      source_assumptions:
+      - d3993398-4f02-4576-ba1e-b070de2339f8
+    assumptions:
+    - text: YearsAtCompany must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: d083f624-16e6-4700-9bbb-e50b79924d48
+    - text: YearsAtCompany must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: f9c9e66b-7348-4ce1-a7b2-3d05f9a0d9df
+    - text: YearsAtCompany values must be non-negative (greater than or equal to 0).
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: d3993398-4f02-4576-ba1e-b070de2339f8
+  YearsInCurrentRole:
+    code:
+    - suggestion: .isComplete('YearsInCurrentRole')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: b2671b98-6a6f-4c8b-a681-6ea2faacc23c
+      source_assumptions:
+      - a8fa4eca-1363-4403-9fd4-4bc1e6f7e907
+    - suggestion: .hasDataType('YearsInCurrentRole', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 3882f672-1590-4ca3-8fb9-ff1445a2ce2f
+      source_assumptions:
+      - d41ae557-f7d6-42ea-90b4-b0da7f8a32fd
+    - suggestion: .isNonNegative('YearsInCurrentRole')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 784921fd-4d9a-450e-b0b1-c7820ef35c13
+      source_assumptions:
+      - f37d9aad-a25b-44a6-8dd1-9c443acb63f9
+    assumptions:
+    - text: YearsInCurrentRole must be complete and contain no null or missing values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: a8fa4eca-1363-4403-9fd4-4bc1e6f7e907
+    - text: YearsInCurrentRole must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: d41ae557-f7d6-42ea-90b4-b0da7f8a32fd
+    - text: YearsInCurrentRole values must be non-negative (greater than or equal
+        to 0).
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: f37d9aad-a25b-44a6-8dd1-9c443acb63f9
+  YearsSinceLastPromotion:
+    code:
+    - suggestion: .isComplete('YearsSinceLastPromotion')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 07b3f056-5bce-41db-afb3-4c90fe880a65
+      source_assumptions:
+      - 0fbda8bb-f115-4a60-b33b-b92b5e4666ae
+    - suggestion: .hasDataType('YearsSinceLastPromotion', ConstrainableDataTypes.Integral)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 31ebb201-c246-49c4-b16c-e1f3209e7679
+      source_assumptions:
+      - 04d7abe4-abd4-4c2a-92fd-f253dfdfef83
+    - suggestion: .isNonNegative('YearsSinceLastPromotion')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 14864a6d-5b1a-4d00-b022-76698435b106
+      source_assumptions:
+      - 452e1533-d693-42c6-950b-a1c1522c68f2
+    assumptions:
+    - text: YearsSinceLastPromotion must be complete and contain no null or missing
+        values.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 0fbda8bb-f115-4a60-b33b-b92b5e4666ae
+    - text: YearsSinceLastPromotion must have a numeric (integral/fractional) data
+        type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 04d7abe4-abd4-4c2a-92fd-f253dfdfef83
+    - text: YearsSinceLastPromotion values must be non-negative (greater than or equal
+        to 0).
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      uid: 452e1533-d693-42c6-950b-a1c1522c68f2
+  YearsWithCurrManager:
+    code:
+    - suggestion: .hasDataType('YearsWithCurrManager', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 149aebec-9f3b-4eab-9571-28d1e606e588
+      source_assumptions:
+      - 0d95c737-c4f0-4bf9-a5a8-6c00490d5824
+    - suggestion: .isNonNegative('YearsWithCurrManager')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4c15bc44-6198-4bc2-b570-9f325a512294
+      source_assumptions:
+      - 2678e413-237a-4029-9aa9-75d5b4a8f184
+    assumptions:
+    - text: YearsWithCurrManager must have a numeric (integral/fractional) data type.
+      sources:
+      - start_line: 20
+        end_line: 27
+        file: ''
+      - start_line: 46
+        end_line: 46
+        file: ''
+      uid: 0d95c737-c4f0-4bf9-a5a8-6c00490d5824
+    - text: YearsWithCurrManager values must be non-negative (greater than or equal
+        to 0).
+      sources:
+      - start_line: 46
+        end_line: 46
+        file: ''
+      uid: 2678e413-237a-4029-9aa9-75d5b4a8f184
+llm_usage:
+  task_lm:
+    cost: 0.671764
+    cost_spent: 0.671764
+    total_tokens: 357387
+    prompt_tokens: 221877
+    completion_tokens: 135510
+    cached_prompt_tokens: 4157
+    reasoning_tokens: 126352
+    requests: 66
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 1078.472
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.671764
+    cost_spent: 0.671764
+    total_tokens: 357387
+    prompt_tokens: 221877
+    completion_tokens: 135510
+    cached_prompt_tokens: 4157
+    reasoning_tokens: 126352
+    requests: 66
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 1078.472
+    api_seconds_saved: 0.0
+wall_clock_seconds: 195.789

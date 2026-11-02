@@ -1,0 +1,2190 @@
+baseline_method: codex
+model_name: gpt-6-sol
+created_at: '20260927_232744'
+prompt_source: /sc-scratch/sc-scratch-ikim-prismadv/prismadv-revision/workflow_prismadv/eid_bench_baselines/prompts/codex.md
+prompt_template: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ\
+  \ constraints describing what\nthe program below assumes about its input data. If\
+  \ new data arrived that violated\none of your constraints, the program should be\
+  \ expected to misbehave -- crash,\nsilently produce a wrong number, or drop records\
+  \ it should have kept.\n\nYour output is a single file, `constraints.json`, in the\
+  \ current folder.\n\n# The program\n\nThis program consumes the dataset.\n\n```python\n\
+  {{CODE}}\n```\n\nThe same program is on disk at `{{CODE_PATH}}`, so you can run\
+  \ it against the\nstaged table, step through it, or search it, rather than working\
+  \ from the\nlisting alone.\n\n# The data\n\nThree rows sampled from the dataset\
+  \ the program consumes:\n\n{{DATA_SAMPLE}}\n\nThe full table is on disk at `{{TABLE_PATH}}`.\
+  \ You have complete access to it:\nload it with pandas, profile it, plot it, run\
+  \ whatever analysis helps. It is a\nthrowaway copy -- nothing you do to it has any\
+  \ effect outside this workspace.\n\n# Verifying your constraints\n\nYou can execute\
+  \ PyDeequ constraint code against the staged table and read back\nthe result of\
+  \ every check:\n\n```\n{{CHECKER_CMD}}\n```\n\nwhere the constraints file is plain\
+  \ text with one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"\
+  age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"closed\"\
+  ])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure prints\
+  \ the reason,\nincluding compilation errors. Use it as often as you like.\n\n# Output\
+  \ format\n\nWrite `constraints.json` in the current folder, containing the union\
+  \ of what you\nsettled on for every column:\n\n{\n    \"constraints\": [\n     \
+  \   {\n            \"column_name\": \"some_column\",\n            \"code_for_constraint\"\
+  : \".isComplete('some_column')\"\n        },\n        {\n            \"column_name\"\
+  : \"another_column\",\n            \"code_for_constraint\": \".isPositive('another_column')\"\
+  \n        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+  \ Each\nentry names the single column it constrains; for a constraint spanning several\n\
+  columns, name the one it is primarily about.\n"
+prompt_text: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+  \ describing what\nthe program below assumes about its input data. If new data arrived\
+  \ that violated\none of your constraints, the program should be expected to misbehave\
+  \ -- crash,\nsilently produce a wrong number, or drop records it should have kept.\n\
+  \nYour output is a single file, `constraints.json`, in the current folder.\n\n#\
+  \ The program\n\nThis program consumes the dataset.\n\n```python\nimport argparse\n\
+  import json\nimport os\n\nimport numpy as np\nimport pandas as pd\n\n\ndef logistic(x):\n\
+  \    return 1.0 / (1.0 + np.exp(-x))\n\n\nparser = argparse.ArgumentParser()\nparser.add_argument('--input',\
+  \ type=str, required=True)\nparser.add_argument('--output', type=str, required=True)\n\
+  args = parser.parse_args()\n\nos.makedirs(args.output, exist_ok=True)\n\n# Load\
+  \ data\ninput_csv = os.path.join(args.input, 'new_data.csv')\ndf = pd.read_csv(input_csv)\n\
+  \n# ---- Pay band audit setup ----\nallowed_slabs = [\"Upto 5k\", \"5k-10k\", \"\
+  10k-15k\", \"15k+\"]\n# Row-level consistency of MonthlyIncome vs SalarySlab boundaries\n\
+  mi = df[\"MonthlyIncome\"]\nsl = df[\"SalarySlab\"]\n\nin_upto_5k = (sl == \"Upto\
+  \ 5k\") & (mi > 0) & (mi <= 5000)\nin_5k_10k = (sl == \"5k-10k\") & (mi > 5000)\
+  \ & (mi <= 10000)\nin_10k_15k = (sl == \"10k-15k\") & (mi > 10000) & (mi <= 15000)\n\
+  in_15k_plus = (sl == \"15k+\") & (mi > 15000)\n\nrow_ok = in_upto_5k | in_5k_10k\
+  \ | in_10k_15k | in_15k_plus\n# Median monotonicity across slabs\ndf[\"SalarySlab\"\
+  ] = pd.Categorical(df[\"SalarySlab\"], categories=allowed_slabs, ordered=True)\n\
+  medians = df.groupby(\"SalarySlab\", observed=False)[\"MonthlyIncome\"].median()\n\
+  ordered_medians = np.array([medians.loc[s] for s in allowed_slabs])\n# Use median\
+  \ progression to derive a compensation progression index (used later in risk scoring)\n\
+  progression_logs = np.log(ordered_medians[1:] / ordered_medians[:-1])\nprogression_index\
+  \ = float(np.mean(progression_logs))\n\n# Department and role integrity used for\
+  \ downstream grouping\ndept_allowed = {\"Sales\", \"Research & Development\", \"\
+  Human Resources\"}\nsales_roles = {\"Sales Executive\", \"Sales Representative\"\
+  }\nrd_roles = {\"Research Scientist\", \"Laboratory Technician\", \"Research Director\"\
+  , \"Manufacturing Director\"}\nhr_roles = {\"Human Resources\"}\n# Department share\
+  \ check prior to department-weighted metrics\nrd_share = (df[\"Department\"] ==\
+  \ \"Research & Development\").mean()\n# ---- Age and AgeGroup integrity used for\
+  \ risk segmentation ----\nallowed_age_groups = {\"18-25\", \"26-35\", \"36-45\"\
+  , \"46-55\", \"55+\"}\nage = df[\"Age\"]\nageg = df[\"AgeGroup\"]\nmajor_groups\
+  \ = df[\"AgeGroup\"].isin([\"26-35\", \"36-45\"]).mean()\n# ---- Tenure logical\
+  \ constraints and coverage ----\n# Features derived from tenure that depend on constraints\
+  \ above\nexternal_experience = (df[\"TotalWorkingYears\"] - df[\"YearsAtCompany\"\
+  ]).clip(lower=0)\ncareer_start_age = df[\"Age\"] - df[\"TotalWorkingYears\"]\nmanager_ratio\
+  \ = np.where(df[\"YearsAtCompany\"] > 0, df[\"YearsWithCurrManager\"].fillna(0)\
+  \ / df[\"YearsAtCompany\"], 1.0)\nmanager_ratio = np.clip(manager_ratio, 0.0, 1.0)\n\
+  \n# Use square root; requires non-negative external_experience\next_exp_signal =\
+  \ np.sqrt(external_experience)\ncareer_start_signal = (career_start_age - 15).clip(lower=0)\n\
+  \n# ---- Performance and compensation change checks ----\n# Performance factors\
+  \ for risk scoring\nperf_adj = np.where(df[\"PerformanceRating\"] == 4, 0.95, 1.05)\n\
+  comp_change_norm = (25 - df[\"PercentSalaryHike\"]) / 14.0\ncomp_change_norm = np.clip(comp_change_norm,\
+  \ 0.0, 2.0)\n\n# ---- Attrition and OverTime distribution checks for calibration\
+  \ ----\nattr = (df[\"Attrition\"] == \"Yes\").astype(int)\not_yes = (df[\"OverTime\"\
+  ] == \"Yes\")\n\noverall_attr_rate = attr.mean()\not_yes_prop = ot_yes.mean()\n\
+  rate_yes = np.where(ot_yes.sum() > 0, attr[ot_yes].mean(), np.nan)\nrate_no = np.where((~ot_yes).sum()\
+  \ > 0, attr[~ot_yes].mean(), np.nan)\n# Calibrate OT multiplier from observed rates\n\
+  ot_multiplier = np.where(ot_yes, np.log((rate_yes + 1e-6) / (rate_no + 1e-6)), 0.0)\n\
+  \n# ---- Risk scoring ----\n# Satisfaction composite (normalized to 0..1 dissatisfaction)\n\
+  satisfaction_cols = [\"JobSatisfaction\", \"EnvironmentSatisfaction\", \"WorkLifeBalance\"\
+  ]\nsat_mean = df[satisfaction_cols].mean(axis=1)\ndissat = 1.0 - (sat_mean - 1.0)\
+  \ / 3.0\n\ndissat = np.clip(dissat, 0.0, 1.0)\n\n# Tenure-related signals\nno_promo_signal\
+  \ = np.where(df[\"YearsAtCompany\"] > 0,\n                           df[\"YearsSinceLastPromotion\"\
+  ] / df[\"YearsAtCompany\"],\n                           0.0)\nno_promo_signal =\
+  \ np.clip(no_promo_signal, 0.0, 1.0)\n\nrole_stagnation = 1.0 - manager_ratio\n\n\
+  # Age weighting\nage_weights = {\n    \"18-25\": 1.10,\n    \"26-35\": 1.00,\n \
+  \   \"36-45\": 0.95,\n    \"46-55\": 0.90,\n    \"55+\": 0.88,\n}\nage_w = df[\"\
+  AgeGroup\"].map(age_weights).astype(float)\n\n# Department influence (calibrated\
+  \ with R&D majority)\ndept_weight = df[\"Department\"].map({\n    \"Research & Development\"\
+  : 0.0 + np.log(max(rd_share, 1e-6) / 0.60),\n    \"Sales\": 0.05,\n    \"Human Resources\"\
+  : 0.02,\n}).astype(float)\n\n# Compensation progression signal leveraged from global\
+  \ bands\ncomp_progression_signal = progression_index\n\n# Assemble linear score\n\
+  intercept = np.log(overall_attr_rate / max(1e-6, 1 - overall_attr_rate))\nlinear_score\
+  \ = (\n        intercept\n        + 0.8 * dissat\n        + 0.6 * no_promo_signal\n\
+  \        + 0.4 * role_stagnation\n        + 0.3 * comp_change_norm\n        + 0.35\
+  \ * ot_multiplier\n        + 0.1 * (ext_exp_signal / (ext_exp_signal.max() if ext_exp_signal.max()\
+  \ > 0 else 1))\n        + 0.05 * (career_start_signal / (career_start_signal.max()\
+  \ if career_start_signal.max() > 0 else 1))\n        + 0.2 * dept_weight\n     \
+  \   - 0.1 * comp_progression_signal\n)\n\nrisk_score = logistic(linear_score) *\
+  \ age_w * perf_adj\nrisk_score = np.clip(risk_score, 0.0, 1.0)\n\n# Build attrition\
+  \ risk output\nrisk_out = df[[\"EmpID\", \"EmployeeNumber\", \"Department\", \"\
+  JobRole\", \"AgeGroup\", \"OverTime\", \"PerformanceRating\",\n               \"\
+  PercentSalaryHike\"]].copy()\nrisk_out[\"attrition_risk_score\"] = risk_score\n\
+  risk_out_path = os.path.join(args.output, \"attrition_risk_scores.csv\")\nrisk_out.to_csv(risk_out_path,\
+  \ index=False)\n\n# ---- Pay-band audit outputs ----\n# Group audit by Department\
+  \ and SalarySlab\nsalary_ok = row_ok\n\npay_audit = (\n    df.assign(salary_ok=salary_ok)\n\
+  \    .groupby([\"Department\", \"SalarySlab\"], observed=False)\n    .agg(\n   \
+  \     headcount=(\"EmpID\", \"count\"),\n        median_income=(\"MonthlyIncome\"\
+  , \"median\"),\n        min_income=(\"MonthlyIncome\", \"min\"),\n        max_income=(\"\
+  MonthlyIncome\", \"max\"),\n        pct_in_range=(\"salary_ok\", \"mean\"),\n  \
+  \  )\n    .reset_index()\n)\n\n# Add global band progression index so auditors can\
+  \ compare progression health\npay_audit[\"band_progression_index\"] = progression_index\n\
+  \npay_out_path = os.path.join(args.output, \"pay_band_audit.csv\")\npay_audit.to_csv(pay_out_path,\
+  \ index=False)\n\n# Also produce a small JSON summary for governance dashboards\n\
+  summary = {\n    \"overall_attrition_rate\": float(overall_attr_rate),\n    \"overtime_yes_proportion\"\
+  : float(ot_yes_prop),\n    \"overtime_attrition_ratio\": float(rate_yes / max(1e-9,\
+  \ rate_no)),\n    \"rd_share\": float(rd_share),\n    \"age_majority_share_26_45\"\
+  : float(major_groups),\n    \"band_progression_index\": float(progression_index),\n\
+  }\nwith open(os.path.join(args.output, \"kpi_summary.json\"), \"w\") as f:\n   \
+  \ json.dump(summary, f)\n\n```\n\nThe same program is on disk at `./code/general_task_1.py`,\
+  \ so you can run it against the\nstaged table, step through it, or search it, rather\
+  \ than working from the\nlisting alone.\n\n# The data\n\nThree rows sampled from\
+  \ the dataset the program consumes:\n\n[{'id': 45, 'EmpID': 'RM1461', 'Age': 29,\
+  \ 'AgeGroup': '26-35', 'Attrition': 'No', 'BusinessTravel': 'Travel_Rarely', 'DailyRate':\
+  \ 468, 'Department': 'Research & Development', 'DistanceFromHome': 28, 'Education':\
+  \ 4, 'EducationField': 'Medical', 'EmployeeCount': 1, 'EmployeeNumber': 2054, 'EnvironmentSatisfaction':\
+  \ 4, 'Gender': 'Female', 'HourlyRate': 73, 'JobInvolvement': 2, 'JobLevel': 1, 'JobRole':\
+  \ 'Research Scientist', 'JobSatisfaction': 1, 'MaritalStatus': 'Single', 'MonthlyIncome':\
+  \ 3785, 'SalarySlab': 'Upto 5k', 'MonthlyRate': 8489, 'NumCompaniesWorked': 1, 'Over18':\
+  \ 'Y', 'OverTime': 'No', 'PercentSalaryHike': 14, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+  \ 2, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 5, 'TrainingTimesLastYear':\
+  \ 3, 'WorkLifeBalance': 1, 'YearsAtCompany': 5, 'YearsSinceLastPromotion': 0, 'YearsWithCurrManager':\
+  \ 4.0, 'YearsInCurrentRole': 4}, {'id': 224, 'EmpID': 'RM876', 'Age': 44, 'AgeGroup':\
+  \ '36-45', 'Attrition': 'No', 'BusinessTravel': 'Travel_Rarely', 'DailyRate': 200,\
+  \ 'Department': 'Research & Development', 'DistanceFromHome': 29, 'Education': 4,\
+  \ 'EducationField': 'Other', 'EmployeeCount': 1, 'EmployeeNumber': 1225, 'EnvironmentSatisfaction':\
+  \ 4, 'Gender': 'Male', 'HourlyRate': 32, 'JobInvolvement': 3, 'JobLevel': 2, 'JobRole':\
+  \ 'Research Scientist', 'JobSatisfaction': 4, 'MaritalStatus': 'Single', 'MonthlyIncome':\
+  \ 4541, 'SalarySlab': 'Upto 5k', 'MonthlyRate': 7744, 'NumCompaniesWorked': 1, 'Over18':\
+  \ 'Y', 'OverTime': 'No', 'PercentSalaryHike': 25, 'PerformanceRating': 4, 'RelationshipSatisfaction':\
+  \ 2, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 20, 'TrainingTimesLastYear':\
+  \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 20, 'YearsSinceLastPromotion': 13,\
+  \ 'YearsWithCurrManager': 17.0, 'YearsInCurrentRole': 11}, {'id': 543, 'EmpID':\
+  \ 'RM1116', 'Age': 34, 'AgeGroup': '26-35', 'Attrition': 'No', 'BusinessTravel':\
+  \ 'Travel_Rarely', 'DailyRate': 479, 'Department': 'Research & Development', 'DistanceFromHome':\
+  \ 7, 'Education': 4, 'EducationField': 'Medical', 'EmployeeCount': 1, 'EmployeeNumber':\
+  \ 1577, 'EnvironmentSatisfaction': 1, 'Gender': 'Male', 'HourlyRate': 35, 'JobInvolvement':\
+  \ 3, 'JobLevel': 1, 'JobRole': 'Research Scientist', 'JobSatisfaction': 4, 'MaritalStatus':\
+  \ 'Single', 'MonthlyIncome': 2972, 'SalarySlab': 'Upto 5k', 'MonthlyRate': 22061,\
+  \ 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike':\
+  \ 13, 'PerformanceRating': 3, 'RelationshipSatisfaction': 3, 'StandardHours': 80,\
+  \ 'StockOptionLevel': 0, 'TotalWorkingYears': 1, 'TrainingTimesLastYear': 4, 'WorkLifeBalance':\
+  \ 1, 'YearsAtCompany': 1, 'YearsSinceLastPromotion': 0, 'YearsWithCurrManager':\
+  \ 0.0, 'YearsInCurrentRole': 0}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+  \ You have complete access to it:\nload it with pandas, profile it, plot it, run\
+  \ whatever analysis helps. It is a\nthrowaway copy -- nothing you do to it has any\
+  \ effect outside this workspace.\n\n# Verifying your constraints\n\nYou can execute\
+  \ PyDeequ constraint code against the staged table and read back\nthe result of\
+  \ every check:\n\n```\npython deequ_check.py --table observed_data --constraints\
+  \ <your_constraints_file>\n```\n\nwhere the constraints file is plain text with\
+  \ one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"age\")\n\
+  .isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"closed\"])\n\
+  ```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure prints the\
+  \ reason,\nincluding compilation errors. Use it as often as you like.\n\n# Output\
+  \ format\n\nWrite `constraints.json` in the current folder, containing the union\
+  \ of what you\nsettled on for every column:\n\n{\n    \"constraints\": [\n     \
+  \   {\n            \"column_name\": \"some_column\",\n            \"code_for_constraint\"\
+  : \".isComplete('some_column')\"\n        },\n        {\n            \"column_name\"\
+  : \"another_column\",\n            \"code_for_constraint\": \".isPositive('another_column')\"\
+  \n        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+  \ Each\nentry names the single column it constrains; for a constraint spanning several\n\
+  columns, name the one it is primarily about.\n\n# Workspace boundary\n\nYour workspace\
+  \ is the current folder, and for this task nothing else exists.\n\n- Read, list,\
+  \ search and write only inside this folder: `./data`, `./code`,\n  `deequ_check.py`,\
+  \ `task.txt`, and whatever you create here.\n- Do not touch anything outside it.\
+  \ That means no parent directory (`..`), no\n  other folder under /tmp, no home\
+  \ directory (`~`, $HOME), and no absolute path\n  anywhere else on the filesystem.\n\
+  - Do not search the wider filesystem -- no `rg`, `grep`, `find`, `ls` or\n  `python`\
+  \ over `/`, `/tmp`, `..`, `~` or any path outside this folder -- for\n  related\
+  \ data, prompts, examples, other runs, or previous answers. There is\n  nothing\
+  \ out there you are allowed to use, and a run that looks is discarded.\n- Running\
+  \ `python`, `deequ_check.py` and the tools on your PATH is fine; the\n  boundary\
+  \ is about what you read and write, not which interpreter runs.\n\nEverything you\
+  \ need is here. Work only from it.\n"
+reasoning_effort: medium
+isolation: audit
+staged_code_path: code/general_task_1.py
+replicate: 1
+token_accounting: &id002
+  input_tokens: 593944
+  cached_input_tokens: 562610
+  output_tokens: 6338
+  reasoning_tokens: 2033
+  total_tokens: null
+  turns: 1
+  cache_hit_rate: 0.9472
+  raw_turns:
+  - &id001
+    input_tokens: 593944
+    cached_input_tokens: 562610
+    cache_write_input_tokens: 29702
+    output_tokens: 6338
+    reasoning_output_tokens: 2033
+  agent_messages: 7
+  command_executions: 7
+  file_changes: 1
+  item_counts:
+    error: 1
+    agent_message: 7
+    command_execution: 7
+    reasoning: 4
+    file_change: 1
+    todo_list: 1
+  llm_calls: 24
+  llm_calls_source: rollout token_count events
+  llm_calls_estimate: 15
+  calls:
+  - input_tokens: 13211
+    cached_input_tokens: 0
+    cache_write_input_tokens: 13143
+    output_tokens: 125
+    reasoning_output_tokens: 16
+    total_tokens: 13336
+  - input_tokens: 16328
+    cached_input_tokens: 13143
+    cache_write_input_tokens: 3117
+    output_tokens: 84
+    reasoning_output_tokens: 24
+    total_tokens: 16412
+  - input_tokens: 16425
+    cached_input_tokens: 16260
+    cache_write_input_tokens: 97
+    output_tokens: 74
+    reasoning_output_tokens: 0
+    total_tokens: 16499
+  - input_tokens: 19459
+    cached_input_tokens: 16357
+    cache_write_input_tokens: 3034
+    output_tokens: 89
+    reasoning_output_tokens: 0
+    total_tokens: 19548
+  - input_tokens: 21230
+    cached_input_tokens: 19391
+    cache_write_input_tokens: 1771
+    output_tokens: 546
+    reasoning_output_tokens: 67
+    total_tokens: 21776
+  - input_tokens: 22828
+    cached_input_tokens: 21162
+    cache_write_input_tokens: 1598
+    output_tokens: 786
+    reasoning_output_tokens: 726
+    total_tokens: 23614
+  - input_tokens: 23627
+    cached_input_tokens: 22760
+    cache_write_input_tokens: 799
+    output_tokens: 497
+    reasoning_output_tokens: 204
+    total_tokens: 24124
+  - input_tokens: 24182
+    cached_input_tokens: 23559
+    cache_write_input_tokens: 555
+    output_tokens: 52
+    reasoning_output_tokens: 13
+    total_tokens: 24234
+  - input_tokens: 24283
+    cached_input_tokens: 24114
+    cache_write_input_tokens: 101
+    output_tokens: 49
+    reasoning_output_tokens: 10
+    total_tokens: 24332
+  - input_tokens: 24380
+    cached_input_tokens: 24215
+    cache_write_input_tokens: 97
+    output_tokens: 47
+    reasoning_output_tokens: 8
+    total_tokens: 24427
+  - input_tokens: 24536
+    cached_input_tokens: 24312
+    cache_write_input_tokens: 156
+    output_tokens: 45
+    reasoning_output_tokens: 6
+    total_tokens: 24581
+  - input_tokens: 24988
+    cached_input_tokens: 24468
+    cache_write_input_tokens: 452
+    output_tokens: 406
+    reasoning_output_tokens: 181
+    total_tokens: 25394
+  - input_tokens: 25453
+    cached_input_tokens: 24920
+    cache_write_input_tokens: 465
+    output_tokens: 445
+    reasoning_output_tokens: 406
+    total_tokens: 25898
+  - input_tokens: 25946
+    cached_input_tokens: 25385
+    cache_write_input_tokens: 493
+    output_tokens: 46
+    reasoning_output_tokens: 7
+    total_tokens: 25992
+  - input_tokens: 26099
+    cached_input_tokens: 25878
+    cache_write_input_tokens: 153
+    output_tokens: 37
+    reasoning_output_tokens: 0
+    total_tokens: 26136
+  - input_tokens: 26460
+    cached_input_tokens: 26031
+    cache_write_input_tokens: 361
+    output_tokens: 2402
+    reasoning_output_tokens: 176
+    total_tokens: 28862
+  - input_tokens: 28922
+    cached_input_tokens: 26392
+    cache_write_input_tokens: 2462
+    output_tokens: 68
+    reasoning_output_tokens: 8
+    total_tokens: 28990
+  - input_tokens: 29003
+    cached_input_tokens: 28854
+    cache_write_input_tokens: 81
+    output_tokens: 63
+    reasoning_output_tokens: 24
+    total_tokens: 29066
+  - input_tokens: 29115
+    cached_input_tokens: 28935
+    cache_write_input_tokens: 112
+    output_tokens: 58
+    reasoning_output_tokens: 19
+    total_tokens: 29173
+  - input_tokens: 29223
+    cached_input_tokens: 29047
+    cache_write_input_tokens: 108
+    output_tokens: 45
+    reasoning_output_tokens: 6
+    total_tokens: 29268
+  - input_tokens: 29318
+    cached_input_tokens: 29155
+    cache_write_input_tokens: 95
+    output_tokens: 86
+    reasoning_output_tokens: 22
+    total_tokens: 29404
+  - input_tokens: 29468
+    cached_input_tokens: 29250
+    cache_write_input_tokens: 150
+    output_tokens: 167
+    reasoning_output_tokens: 95
+    total_tokens: 29635
+  - input_tokens: 29690
+    cached_input_tokens: 29400
+    cache_write_input_tokens: 222
+    output_tokens: 67
+    reasoning_output_tokens: 8
+    total_tokens: 29757
+  - input_tokens: 29770
+    cached_input_tokens: 29622
+    cache_write_input_tokens: 80
+    output_tokens: 54
+    reasoning_output_tokens: 7
+    total_tokens: 29824
+  rollout_path: /home/hach13/.codex-eidbench/sessions/2026/09/27/rollout-2026-09-27T23-25-14-01a0e4c2-01f9-75d1-9ecc-e8810a1ad121.jsonl
+cost: &id003
+  usd: 0.23857
+  priced: true
+  rates:
+    model: gpt-6-sol
+    provider: openai
+    input: 2.0
+    cached_input: 0.2
+    output: 10.0
+    source: developers.openai.com/api/docs/models/gpt-6-sol
+    as_of: '2026-09-27'
+    note: ''
+  source: developers.openai.com/api/docs/models/gpt-6-sol (as of 2026-09-27)
+cost_without_cache_usd: 1.251268
+failed_attempts: []
+cost_all_attempts:
+  attempts: 1
+  usd: 0.23857
+  usd_without_cache: 1.251268
+  failed_usd: 0
+  failed_usd_without_cache: 0
+wall_clock_seconds: 146.396
+attempts: 1
+deequ_tool_health: &id004
+  invocations: 3
+  verdict_lines: 10
+  usable: true
+  failure_tail: null
+raw_constraints:
+- column_name: EmpID
+  code_for_constraint: .isComplete('EmpID')
+- column_name: EmpID
+  code_for_constraint: .isUnique('EmpID')
+- column_name: EmployeeNumber
+  code_for_constraint: .isComplete('EmployeeNumber')
+- column_name: EmployeeNumber
+  code_for_constraint: .isUnique('EmployeeNumber')
+- column_name: MonthlyIncome
+  code_for_constraint: .isComplete('MonthlyIncome')
+- column_name: SalarySlab
+  code_for_constraint: .isComplete('SalarySlab')
+- column_name: SalarySlab
+  code_for_constraint: .satisfies("(SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND
+    MonthlyIncome <= 5000) OR (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND
+    MonthlyIncome <= 10000) OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND
+    MonthlyIncome <= 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)", 'income_matches_salary_slab')
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''Upto 5k''", ''first_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''5k-10k''", ''second_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''10k-15k''", ''third_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''15k+''", ''fourth_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: Department
+  code_for_constraint: .isComplete('Department')
+- column_name: Department
+  code_for_constraint: .isContainedIn('Department', ['Sales', 'Research & Development',
+    'Human Resources'])
+- column_name: Department
+  code_for_constraint: '.satisfies("Department = ''Research & Development''", ''rd_majority'',
+    lambda fraction: fraction > 0.60)'
+- column_name: JobRole
+  code_for_constraint: .isComplete('JobRole')
+- column_name: JobRole
+  code_for_constraint: .satisfies("(Department = 'Sales' AND JobRole IN ('Sales Executive',
+    'Sales Representative', 'Manager')) OR (Department = 'Research & Development'
+    AND JobRole IN ('Research Scientist', 'Laboratory Technician', 'Research Director',
+    'Manufacturing Director', 'Healthcare Representative', 'Manager')) OR (Department
+    = 'Human Resources' AND JobRole IN ('Human Resources', 'Manager'))", 'role_matches_department')
+- column_name: Age
+  code_for_constraint: .isComplete('Age')
+- column_name: AgeGroup
+  code_for_constraint: .isComplete('AgeGroup')
+- column_name: AgeGroup
+  code_for_constraint: .satisfies("(AgeGroup = '18-25' AND Age BETWEEN 18 AND 25)
+    OR (AgeGroup = '26-35' AND Age BETWEEN 26 AND 35) OR (AgeGroup = '36-45' AND Age
+    BETWEEN 36 AND 45) OR (AgeGroup = '46-55' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+    = '55+' AND Age > 55)", 'age_matches_age_group')
+- column_name: AgeGroup
+  code_for_constraint: '.satisfies("AgeGroup IN (''26-35'', ''36-45'')", ''core_age_groups_majority'',
+    lambda fraction: fraction > 0.5)'
+- column_name: TotalWorkingYears
+  code_for_constraint: .isComplete('TotalWorkingYears')
+- column_name: TotalWorkingYears
+  code_for_constraint: .satisfies('TotalWorkingYears >= 0 AND TotalWorkingYears <=
+    Age - 15', 'feasible_career_start')
+- column_name: YearsAtCompany
+  code_for_constraint: .isComplete('YearsAtCompany')
+- column_name: YearsAtCompany
+  code_for_constraint: .satisfies('YearsAtCompany >= 0 AND YearsAtCompany <= TotalWorkingYears',
+    'company_tenure_within_career')
+- column_name: YearsWithCurrManager
+  code_for_constraint: .satisfies('YearsWithCurrManager IS NULL OR (YearsWithCurrManager
+    >= 0 AND YearsWithCurrManager <= YearsAtCompany)', 'manager_tenure_within_company')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .isComplete('YearsSinceLastPromotion')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .satisfies('YearsSinceLastPromotion >= 0 AND YearsSinceLastPromotion
+    <= YearsAtCompany', 'promotion_tenure_within_company')
+- column_name: PerformanceRating
+  code_for_constraint: .isComplete('PerformanceRating')
+- column_name: PerformanceRating
+  code_for_constraint: .satisfies('PerformanceRating IN (3, 4)', 'known_performance_ratings')
+- column_name: PercentSalaryHike
+  code_for_constraint: .isComplete('PercentSalaryHike')
+- column_name: PercentSalaryHike
+  code_for_constraint: .satisfies('PercentSalaryHike BETWEEN 11 AND 25', 'salary_hike_calibration_range')
+- column_name: Attrition
+  code_for_constraint: .isComplete('Attrition')
+- column_name: Attrition
+  code_for_constraint: .isContainedIn('Attrition', ['Yes', 'No'])
+- column_name: Attrition
+  code_for_constraint: '.satisfies("Attrition = ''Yes''", ''nondegenerate_attrition_rate'',
+    lambda fraction: 0 < fraction < 1)'
+- column_name: OverTime
+  code_for_constraint: .isComplete('OverTime')
+- column_name: OverTime
+  code_for_constraint: .isContainedIn('OverTime', ['Yes', 'No'])
+- column_name: OverTime
+  code_for_constraint: '.satisfies("OverTime = ''Yes''", ''both_overtime_groups_present'',
+    lambda fraction: 0 < fraction < 1)'
+- column_name: Attrition
+  code_for_constraint: '.satisfies("OverTime = ''Yes'' AND Attrition = ''Yes''", ''overtime_attrition_present'',
+    lambda fraction: fraction > 0)'
+- column_name: Attrition
+  code_for_constraint: '.satisfies("OverTime = ''No'' AND Attrition = ''Yes''", ''non_overtime_attrition_present'',
+    lambda fraction: fraction > 0)'
+- column_name: JobSatisfaction
+  code_for_constraint: .isComplete('JobSatisfaction')
+- column_name: JobSatisfaction
+  code_for_constraint: .satisfies('JobSatisfaction BETWEEN 1 AND 4', 'job_satisfaction_scale')
+- column_name: EnvironmentSatisfaction
+  code_for_constraint: .isComplete('EnvironmentSatisfaction')
+- column_name: EnvironmentSatisfaction
+  code_for_constraint: .satisfies('EnvironmentSatisfaction BETWEEN 1 AND 4', 'environment_satisfaction_scale')
+- column_name: WorkLifeBalance
+  code_for_constraint: .isComplete('WorkLifeBalance')
+- column_name: WorkLifeBalance
+  code_for_constraint: .satisfies('WorkLifeBalance BETWEEN 1 AND 4', 'work_life_balance_scale')
+constraint_normalization:
+  entries: 45
+  plain_strings: 0
+  column_inferred: 0
+  dropped_no_column: 0
+  dropped_no_code: 0
+raw_constraints_as_written:
+- column_name: EmpID
+  code_for_constraint: .isComplete('EmpID')
+- column_name: EmpID
+  code_for_constraint: .isUnique('EmpID')
+- column_name: EmployeeNumber
+  code_for_constraint: .isComplete('EmployeeNumber')
+- column_name: EmployeeNumber
+  code_for_constraint: .isUnique('EmployeeNumber')
+- column_name: MonthlyIncome
+  code_for_constraint: .isComplete('MonthlyIncome')
+- column_name: SalarySlab
+  code_for_constraint: .isComplete('SalarySlab')
+- column_name: SalarySlab
+  code_for_constraint: .satisfies("(SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND
+    MonthlyIncome <= 5000) OR (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND
+    MonthlyIncome <= 10000) OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND
+    MonthlyIncome <= 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)", 'income_matches_salary_slab')
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''Upto 5k''", ''first_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''5k-10k''", ''second_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''10k-15k''", ''third_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: SalarySlab
+  code_for_constraint: '.satisfies("SalarySlab = ''15k+''", ''fourth_band_present'',
+    lambda fraction: fraction > 0)'
+- column_name: Department
+  code_for_constraint: .isComplete('Department')
+- column_name: Department
+  code_for_constraint: .isContainedIn('Department', ['Sales', 'Research & Development',
+    'Human Resources'])
+- column_name: Department
+  code_for_constraint: '.satisfies("Department = ''Research & Development''", ''rd_majority'',
+    lambda fraction: fraction > 0.60)'
+- column_name: JobRole
+  code_for_constraint: .isComplete('JobRole')
+- column_name: JobRole
+  code_for_constraint: .satisfies("(Department = 'Sales' AND JobRole IN ('Sales Executive',
+    'Sales Representative', 'Manager')) OR (Department = 'Research & Development'
+    AND JobRole IN ('Research Scientist', 'Laboratory Technician', 'Research Director',
+    'Manufacturing Director', 'Healthcare Representative', 'Manager')) OR (Department
+    = 'Human Resources' AND JobRole IN ('Human Resources', 'Manager'))", 'role_matches_department')
+- column_name: Age
+  code_for_constraint: .isComplete('Age')
+- column_name: AgeGroup
+  code_for_constraint: .isComplete('AgeGroup')
+- column_name: AgeGroup
+  code_for_constraint: .satisfies("(AgeGroup = '18-25' AND Age BETWEEN 18 AND 25)
+    OR (AgeGroup = '26-35' AND Age BETWEEN 26 AND 35) OR (AgeGroup = '36-45' AND Age
+    BETWEEN 36 AND 45) OR (AgeGroup = '46-55' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+    = '55+' AND Age > 55)", 'age_matches_age_group')
+- column_name: AgeGroup
+  code_for_constraint: '.satisfies("AgeGroup IN (''26-35'', ''36-45'')", ''core_age_groups_majority'',
+    lambda fraction: fraction > 0.5)'
+- column_name: TotalWorkingYears
+  code_for_constraint: .isComplete('TotalWorkingYears')
+- column_name: TotalWorkingYears
+  code_for_constraint: .satisfies('TotalWorkingYears >= 0 AND TotalWorkingYears <=
+    Age - 15', 'feasible_career_start')
+- column_name: YearsAtCompany
+  code_for_constraint: .isComplete('YearsAtCompany')
+- column_name: YearsAtCompany
+  code_for_constraint: .satisfies('YearsAtCompany >= 0 AND YearsAtCompany <= TotalWorkingYears',
+    'company_tenure_within_career')
+- column_name: YearsWithCurrManager
+  code_for_constraint: .satisfies('YearsWithCurrManager IS NULL OR (YearsWithCurrManager
+    >= 0 AND YearsWithCurrManager <= YearsAtCompany)', 'manager_tenure_within_company')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .isComplete('YearsSinceLastPromotion')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .satisfies('YearsSinceLastPromotion >= 0 AND YearsSinceLastPromotion
+    <= YearsAtCompany', 'promotion_tenure_within_company')
+- column_name: PerformanceRating
+  code_for_constraint: .isComplete('PerformanceRating')
+- column_name: PerformanceRating
+  code_for_constraint: .satisfies('PerformanceRating IN (3, 4)', 'known_performance_ratings')
+- column_name: PercentSalaryHike
+  code_for_constraint: .isComplete('PercentSalaryHike')
+- column_name: PercentSalaryHike
+  code_for_constraint: .satisfies('PercentSalaryHike BETWEEN 11 AND 25', 'salary_hike_calibration_range')
+- column_name: Attrition
+  code_for_constraint: .isComplete('Attrition')
+- column_name: Attrition
+  code_for_constraint: .isContainedIn('Attrition', ['Yes', 'No'])
+- column_name: Attrition
+  code_for_constraint: '.satisfies("Attrition = ''Yes''", ''nondegenerate_attrition_rate'',
+    lambda fraction: 0 < fraction < 1)'
+- column_name: OverTime
+  code_for_constraint: .isComplete('OverTime')
+- column_name: OverTime
+  code_for_constraint: .isContainedIn('OverTime', ['Yes', 'No'])
+- column_name: OverTime
+  code_for_constraint: '.satisfies("OverTime = ''Yes''", ''both_overtime_groups_present'',
+    lambda fraction: 0 < fraction < 1)'
+- column_name: Attrition
+  code_for_constraint: '.satisfies("OverTime = ''Yes'' AND Attrition = ''Yes''", ''overtime_attrition_present'',
+    lambda fraction: fraction > 0)'
+- column_name: Attrition
+  code_for_constraint: '.satisfies("OverTime = ''No'' AND Attrition = ''Yes''", ''non_overtime_attrition_present'',
+    lambda fraction: fraction > 0)'
+- column_name: JobSatisfaction
+  code_for_constraint: .isComplete('JobSatisfaction')
+- column_name: JobSatisfaction
+  code_for_constraint: .satisfies('JobSatisfaction BETWEEN 1 AND 4', 'job_satisfaction_scale')
+- column_name: EnvironmentSatisfaction
+  code_for_constraint: .isComplete('EnvironmentSatisfaction')
+- column_name: EnvironmentSatisfaction
+  code_for_constraint: .satisfies('EnvironmentSatisfaction BETWEEN 1 AND 4', 'environment_satisfaction_scale')
+- column_name: WorkLifeBalance
+  code_for_constraint: .isComplete('WorkLifeBalance')
+- column_name: WorkLifeBalance
+  code_for_constraint: .satisfies('WorkLifeBalance BETWEEN 1 AND 4', 'work_life_balance_scale')
+trajectory:
+  codex_version: codex-cli 0.147.0
+  model: gpt-6-sol
+  reasoning_effort: medium
+  command:
+  - codex
+  - exec
+  - --model
+  - gpt-6-sol
+  - -C
+  - /tmp/codex_synth_g6os01nq
+  - --sandbox
+  - workspace-write
+  - --skip-git-repo-check
+  - --ignore-user-config
+  - --color
+  - never
+  - --json
+  - -c
+  - sandbox_workspace_write.network_access=true
+  - -c
+  - model_reasoning_effort="medium"
+  - Solve the task specified in task.txt.
+  usage: *id001
+  token_accounting: *id002
+  cost: *id003
+  cost_without_cache_usd: 1.251268
+  failed_attempts: []
+  wall_clock_seconds: 146.396
+  wall_clock_seconds_including_retries: 146.396
+  attempts: 1
+  timeout_seconds: 1800
+  returncode: 0
+  isolation: audit
+  workspace_escapes: []
+  outside_workspace: []
+  deequ_tool_health: *id004
+  events:
+  - type: thread.started
+    thread_id: 01a0e4c2-01f9-75d1-9ecc-e8810a1ad121
+  - type: item.completed
+    item:
+      id: item_0
+      type: error
+      message: Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata;
+        this can degrade performance and cause issues.
+  - type: turn.started
+  - type: item.completed
+    item:
+      id: item_1
+      type: agent_message
+      text: I’ll read `task.txt` and inspect the local files, then implement and check
+        the solution.
+  - type: item.started
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; rg --files -g 'AGENTS.md' -g 'task.txt' -g
+        'deequ_check.py' -g 'data/**' -g 'code/**' | head -80; cat task.txt"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; rg --files -g 'AGENTS.md' -g 'task.txt' -g
+        'deequ_check.py' -g 'data/**' -g 'code/**' | head -80; cat task.txt"
+      aggregated_output: "/tmp/codex_synth_g6os01nq\nAGENTS.md\ntask.txt\ndeequ_check.py\n\
+        code/general_task_1.py\ndata/tables/observed_data.csv\n# Task\n\nYou are writing\
+        \ a **data unit test**: a set of PyDeequ constraints describing what\nthe\
+        \ program below assumes about its input data. If new data arrived that violated\n\
+        one of your constraints, the program should be expected to misbehave -- crash,\n\
+        silently produce a wrong number, or drop records it should have kept.\n\n\
+        Your output is a single file, `constraints.json`, in the current folder.\n\
+        \n# The program\n\nThis program consumes the dataset.\n\n```python\nimport\
+        \ argparse\nimport json\nimport os\n\nimport numpy as np\nimport pandas as\
+        \ pd\n\n\ndef logistic(x):\n    return 1.0 / (1.0 + np.exp(-x))\n\n\nparser\
+        \ = argparse.ArgumentParser()\nparser.add_argument('--input', type=str, required=True)\n\
+        parser.add_argument('--output', type=str, required=True)\nargs = parser.parse_args()\n\
+        \nos.makedirs(args.output, exist_ok=True)\n\n# Load data\ninput_csv = os.path.join(args.input,\
+        \ 'new_data.csv')\ndf = pd.read_csv(input_csv)\n\n# ---- Pay band audit setup\
+        \ ----\nallowed_slabs = [\"Upto 5k\", \"5k-10k\", \"10k-15k\", \"15k+\"]\n\
+        # Row-level consistency of MonthlyIncome vs SalarySlab boundaries\nmi = df[\"\
+        MonthlyIncome\"]\nsl = df[\"SalarySlab\"]\n\nin_upto_5k = (sl == \"Upto 5k\"\
+        ) & (mi > 0) & (mi <= 5000)\nin_5k_10k = (sl == \"5k-10k\") & (mi > 5000)\
+        \ & (mi <= 10000)\nin_10k_15k = (sl == \"10k-15k\") & (mi > 10000) & (mi <=\
+        \ 15000)\nin_15k_plus = (sl == \"15k+\") & (mi > 15000)\n\nrow_ok = in_upto_5k\
+        \ | in_5k_10k | in_10k_15k | in_15k_plus\n# Median monotonicity across slabs\n\
+        df[\"SalarySlab\"] = pd.Categorical(df[\"SalarySlab\"], categories=allowed_slabs,\
+        \ ordered=True)\nmedians = df.groupby(\"SalarySlab\", observed=False)[\"MonthlyIncome\"\
+        ].median()\nordered_medians = np.array([medians.loc[s] for s in allowed_slabs])\n\
+        # Use median progression to derive a compensation progression index (used\
+        \ later in risk scoring)\nprogression_logs = np.log(ordered_medians[1:] /\
+        \ ordered_medians[:-1])\nprogression_index = float(np.mean(progression_logs))\n\
+        \n# Department and role integrity used for downstream grouping\ndept_allowed\
+        \ = {\"Sales\", \"Research & Development\", \"Human Resources\"}\nsales_roles\
+        \ = {\"Sales Executive\", \"Sales Representative\"}\nrd_roles = {\"Research\
+        \ Scientist\", \"Laboratory Technician\", \"Research Director\", \"Manufacturing\
+        \ Director\"}\nhr_roles = {\"Human Resources\"}\n# Department share check\
+        \ prior to department-weighted metrics\nrd_share = (df[\"Department\"] ==\
+        \ \"Research & Development\").mean()\n# ---- Age and AgeGroup integrity used\
+        \ for risk segmentation ----\nallowed_age_groups = {\"18-25\", \"26-35\",\
+        \ \"36-45\", \"46-55\", \"55+\"}\nage = df[\"Age\"]\nageg = df[\"AgeGroup\"\
+        ]\nmajor_groups = df[\"AgeGroup\"].isin([\"26-35\", \"36-45\"]).mean()\n#\
+        \ ---- Tenure logical constraints and coverage ----\n# Features derived from\
+        \ tenure that depend on constraints above\nexternal_experience = (df[\"TotalWorkingYears\"\
+        ] - df[\"YearsAtCompany\"]).clip(lower=0)\ncareer_start_age = df[\"Age\"]\
+        \ - df[\"TotalWorkingYears\"]\nmanager_ratio = np.where(df[\"YearsAtCompany\"\
+        ] > 0, df[\"YearsWithCurrManager\"].fillna(0) / df[\"YearsAtCompany\"], 1.0)\n\
+        manager_ratio = np.clip(manager_ratio, 0.0, 1.0)\n\n# Use square root; requires\
+        \ non-negative external_experience\next_exp_signal = np.sqrt(external_experience)\n\
+        career_start_signal = (career_start_age - 15).clip(lower=0)\n\n# ---- Performance\
+        \ and compensation change checks ----\n# Performance factors for risk scoring\n\
+        perf_adj = np.where(df[\"PerformanceRating\"] == 4, 0.95, 1.05)\ncomp_change_norm\
+        \ = (25 - df[\"PercentSalaryHike\"]) / 14.0\ncomp_change_norm = np.clip(comp_change_norm,\
+        \ 0.0, 2.0)\n\n# ---- Attrition and OverTime distribution checks for calibration\
+        \ ----\nattr = (df[\"Attrition\"] == \"Yes\").astype(int)\not_yes = (df[\"\
+        OverTime\"] == \"Yes\")\n\noverall_attr_rate = attr.mean()\not_yes_prop =\
+        \ ot_yes.mean()\nrate_yes = np.where(ot_yes.sum() > 0, attr[ot_yes].mean(),\
+        \ np.nan)\nrate_no = np.where((~ot_yes).sum() > 0, attr[~ot_yes].mean(), np.nan)\n\
+        # Calibrate OT multiplier from observed rates\not_multiplier = np.where(ot_yes,\
+        \ np.log((rate_yes + 1e-6) / (rate_no + 1e-6)), 0.0)\n\n# ---- Risk scoring\
+        \ ----\n# Satisfaction composite (normalized to 0..1 dissatisfaction)\nsatisfaction_cols\
+        \ = [\"JobSatisfaction\", \"EnvironmentSatisfaction\", \"WorkLifeBalance\"\
+        ]\nsat_mean = df[satisfaction_cols].mean(axis=1)\ndissat = 1.0 - (sat_mean\
+        \ - 1.0) / 3.0\n\ndissat = np.clip(dissat, 0.0, 1.0)\n\n# Tenure-related signals\n\
+        no_promo_signal = np.where(df[\"YearsAtCompany\"] > 0,\n                 \
+        \          df[\"YearsSinceLastPromotion\"] / df[\"YearsAtCompany\"],\n   \
+        \                        0.0)\nno_promo_signal = np.clip(no_promo_signal,\
+        \ 0.0, 1.0)\n\nrole_stagnation = 1.0 - manager_ratio\n\n# Age weighting\n\
+        age_weights = {\n    \"18-25\": 1.10,\n    \"26-35\": 1.00,\n    \"36-45\"\
+        : 0.95,\n    \"46-55\": 0.90,\n    \"55+\": 0.88,\n}\nage_w = df[\"AgeGroup\"\
+        ].map(age_weights).astype(float)\n\n# Department influence (calibrated with\
+        \ R&D majority)\ndept_weight = df[\"Department\"].map({\n    \"Research &\
+        \ Development\": 0.0 + np.log(max(rd_share, 1e-6) / 0.60),\n    \"Sales\"\
+        : 0.05,\n    \"Human Resources\": 0.02,\n}).astype(float)\n\n# Compensation\
+        \ progression signal leveraged from global bands\ncomp_progression_signal\
+        \ = progression_index\n\n# Assemble linear score\nintercept = np.log(overall_attr_rate\
+        \ / max(1e-6, 1 - overall_attr_rate))\nlinear_score = (\n        intercept\n\
+        \        + 0.8 * dissat\n        + 0.6 * no_promo_signal\n        + 0.4 *\
+        \ role_stagnation\n        + 0.3 * comp_change_norm\n        + 0.35 * ot_multiplier\n\
+        \        + 0.1 * (ext_exp_signal / (ext_exp_signal.max() if ext_exp_signal.max()\
+        \ > 0 else 1))\n        + 0.05 * (career_start_signal / (career_start_signal.max()\
+        \ if career_start_signal.max() > 0 else 1))\n        + 0.2 * dept_weight\n\
+        \        - 0.1 * comp_progression_signal\n)\n\nrisk_score = logistic(linear_score)\
+        \ * age_w * perf_adj\nrisk_score = np.clip(risk_score, 0.0, 1.0)\n\n# Build\
+        \ attrition risk output\nrisk_out = df[[\"EmpID\", \"EmployeeNumber\", \"\
+        Department\", \"JobRole\", \"AgeGroup\", \"OverTime\", \"PerformanceRating\"\
+        ,\n               \"PercentSalaryHike\"]].copy()\nrisk_out[\"attrition_risk_score\"\
+        ] = risk_score\nrisk_out_path = os.path.join(args.output, \"attrition_risk_scores.csv\"\
+        )\nrisk_out.to_csv(risk_out_path, index=False)\n\n# ---- Pay-band audit outputs\
+        \ ----\n# Group audit by Department and SalarySlab\nsalary_ok = row_ok\n\n\
+        pay_audit = (\n    df.assign(salary_ok=salary_ok)\n    .groupby([\"Department\"\
+        , \"SalarySlab\"], observed=False)\n    .agg(\n        headcount=(\"EmpID\"\
+        , \"count\"),\n        median_income=(\"MonthlyIncome\", \"median\"),\n  \
+        \      min_income=(\"MonthlyIncome\", \"min\"),\n        max_income=(\"MonthlyIncome\"\
+        , \"max\"),\n        pct_in_range=(\"salary_ok\", \"mean\"),\n    )\n    .reset_index()\n\
+        )\n\n# Add global band progression index so auditors can compare progression\
+        \ health\npay_audit[\"band_progression_index\"] = progression_index\n\npay_out_path\
+        \ = os.path.join(args.output, \"pay_band_audit.csv\")\npay_audit.to_csv(pay_out_path,\
+        \ index=False)\n\n# Also produce a small JSON summary for governance dashboards\n\
+        summary = {\n    \"overall_attrition_rate\": float(overall_attr_rate),\n \
+        \   \"overtime_yes_proportion\": float(ot_yes_prop),\n    \"overtime_attrition_ratio\"\
+        : float(rate_yes / max(1e-9, rate_no)),\n    \"rd_share\": float(rd_share),\n\
+        \    \"age_majority_share_26_45\": float(major_groups),\n    \"band_progression_index\"\
+        : float(progression_index),\n}\nwith open(os.path.join(args.output, \"kpi_summary.json\"\
+        ), \"w\") as f:\n    json.dump(summary, f)\n\n```\n\nThe same program is on\
+        \ disk at `./code/general_task_1.py`, so you can run it against the\nstaged\
+        \ table, step through it, or search it, rather than working from the\nlisting\
+        \ alone.\n\n# The data\n\nThree rows sampled from the dataset the program\
+        \ consumes:\n\n[{'id': 45, 'EmpID': 'RM1461', 'Age': 29, 'AgeGroup': '26-35',\
+        \ 'Attrition': 'No', 'BusinessTravel': 'Travel_Rarely', 'DailyRate': 468,\
+        \ 'Department': 'Research & Development', 'DistanceFromHome': 28, 'Education':\
+        \ 4, 'EducationField': 'Medical', 'EmployeeCount': 1, 'EmployeeNumber': 2054,\
+        \ 'EnvironmentSatisfaction': 4, 'Gender': 'Female', 'HourlyRate': 73, 'JobInvolvement':\
+        \ 2, 'JobLevel': 1, 'JobRole': 'Research Scientist', 'JobSatisfaction': 1,\
+        \ 'MaritalStatus': 'Single', 'MonthlyIncome': 3785, 'SalarySlab': 'Upto 5k',\
+        \ 'MonthlyRate': 8489, 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime':\
+        \ 'No', 'PercentSalaryHike': 14, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+        \ 2, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 5, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 1, 'YearsAtCompany': 5, 'YearsSinceLastPromotion':\
+        \ 0, 'YearsWithCurrManager': 4.0, 'YearsInCurrentRole': 4}, {'id': 224, 'EmpID':\
+        \ 'RM876', 'Age': 44, 'AgeGroup': '36-45', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 200, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 29, 'Education': 4, 'EducationField': 'Other', 'EmployeeCount':\
+        \ 1, 'EmployeeNumber': 1225, 'EnvironmentSatisfaction': 4, 'Gender': 'Male',\
+        \ 'HourlyRate': 32, 'JobInvolvement': 3, 'JobLevel': 2, 'JobRole': 'Research\
+        \ Scientist', 'JobSatisfaction': 4, 'MaritalStatus': 'Single', 'MonthlyIncome':\
+        \ 4541, 'SalarySlab': 'Upto 5k', 'MonthlyRate': 7744, 'NumCompaniesWorked':\
+        \ 1, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike': 25, 'PerformanceRating':\
+        \ 4, 'RelationshipSatisfaction': 2, 'StandardHours': 80, 'StockOptionLevel':\
+        \ 0, 'TotalWorkingYears': 20, 'TrainingTimesLastYear': 3, 'WorkLifeBalance':\
+        \ 3, 'YearsAtCompany': 20, 'YearsSinceLastPromotion': 13, 'YearsWithCurrManager':\
+        \ 17.0, 'YearsInCurrentRole': 11}, {'id': 543, 'EmpID': 'RM1116', 'Age': 34,\
+        \ 'AgeGroup': '26-35', 'Attrition': 'No', 'BusinessTravel': 'Travel_Rarely',\
+        \ 'DailyRate': 479, 'Department': 'Research & Development', 'DistanceFromHome':\
+        \ 7, 'Education': 4, 'EducationField': 'Medical', 'EmployeeCount': 1, 'EmployeeNumber':\
+        \ 1577, 'EnvironmentSatisfaction': 1, 'Gender': 'Male', 'HourlyRate': 35,\
+        \ 'JobInvolvement': 3, 'JobLevel': 1, 'JobRole': 'Research Scientist', 'JobSatisfaction':\
+        \ 4, 'MaritalStatus': 'Single', 'MonthlyIncome': 2972, 'SalarySlab': 'Upto\
+        \ 5k', 'MonthlyRate': 22061, 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime':\
+        \ 'No', 'PercentSalaryHike': 13, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+        \ 3, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 1, 'TrainingTimesLastYear':\
+        \ 4, 'WorkLifeBalance': 1, 'YearsAtCompany': 1, 'YearsSinceLastPromotion':\
+        \ 0, 'YearsWithCurrManager': 0.0, 'YearsInCurrentRole': 0}]\n\nThe full table\
+        \ is on disk at `./data/tables/observed_data.csv`. You have complete access\
+        \ to it:\nload it with pandas, profile it, plot it, run whatever analysis\
+        \ helps. It is a\nthrowaway copy -- nothing you do to it has any effect outside\
+        \ this workspace.\n\n# Verifying your constraints\n\nYou can execute PyDeequ\
+        \ constraint code against the staged table and read back\nthe result of every\
+        \ check:\n\n```\npython deequ_check.py --table observed_data --constraints\
+        \ <your_constraints_file>\n```\n\nwhere the constraints file is plain text\
+        \ with one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"\
+        age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"\
+        closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure\
+        \ prints the reason,\nincluding compilation errors. Use it as often as you\
+        \ like.\n\n# Output format\n\nWrite `constraints.json` in the current folder,\
+        \ containing the union of what you\nsettled on for every column:\n\n{\n  \
+        \  \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_3
+      type: reasoning
+      text: '**Managing cat portions**
+
+
+        I need to develop a full task program that allows me to manage cat portions
+        effectively. I definitely want to avoid printing huge records, as that wouldn’t
+        be practical. So, I’ll inspect the code carefully to ensure it works well.
+        Checking the schema is also important to make sure everything fits together
+        correctly. I’m curious about how to streamline this process for the best results!'
+  - type: item.started
+    item:
+      id: item_4
+      type: todo_list
+      items:
+      - text: Inspect program assumptions and observed data
+        completed: false
+      - text: Draft targeted PyDeequ constraints
+        completed: false
+      - text: Validate checks and write final JSON
+        completed: false
+  - type: item.started
+    item:
+      id: item_5
+      type: command_execution
+      command: /usr/bin/bash -lc "cat code/general_task_1.py; sed -n '1,220p' deequ_check.py;
+        sed -n '1,185p' task.txt"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_5
+      type: command_execution
+      command: /usr/bin/bash -lc "cat code/general_task_1.py; sed -n '1,220p' deequ_check.py;
+        sed -n '1,185p' task.txt"
+      aggregated_output: "import argparse\nimport json\nimport os\n\nimport numpy\
+        \ as np\nimport pandas as pd\n\n\ndef logistic(x):\n    return 1.0 / (1.0\
+        \ + np.exp(-x))\n\n\nparser = argparse.ArgumentParser()\nparser.add_argument('--input',\
+        \ type=str, required=True)\nparser.add_argument('--output', type=str, required=True)\n\
+        args = parser.parse_args()\n\nos.makedirs(args.output, exist_ok=True)\n\n\
+        # Load data\ninput_csv = os.path.join(args.input, 'new_data.csv')\ndf = pd.read_csv(input_csv)\n\
+        \n# ---- Pay band audit setup ----\nallowed_slabs = [\"Upto 5k\", \"5k-10k\"\
+        , \"10k-15k\", \"15k+\"]\n# Row-level consistency of MonthlyIncome vs SalarySlab\
+        \ boundaries\nmi = df[\"MonthlyIncome\"]\nsl = df[\"SalarySlab\"]\n\nin_upto_5k\
+        \ = (sl == \"Upto 5k\") & (mi > 0) & (mi <= 5000)\nin_5k_10k = (sl == \"5k-10k\"\
+        ) & (mi > 5000) & (mi <= 10000)\nin_10k_15k = (sl == \"10k-15k\") & (mi >\
+        \ 10000) & (mi <= 15000)\nin_15k_plus = (sl == \"15k+\") & (mi > 15000)\n\n\
+        row_ok = in_upto_5k | in_5k_10k | in_10k_15k | in_15k_plus\n# Median monotonicity\
+        \ across slabs\ndf[\"SalarySlab\"] = pd.Categorical(df[\"SalarySlab\"], categories=allowed_slabs,\
+        \ ordered=True)\nmedians = df.groupby(\"SalarySlab\", observed=False)[\"MonthlyIncome\"\
+        ].median()\nordered_medians = np.array([medians.loc[s] for s in allowed_slabs])\n\
+        # Use median progression to derive a compensation progression index (used\
+        \ later in risk scoring)\nprogression_logs = np.log(ordered_medians[1:] /\
+        \ ordered_medians[:-1])\nprogression_index = float(np.mean(progression_logs))\n\
+        \n# Department and role integrity used for downstream grouping\ndept_allowed\
+        \ = {\"Sales\", \"Research & Development\", \"Human Resources\"}\nsales_roles\
+        \ = {\"Sales Executive\", \"Sales Representative\"}\nrd_roles = {\"Research\
+        \ Scientist\", \"Laboratory Technician\", \"Research Director\", \"Manufacturing\
+        \ Director\"}\nhr_roles = {\"Human Resources\"}\n# Department share check\
+        \ prior to department-weighted metrics\nrd_share = (df[\"Department\"] ==\
+        \ \"Research & Development\").mean()\n# ---- Age and AgeGroup integrity used\
+        \ for risk segmentation ----\nallowed_age_groups = {\"18-25\", \"26-35\",\
+        \ \"36-45\", \"46-55\", \"55+\"}\nage = df[\"Age\"]\nageg = df[\"AgeGroup\"\
+        ]\nmajor_groups = df[\"AgeGroup\"].isin([\"26-35\", \"36-45\"]).mean()\n#\
+        \ ---- Tenure logical constraints and coverage ----\n# Features derived from\
+        \ tenure that depend on constraints above\nexternal_experience = (df[\"TotalWorkingYears\"\
+        ] - df[\"YearsAtCompany\"]).clip(lower=0)\ncareer_start_age = df[\"Age\"]\
+        \ - df[\"TotalWorkingYears\"]\nmanager_ratio = np.where(df[\"YearsAtCompany\"\
+        ] > 0, df[\"YearsWithCurrManager\"].fillna(0) / df[\"YearsAtCompany\"], 1.0)\n\
+        manager_ratio = np.clip(manager_ratio, 0.0, 1.0)\n\n# Use square root; requires\
+        \ non-negative external_experience\next_exp_signal = np.sqrt(external_experience)\n\
+        career_start_signal = (career_start_age - 15).clip(lower=0)\n\n# ---- Performance\
+        \ and compensation change checks ----\n# Performance factors for risk scoring\n\
+        perf_adj = np.where(df[\"PerformanceRating\"] == 4, 0.95, 1.05)\ncomp_change_norm\
+        \ = (25 - df[\"PercentSalaryHike\"]) / 14.0\ncomp_change_norm = np.clip(comp_change_norm,\
+        \ 0.0, 2.0)\n\n# ---- Attrition and OverTime distribution checks for calibration\
+        \ ----\nattr = (df[\"Attrition\"] == \"Yes\").astype(int)\not_yes = (df[\"\
+        OverTime\"] == \"Yes\")\n\noverall_attr_rate = attr.mean()\not_yes_prop =\
+        \ ot_yes.mean()\nrate_yes = np.where(ot_yes.sum() > 0, attr[ot_yes].mean(),\
+        \ np.nan)\nrate_no = np.where((~ot_yes).sum() > 0, attr[~ot_yes].mean(), np.nan)\n\
+        # Calibrate OT multiplier from observed rates\not_multiplier = np.where(ot_yes,\
+        \ np.log((rate_yes + 1e-6) / (rate_no + 1e-6)), 0.0)\n\n# ---- Risk scoring\
+        \ ----\n# Satisfaction composite (normalized to 0..1 dissatisfaction)\nsatisfaction_cols\
+        \ = [\"JobSatisfaction\", \"EnvironmentSatisfaction\", \"WorkLifeBalance\"\
+        ]\nsat_mean = df[satisfaction_cols].mean(axis=1)\ndissat = 1.0 - (sat_mean\
+        \ - 1.0) / 3.0\n\ndissat = np.clip(dissat, 0.0, 1.0)\n\n# Tenure-related signals\n\
+        no_promo_signal = np.where(df[\"YearsAtCompany\"] > 0,\n                 \
+        \          df[\"YearsSinceLastPromotion\"] / df[\"YearsAtCompany\"],\n   \
+        \                        0.0)\nno_promo_signal = np.clip(no_promo_signal,\
+        \ 0.0, 1.0)\n\nrole_stagnation = 1.0 - manager_ratio\n\n# Age weighting\n\
+        age_weights = {\n    \"18-25\": 1.10,\n    \"26-35\": 1.00,\n    \"36-45\"\
+        : 0.95,\n    \"46-55\": 0.90,\n    \"55+\": 0.88,\n}\nage_w = df[\"AgeGroup\"\
+        ].map(age_weights).astype(float)\n\n# Department influence (calibrated with\
+        \ R&D majority)\ndept_weight = df[\"Department\"].map({\n    \"Research &\
+        \ Development\": 0.0 + np.log(max(rd_share, 1e-6) / 0.60),\n    \"Sales\"\
+        : 0.05,\n    \"Human Resources\": 0.02,\n}).astype(float)\n\n# Compensation\
+        \ progression signal leveraged from global bands\ncomp_progression_signal\
+        \ = progression_index\n\n# Assemble linear score\nintercept = np.log(overall_attr_rate\
+        \ / max(1e-6, 1 - overall_attr_rate))\nlinear_score = (\n        intercept\n\
+        \        + 0.8 * dissat\n        + 0.6 * no_promo_signal\n        + 0.4 *\
+        \ role_stagnation\n        + 0.3 * comp_change_norm\n        + 0.35 * ot_multiplier\n\
+        \        + 0.1 * (ext_exp_signal / (ext_exp_signal.max() if ext_exp_signal.max()\
+        \ > 0 else 1))\n        + 0.05 * (career_start_signal / (career_start_signal.max()\
+        \ if career_start_signal.max() > 0 else 1))\n        + 0.2 * dept_weight\n\
+        \        - 0.1 * comp_progression_signal\n)\n\nrisk_score = logistic(linear_score)\
+        \ * age_w * perf_adj\nrisk_score = np.clip(risk_score, 0.0, 1.0)\n\n# Build\
+        \ attrition risk output\nrisk_out = df[[\"EmpID\", \"EmployeeNumber\", \"\
+        Department\", \"JobRole\", \"AgeGroup\", \"OverTime\", \"PerformanceRating\"\
+        ,\n               \"PercentSalaryHike\"]].copy()\nrisk_out[\"attrition_risk_score\"\
+        ] = risk_score\nrisk_out_path = os.path.join(args.output, \"attrition_risk_scores.csv\"\
+        )\nrisk_out.to_csv(risk_out_path, index=False)\n\n# ---- Pay-band audit outputs\
+        \ ----\n# Group audit by Department and SalarySlab\nsalary_ok = row_ok\n\n\
+        pay_audit = (\n    df.assign(salary_ok=salary_ok)\n    .groupby([\"Department\"\
+        , \"SalarySlab\"], observed=False)\n    .agg(\n        headcount=(\"EmpID\"\
+        , \"count\"),\n        median_income=(\"MonthlyIncome\", \"median\"),\n  \
+        \      min_income=(\"MonthlyIncome\", \"min\"),\n        max_income=(\"MonthlyIncome\"\
+        , \"max\"),\n        pct_in_range=(\"salary_ok\", \"mean\"),\n    )\n    .reset_index()\n\
+        )\n\n# Add global band progression index so auditors can compare progression\
+        \ health\npay_audit[\"band_progression_index\"] = progression_index\n\npay_out_path\
+        \ = os.path.join(args.output, \"pay_band_audit.csv\")\npay_audit.to_csv(pay_out_path,\
+        \ index=False)\n\n# Also produce a small JSON summary for governance dashboards\n\
+        summary = {\n    \"overall_attrition_rate\": float(overall_attr_rate),\n \
+        \   \"overtime_yes_proportion\": float(ot_yes_prop),\n    \"overtime_attrition_ratio\"\
+        : float(rate_yes / max(1e-9, rate_no)),\n    \"rd_share\": float(rd_share),\n\
+        \    \"age_majority_share_26_45\": float(major_groups),\n    \"band_progression_index\"\
+        : float(progression_index),\n}\nwith open(os.path.join(args.output, \"kpi_summary.json\"\
+        ), \"w\") as f:\n    json.dump(summary, f)\n\"\"\"Run PyDeequ constraint code\
+        \ against the example tables and report results.\"\"\"\nimport argparse\n\
+        import json\nimport os\nimport sys\nfrom pathlib import Path\n\nimport prismadv\
+        \  # noqa: F401\n\nos.environ.pop(\"OPENAI_API_KEY\", None)\n\nimport pandas\
+        \ as pd  # noqa: E402\nfrom prismadv.dq_manager import DeequDataQualityManager\
+        \  # noqa: E402\n\nHERE = Path(__file__).resolve().parent\nTABLES_DIR = HERE\
+        \ / \"data\" / \"tables\"\nJARS_FILE = HERE / \"deequ_jars.txt\"\n\n\ndef\
+        \ build_spark():\n    \"\"\"A Spark session whose Deequ classpath is pinned\
+        \ to already-resolved jars.\n\n    The default session config asks Spark to\
+        \ fetch `spark.jars.packages` through\n    Ivy. That cannot work here: Ivy\
+        \ writes its resolution cache under $HOME, and\n    inside the agent's sandbox\
+        \ only the workspace is writable, so resolution dies\n    before the JVM starts\
+        \ and every check reports FAILS for a reason that has\n    nothing to do with\
+        \ the constraint. The jars were resolved once by the driver\n    that staged\
+        \ this file; naming them directly removes the resolution step, and\n    with\
+        \ it the network and $HOME-write dependencies.\n    \"\"\"\n    from pyspark.sql\
+        \ import SparkSession\n\n    jars = [line.strip() for line in JARS_FILE.read_text(encoding=\"\
+        utf-8\").split() if line.strip()]\n    if not jars:\n        raise RuntimeError(f\"\
+        {JARS_FILE.name} is empty; the Deequ classpath cannot be pinned\")\n    #\
+        \ `spark.jars` takes URIs; the driver classpath takes plain filesystem paths.\n\
+        \    local = [jar[len(\"file://\"):] if jar.startswith(\"file://\") else jar\
+        \ for jar in jars]\n    return (\n        SparkSession.builder.appName(\"\
+        deequ-local\")\n        .master(\"local[2]\")\n        .config(\"spark.driver.memory\"\
+        , \"4g\")\n        .config(\"spark.jars\", \",\".join(jars))\n        .config(\"\
+        spark.driver.extraClassPath\", \":\".join(local))\n        .config(\"spark.executor.extraClassPath\"\
+        , \":\".join(local))\n        .config(\"spark.driver.host\", \"localhost\"\
+        )\n        .config(\"spark.ui.enabled\", \"false\")\n        .config(\"spark.sql.execution.arrow.pyspark.enabled\"\
+        , \"true\")\n        .getOrCreate()\n    )\n\n\ndef load_codes(path: Path)\
+        \ -> list[str]:\n    \"\"\"Accept JSON, or one constraint per line so quoting\
+        \ never blocks a check.\"\"\"\n    text = path.read_text(encoding=\"utf-8\"\
+        ).strip()\n    if not text:\n        return []\n    if text.lstrip()[0] in\
+        \ \"[{\":\n        try:\n            payload = json.loads(text)\n        except\
+        \ json.JSONDecodeError as exc:\n            print(f\"warning: {path.name}\
+        \ is not valid JSON ({exc}); \"\n                  f\"falling back to one-constraint-per-line\
+        \ parsing.\")\n            payload = None\n        if payload is not None:\n\
+        \            if isinstance(payload, dict):\n                payload = payload.get(\"\
+        constraints\", [])\n            codes = []\n            for item in payload:\n\
+        \                if isinstance(item, str):\n                    codes.append(item)\n\
+        \                else:\n                    codes.append(item.get(\"code_for_constraint\"\
+        ) or item.get(\"suggestion\"))\n            return [code for code in codes\
+        \ if code]\n    codes = []\n    for line in text.splitlines():\n        line\
+        \ = line.strip()\n        if not line or line.startswith(\"#\"):\n       \
+        \     continue\n        codes.append(line)\n    return codes\n\n\ndef main()\
+        \ -> int:\n    parser = argparse.ArgumentParser(description=__doc__)\n   \
+        \ parser.add_argument(\"--table\", required=True, help=\"Table name (file\
+        \ stem under data/tables).\")\n    parser.add_argument(\"--constraints\",\
+        \ required=True,\n                        help='JSON: [\"<code>\", ...] or\
+        \ {\"constraints\": [{\"code_for_constraint\": ...}]}')\n    args = parser.parse_args()\n\
+        \n    csv_path = TABLES_DIR / f\"{args.table}.csv\"\n    if not csv_path.exists():\n\
+        \        available = sorted(p.stem for p in TABLES_DIR.glob(\"*.csv\"))\n\
+        \        print(f\"no such table: {args.table}. available: {available}\")\n\
+        \        return 2\n\n    codes = load_codes(Path(args.constraints))\n    if\
+        \ not codes:\n        print(\"no constraint code found in the given file\"\
+        )\n        return 2\n\n    dataframe = pd.read_csv(csv_path)\n    manager\
+        \ = DeequDataQualityManager()\n    spark_df, spark = manager.spark_df_from_pandas_df(dataframe,\
+        \ spark_session=build_spark())\n    results = manager.validate_constraints_with_reasons(spark,\
+        \ spark_df, codes, isolated_check=True)\n\n    held = 0\n    for code, (is_valid,\
+        \ reason) in zip(codes, results):\n        held += int(bool(is_valid))\n \
+        \       print(f\"[{'HOLDS' if is_valid else 'FAILS'}] {code}\")\n        if\
+        \ not is_valid:\n            print(f\"          reason: {reason}\")\n    print(f\"\
+        \\n{held}/{len(codes)} constraint(s) hold on table '{args.table}' \"\n   \
+        \       f\"({len(dataframe)} rows).\")\n\n    try:\n        spark.sparkContext._gateway.shutdown_callback_server()\n\
+        \    except Exception:\n        pass\n    try:\n        spark.stop()\n   \
+        \ except Exception:\n        pass\n    return 0\n\n\nif __name__ == \"__main__\"\
+        :\n    code = main()\n    sys.stdout.flush()\n    os._exit(code)\n# Task\n\
+        \nYou are writing a **data unit test**: a set of PyDeequ constraints describing\
+        \ what\nthe program below assumes about its input data. If new data arrived\
+        \ that violated\none of your constraints, the program should be expected to\
+        \ misbehave -- crash,\nsilently produce a wrong number, or drop records it\
+        \ should have kept.\n\nYour output is a single file, `constraints.json`, in\
+        \ the current folder.\n\n# The program\n\nThis program consumes the dataset.\n\
+        \n```python\nimport argparse\nimport json\nimport os\n\nimport numpy as np\n\
+        import pandas as pd\n\n\ndef logistic(x):\n    return 1.0 / (1.0 + np.exp(-x))\n\
+        \n\nparser = argparse.ArgumentParser()\nparser.add_argument('--input', type=str,\
+        \ required=True)\nparser.add_argument('--output', type=str, required=True)\n\
+        args = parser.parse_args()\n\nos.makedirs(args.output, exist_ok=True)\n\n\
+        # Load data\ninput_csv = os.path.join(args.input, 'new_data.csv')\ndf = pd.read_csv(input_csv)\n\
+        \n# ---- Pay band audit setup ----\nallowed_slabs = [\"Upto 5k\", \"5k-10k\"\
+        , \"10k-15k\", \"15k+\"]\n# Row-level consistency of MonthlyIncome vs SalarySlab\
+        \ boundaries\nmi = df[\"MonthlyIncome\"]\nsl = df[\"SalarySlab\"]\n\nin_upto_5k\
+        \ = (sl == \"Upto 5k\") & (mi > 0) & (mi <= 5000)\nin_5k_10k = (sl == \"5k-10k\"\
+        ) & (mi > 5000) & (mi <= 10000)\nin_10k_15k = (sl == \"10k-15k\") & (mi >\
+        \ 10000) & (mi <= 15000)\nin_15k_plus = (sl == \"15k+\") & (mi > 15000)\n\n\
+        row_ok = in_upto_5k | in_5k_10k | in_10k_15k | in_15k_plus\n# Median monotonicity\
+        \ across slabs\ndf[\"SalarySlab\"] = pd.Categorical(df[\"SalarySlab\"], categories=allowed_slabs,\
+        \ ordered=True)\nmedians = df.groupby(\"SalarySlab\", observed=False)[\"MonthlyIncome\"\
+        ].median()\nordered_medians = np.array([medians.loc[s] for s in allowed_slabs])\n\
+        # Use median progression to derive a compensation progression index (used\
+        \ later in risk scoring)\nprogression_logs = np.log(ordered_medians[1:] /\
+        \ ordered_medians[:-1])\nprogression_index = float(np.mean(progression_logs))\n\
+        \n# Department and role integrity used for downstream grouping\ndept_allowed\
+        \ = {\"Sales\", \"Research & Development\", \"Human Resources\"}\nsales_roles\
+        \ = {\"Sales Executive\", \"Sales Representative\"}\nrd_roles = {\"Research\
+        \ Scientist\", \"Laboratory Technician\", \"Research Director\", \"Manufacturing\
+        \ Director\"}\nhr_roles = {\"Human Resources\"}\n# Department share check\
+        \ prior to department-weighted metrics\nrd_share = (df[\"Department\"] ==\
+        \ \"Research & Development\").mean()\n# ---- Age and AgeGroup integrity used\
+        \ for risk segmentation ----\nallowed_age_groups = {\"18-25\", \"26-35\",\
+        \ \"36-45\", \"46-55\", \"55+\"}\nage = df[\"Age\"]\nageg = df[\"AgeGroup\"\
+        ]\nmajor_groups = df[\"AgeGroup\"].isin([\"26-35\", \"36-45\"]).mean()\n#\
+        \ ---- Tenure logical constraints and coverage ----\n# Features derived from\
+        \ tenure that depend on constraints above\nexternal_experience = (df[\"TotalWorkingYears\"\
+        ] - df[\"YearsAtCompany\"]).clip(lower=0)\ncareer_start_age = df[\"Age\"]\
+        \ - df[\"TotalWorkingYears\"]\nmanager_ratio = np.where(df[\"YearsAtCompany\"\
+        ] > 0, df[\"YearsWithCurrManager\"].fillna(0) / df[\"YearsAtCompany\"], 1.0)\n\
+        manager_ratio = np.clip(manager_ratio, 0.0, 1.0)\n\n# Use square root; requires\
+        \ non-negative external_experience\next_exp_signal = np.sqrt(external_experience)\n\
+        career_start_signal = (career_start_age - 15).clip(lower=0)\n\n# ---- Performance\
+        \ and compensation change checks ----\n# Performance factors for risk scoring\n\
+        perf_adj = np.where(df[\"PerformanceRating\"] == 4, 0.95, 1.05)\ncomp_change_norm\
+        \ = (25 - df[\"PercentSalaryHike\"]) / 14.0\ncomp_change_norm = np.clip(comp_change_norm,\
+        \ 0.0, 2.0)\n\n# ---- Attrition and OverTime distribution checks for calibration\
+        \ ----\nattr = (df[\"Attrition\"] == \"Yes\").astype(int)\not_yes = (df[\"\
+        OverTime\"] == \"Yes\")\n\noverall_attr_rate = attr.mean()\not_yes_prop =\
+        \ ot_yes.mean()\nrate_yes = np.where(ot_yes.sum() > 0, attr[ot_yes].mean(),\
+        \ np.nan)\nrate_no = np.where((~ot_yes).sum() > 0, attr[~ot_yes].mean(), np.nan)\n\
+        # Calibrate OT multiplier from observed rates\not_multiplier = np.where(ot_yes,\
+        \ np.log((rate_yes + 1e-6) / (rate_no + 1e-6)), 0.0)\n\n# ---- Risk scoring\
+        \ ----\n# Satisfaction composite (normalized to 0..1 dissatisfaction)\nsatisfaction_cols\
+        \ = [\"JobSatisfaction\", \"EnvironmentSatisfaction\", \"WorkLifeBalance\"\
+        ]\nsat_mean = df[satisfaction_cols].mean(axis=1)\ndissat = 1.0 - (sat_mean\
+        \ - 1.0) / 3.0\n\ndissat = np.clip(dissat, 0.0, 1.0)\n\n# Tenure-related signals\n\
+        no_promo_signal = np.where(df[\"YearsAtCompany\"] > 0,\n                 \
+        \          df[\"YearsSinceLastPromotion\"] / df[\"YearsAtCompany\"],\n   \
+        \                        0.0)\nno_promo_signal = np.clip(no_promo_signal,\
+        \ 0.0, 1.0)\n\nrole_stagnation = 1.0 - manager_ratio\n\n# Age weighting\n\
+        age_weights = {\n    \"18-25\": 1.10,\n    \"26-35\": 1.00,\n    \"36-45\"\
+        : 0.95,\n    \"46-55\": 0.90,\n    \"55+\": 0.88,\n}\nage_w = df[\"AgeGroup\"\
+        ].map(age_weights).astype(float)\n\n# Department influence (calibrated with\
+        \ R&D majority)\ndept_weight = df[\"Department\"].map({\n    \"Research &\
+        \ Development\": 0.0 + np.log(max(rd_share, 1e-6) / 0.60),\n    \"Sales\"\
+        : 0.05,\n    \"Human Resources\": 0.02,\n}).astype(float)\n\n# Compensation\
+        \ progression signal leveraged from global bands\ncomp_progression_signal\
+        \ = progression_index\n\n# Assemble linear score\nintercept = np.log(overall_attr_rate\
+        \ / max(1e-6, 1 - overall_attr_rate))\nlinear_score = (\n        intercept\n\
+        \        + 0.8 * dissat\n        + 0.6 * no_promo_signal\n        + 0.4 *\
+        \ role_stagnation\n        + 0.3 * comp_change_norm\n        + 0.35 * ot_multiplier\n\
+        \        + 0.1 * (ext_exp_signal / (ext_exp_signal.max() if ext_exp_signal.max()\
+        \ > 0 else 1))\n        + 0.05 * (career_start_signal / (career_start_signal.max()\
+        \ if career_start_signal.max() > 0 else 1))\n        + 0.2 * dept_weight\n\
+        \        - 0.1 * comp_progression_signal\n)\n\nrisk_score = logistic(linear_score)\
+        \ * age_w * perf_adj\nrisk_score = np.clip(risk_score, 0.0, 1.0)\n\n# Build\
+        \ attrition risk output\nrisk_out = df[[\"EmpID\", \"EmployeeNumber\", \"\
+        Department\", \"JobRole\", \"AgeGroup\", \"OverTime\", \"PerformanceRating\"\
+        ,\n               \"PercentSalaryHike\"]].copy()\nrisk_out[\"attrition_risk_score\"\
+        ] = risk_score\nrisk_out_path = os.path.join(args.output, \"attrition_risk_scores.csv\"\
+        )\nrisk_out.to_csv(risk_out_path, index=False)\n\n# ---- Pay-band audit outputs\
+        \ ----\n# Group audit by Department and SalarySlab\nsalary_ok = row_ok\n\n\
+        pay_audit = (\n    df.assign(salary_ok=salary_ok)\n    .groupby([\"Department\"\
+        , \"SalarySlab\"], observed=False)\n    .agg(\n        headcount=(\"EmpID\"\
+        , \"count\"),\n        median_income=(\"MonthlyIncome\", \"median\"),\n  \
+        \      min_income=(\"MonthlyIncome\", \"min\"),\n        max_income=(\"MonthlyIncome\"\
+        , \"max\"),\n        pct_in_range=(\"salary_ok\", \"mean\"),\n    )\n    .reset_index()\n\
+        )\n\n# Add global band progression index so auditors can compare progression\
+        \ health\npay_audit[\"band_progression_index\"] = progression_index\n\npay_out_path\
+        \ = os.path.join(args.output, \"pay_band_audit.csv\")\npay_audit.to_csv(pay_out_path,\
+        \ index=False)\n\n# Also produce a small JSON summary for governance dashboards\n\
+        summary = {\n    \"overall_attrition_rate\": float(overall_attr_rate),\n \
+        \   \"overtime_yes_proportion\": float(ot_yes_prop),\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_6
+      type: command_execution
+      command: /usr/bin/bash -lc "sed -n '150,280p' code/general_task_1.py; sed -n
+        '1,210p' deequ_check.py; sed -n '210,370p' deequ_check.py; cat AGENTS.md"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_6
+      type: command_execution
+      command: /usr/bin/bash -lc "sed -n '150,280p' code/general_task_1.py; sed -n
+        '1,210p' deequ_check.py; sed -n '210,370p' deequ_check.py; cat AGENTS.md"
+      aggregated_output: "    df.assign(salary_ok=salary_ok)\n    .groupby([\"Department\"\
+        , \"SalarySlab\"], observed=False)\n    .agg(\n        headcount=(\"EmpID\"\
+        , \"count\"),\n        median_income=(\"MonthlyIncome\", \"median\"),\n  \
+        \      min_income=(\"MonthlyIncome\", \"min\"),\n        max_income=(\"MonthlyIncome\"\
+        , \"max\"),\n        pct_in_range=(\"salary_ok\", \"mean\"),\n    )\n    .reset_index()\n\
+        )\n\n# Add global band progression index so auditors can compare progression\
+        \ health\npay_audit[\"band_progression_index\"] = progression_index\n\npay_out_path\
+        \ = os.path.join(args.output, \"pay_band_audit.csv\")\npay_audit.to_csv(pay_out_path,\
+        \ index=False)\n\n# Also produce a small JSON summary for governance dashboards\n\
+        summary = {\n    \"overall_attrition_rate\": float(overall_attr_rate),\n \
+        \   \"overtime_yes_proportion\": float(ot_yes_prop),\n    \"overtime_attrition_ratio\"\
+        : float(rate_yes / max(1e-9, rate_no)),\n    \"rd_share\": float(rd_share),\n\
+        \    \"age_majority_share_26_45\": float(major_groups),\n    \"band_progression_index\"\
+        : float(progression_index),\n}\nwith open(os.path.join(args.output, \"kpi_summary.json\"\
+        ), \"w\") as f:\n    json.dump(summary, f)\n\"\"\"Run PyDeequ constraint code\
+        \ against the example tables and report results.\"\"\"\nimport argparse\n\
+        import json\nimport os\nimport sys\nfrom pathlib import Path\n\nimport prismadv\
+        \  # noqa: F401\n\nos.environ.pop(\"OPENAI_API_KEY\", None)\n\nimport pandas\
+        \ as pd  # noqa: E402\nfrom prismadv.dq_manager import DeequDataQualityManager\
+        \  # noqa: E402\n\nHERE = Path(__file__).resolve().parent\nTABLES_DIR = HERE\
+        \ / \"data\" / \"tables\"\nJARS_FILE = HERE / \"deequ_jars.txt\"\n\n\ndef\
+        \ build_spark():\n    \"\"\"A Spark session whose Deequ classpath is pinned\
+        \ to already-resolved jars.\n\n    The default session config asks Spark to\
+        \ fetch `spark.jars.packages` through\n    Ivy. That cannot work here: Ivy\
+        \ writes its resolution cache under $HOME, and\n    inside the agent's sandbox\
+        \ only the workspace is writable, so resolution dies\n    before the JVM starts\
+        \ and every check reports FAILS for a reason that has\n    nothing to do with\
+        \ the constraint. The jars were resolved once by the driver\n    that staged\
+        \ this file; naming them directly removes the resolution step, and\n    with\
+        \ it the network and $HOME-write dependencies.\n    \"\"\"\n    from pyspark.sql\
+        \ import SparkSession\n\n    jars = [line.strip() for line in JARS_FILE.read_text(encoding=\"\
+        utf-8\").split() if line.strip()]\n    if not jars:\n        raise RuntimeError(f\"\
+        {JARS_FILE.name} is empty; the Deequ classpath cannot be pinned\")\n    #\
+        \ `spark.jars` takes URIs; the driver classpath takes plain filesystem paths.\n\
+        \    local = [jar[len(\"file://\"):] if jar.startswith(\"file://\") else jar\
+        \ for jar in jars]\n    return (\n        SparkSession.builder.appName(\"\
+        deequ-local\")\n        .master(\"local[2]\")\n        .config(\"spark.driver.memory\"\
+        , \"4g\")\n        .config(\"spark.jars\", \",\".join(jars))\n        .config(\"\
+        spark.driver.extraClassPath\", \":\".join(local))\n        .config(\"spark.executor.extraClassPath\"\
+        , \":\".join(local))\n        .config(\"spark.driver.host\", \"localhost\"\
+        )\n        .config(\"spark.ui.enabled\", \"false\")\n        .config(\"spark.sql.execution.arrow.pyspark.enabled\"\
+        , \"true\")\n        .getOrCreate()\n    )\n\n\ndef load_codes(path: Path)\
+        \ -> list[str]:\n    \"\"\"Accept JSON, or one constraint per line so quoting\
+        \ never blocks a check.\"\"\"\n    text = path.read_text(encoding=\"utf-8\"\
+        ).strip()\n    if not text:\n        return []\n    if text.lstrip()[0] in\
+        \ \"[{\":\n        try:\n            payload = json.loads(text)\n        except\
+        \ json.JSONDecodeError as exc:\n            print(f\"warning: {path.name}\
+        \ is not valid JSON ({exc}); \"\n                  f\"falling back to one-constraint-per-line\
+        \ parsing.\")\n            payload = None\n        if payload is not None:\n\
+        \            if isinstance(payload, dict):\n                payload = payload.get(\"\
+        constraints\", [])\n            codes = []\n            for item in payload:\n\
+        \                if isinstance(item, str):\n                    codes.append(item)\n\
+        \                else:\n                    codes.append(item.get(\"code_for_constraint\"\
+        ) or item.get(\"suggestion\"))\n            return [code for code in codes\
+        \ if code]\n    codes = []\n    for line in text.splitlines():\n        line\
+        \ = line.strip()\n        if not line or line.startswith(\"#\"):\n       \
+        \     continue\n        codes.append(line)\n    return codes\n\n\ndef main()\
+        \ -> int:\n    parser = argparse.ArgumentParser(description=__doc__)\n   \
+        \ parser.add_argument(\"--table\", required=True, help=\"Table name (file\
+        \ stem under data/tables).\")\n    parser.add_argument(\"--constraints\",\
+        \ required=True,\n                        help='JSON: [\"<code>\", ...] or\
+        \ {\"constraints\": [{\"code_for_constraint\": ...}]}')\n    args = parser.parse_args()\n\
+        \n    csv_path = TABLES_DIR / f\"{args.table}.csv\"\n    if not csv_path.exists():\n\
+        \        available = sorted(p.stem for p in TABLES_DIR.glob(\"*.csv\"))\n\
+        \        print(f\"no such table: {args.table}. available: {available}\")\n\
+        \        return 2\n\n    codes = load_codes(Path(args.constraints))\n    if\
+        \ not codes:\n        print(\"no constraint code found in the given file\"\
+        )\n        return 2\n\n    dataframe = pd.read_csv(csv_path)\n    manager\
+        \ = DeequDataQualityManager()\n    spark_df, spark = manager.spark_df_from_pandas_df(dataframe,\
+        \ spark_session=build_spark())\n    results = manager.validate_constraints_with_reasons(spark,\
+        \ spark_df, codes, isolated_check=True)\n\n    held = 0\n    for code, (is_valid,\
+        \ reason) in zip(codes, results):\n        held += int(bool(is_valid))\n \
+        \       print(f\"[{'HOLDS' if is_valid else 'FAILS'}] {code}\")\n        if\
+        \ not is_valid:\n            print(f\"          reason: {reason}\")\n    print(f\"\
+        \\n{held}/{len(codes)} constraint(s) hold on table '{args.table}' \"\n   \
+        \       f\"({len(dataframe)} rows).\")\n\n    try:\n        spark.sparkContext._gateway.shutdown_callback_server()\n\
+        \    except Exception:\n        pass\n    try:\n        spark.stop()\n   \
+        \ except Exception:\n        pass\n    return 0\n\n\nif __name__ == \"__main__\"\
+        :\n    code = main()\n    sys.stdout.flush()\n    os._exit(code)\n# Workspace\
+        \ boundary\n\nYour workspace is the current folder, and for this task nothing\
+        \ else exists.\n\n- Read, list, search and write only inside this folder:\
+        \ `./data`, `./code`,\n  `deequ_check.py`, `task.txt`, and whatever you create\
+        \ here.\n- Do not touch anything outside it. That means no parent directory\
+        \ (`..`), no\n  other folder under /tmp, no home directory (`~`, $HOME), and\
+        \ no absolute path\n  anywhere else on the filesystem.\n- Do not search the\
+        \ wider filesystem -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`,\
+        \ `/tmp`, `..`, `~` or any path outside this folder -- for\n  related data,\
+        \ prompts, examples, other runs, or previous answers. There is\n  nothing\
+        \ out there you are allowed to use, and a run that looks is discarded.\n-\
+        \ Running `python`, `deequ_check.py` and the tools on your PATH is fine; the\n\
+        \  boundary is about what you read and write, not which interpreter runs.\n\
+        \nEverything you need is here. Work only from it.\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_7
+      type: reasoning
+      text: '**Assessing data profiles**
+
+
+        I need to focus on local Python inline commands to read a CSV file. It’s essential
+        to determine constraints and ensure robust range distributions. I’m considering
+        checks for compliance with SQL expressions and aspects like size. I''ll look
+        into row correctness and aggregate compliance columns, such as checking if
+        a column satisfies specific conditions. Lastly, assessing any data anomalies
+        and metrics will be crucial in analyzing the dataset effectively.'
+  - type: item.completed
+    item:
+      id: item_8
+      type: agent_message
+      text: The program’s risk and audit calculations depend on several cross-column
+        relationships; I’ll profile those next.
+  - type: item.started
+    item:
+      id: item_9
+      type: command_execution
+      command: "/usr/bin/bash -lc \"python - <<'PY'\nimport pandas as pd\nD=pd.read_csv('data/tables/observed_data.csv')\n\
+        print('shape',D.shape)\nfor col in ['EmpID','EmployeeNumber','SalarySlab','MonthlyIncome','Department','JobRole','Age','AgeGroup','TotalWorkingYears','YearsAtCompany','YearsWithCurrManager','YearsSinceLastPromotion','PerformanceRating','PercentSalaryHike','Attrition','OverTime','JobSatisfaction','EnvironmentSatisfaction','WorkLifeBalance']:\n\
+        \ s=D[col];print(col,'null',s.isna().sum(),'unique',s.nunique(),'range', (s.min(),s.max())\
+        \ if pd.api.types.is_numeric_dtype(s) else '', 'counts',s.value_counts(dropna=False).to_dict()\
+        \ if s.nunique()<12 else '')\nprint('dept-role',pd.crosstab(D.Department,D.JobRole).to_string())\n\
+        print('age-agegroup', D.groupby('AgeGroup').Age.agg(['min','max','count']).to_string())\n\
+        print('salary-bands',D.groupby('SalarySlab').MonthlyIncome.agg(['min','max','median','count']).to_string())\n\
+        for name,mask in {'workgtage':D.TotalWorkingYears>D.Age-15,'companygtwork':D.YearsAtCompany>D.TotalWorkingYears,'managergtcompany':D.YearsWithCurrManager>D.YearsAtCompany,'promogtcompany':D.YearsSinceLastPromotion>D.YearsAtCompany,'rdshare':D.Department.eq('Research\
+        \ & Development'),'age26_45':D.AgeGroup.isin(['26-35','36-45']),'ot':D.OverTime.eq('Yes'),'attr':D.Attrition.eq('Yes')}.items():print(name,mask.sum(),mask.mean())\n\
+        print('attr/ot',pd.crosstab(D.OverTime,D.Attrition).to_string())\nPY\""
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_9
+      type: command_execution
+      command: "/usr/bin/bash -lc \"python - <<'PY'\nimport pandas as pd\nD=pd.read_csv('data/tables/observed_data.csv')\n\
+        print('shape',D.shape)\nfor col in ['EmpID','EmployeeNumber','SalarySlab','MonthlyIncome','Department','JobRole','Age','AgeGroup','TotalWorkingYears','YearsAtCompany','YearsWithCurrManager','YearsSinceLastPromotion','PerformanceRating','PercentSalaryHike','Attrition','OverTime','JobSatisfaction','EnvironmentSatisfaction','WorkLifeBalance']:\n\
+        \ s=D[col];print(col,'null',s.isna().sum(),'unique',s.nunique(),'range', (s.min(),s.max())\
+        \ if pd.api.types.is_numeric_dtype(s) else '', 'counts',s.value_counts(dropna=False).to_dict()\
+        \ if s.nunique()<12 else '')\nprint('dept-role',pd.crosstab(D.Department,D.JobRole).to_string())\n\
+        print('age-agegroup', D.groupby('AgeGroup').Age.agg(['min','max','count']).to_string())\n\
+        print('salary-bands',D.groupby('SalarySlab').MonthlyIncome.agg(['min','max','median','count']).to_string())\n\
+        for name,mask in {'workgtage':D.TotalWorkingYears>D.Age-15,'companygtwork':D.YearsAtCompany>D.TotalWorkingYears,'managergtcompany':D.YearsWithCurrManager>D.YearsAtCompany,'promogtcompany':D.YearsSinceLastPromotion>D.YearsAtCompany,'rdshare':D.Department.eq('Research\
+        \ & Development'),'age26_45':D.AgeGroup.isin(['26-35','36-45']),'ot':D.OverTime.eq('Yes'),'attr':D.Attrition.eq('Yes')}.items():print(name,mask.sum(),mask.mean())\n\
+        print('attr/ot',pd.crosstab(D.OverTime,D.Attrition).to_string())\nPY\""
+      aggregated_output: "shape (882, 39)\nEmpID null 0 unique 882 range  counts \n\
+        EmployeeNumber null 0 unique 882 range (1, 2068) counts \nSalarySlab null\
+        \ 0 unique 4 range  counts {'Upto 5k': 467, '5k-10k': 256, '10k-15k': 88,\
+        \ '15k+': 71}\nMonthlyIncome null 0 unique 839 range (1009, 19999) counts\
+        \ \nDepartment null 0 unique 3 range  counts {'Research & Development': 596,\
+        \ 'Sales': 250, 'Human Resources': 36}\nJobRole null 0 unique 9 range  counts\
+        \ {'Research Scientist': 185, 'Sales Executive': 183, 'Laboratory Technician':\
+        \ 175, 'Manufacturing Director': 92, 'Healthcare Representative': 70, 'Manager':\
+        \ 52, 'Sales Representative': 49, 'Research Director': 45, 'Human Resources':\
+        \ 31}\nAge null 0 unique 43 range (18, 60) counts \nAgeGroup null 0 unique\
+        \ 5 range  counts {'26-35': 355, '36-45': 289, '46-55': 130, '18-25': 83,\
+        \ '55+': 25}\nTotalWorkingYears null 0 unique 39 range (0, 40) counts \nYearsAtCompany\
+        \ null 0 unique 34 range (0, 40) counts \nYearsWithCurrManager null 41 unique\
+        \ 17 range (0.0, 17.0) counts \nYearsSinceLastPromotion null 0 unique 16 range\
+        \ (0, 15) counts \nPerformanceRating null 0 unique 2 range (3, 4) counts {3:\
+        \ 754, 4: 128}\nPercentSalaryHike null 0 unique 15 range (11, 25) counts \n\
+        Attrition null 0 unique 2 range  counts {'No': 724, 'Yes': 158}\nOverTime\
+        \ null 0 unique 2 range  counts {'No': 638, 'Yes': 244}\nJobSatisfaction null\
+        \ 0 unique 4 range (1, 4) counts {4: 275, 3: 268, 1: 178, 2: 161}\nEnvironmentSatisfaction\
+        \ null 0 unique 4 range (1, 4) counts {4: 278, 3: 265, 2: 171, 1: 168}\nWorkLifeBalance\
+        \ null 0 unique 4 range (1, 4) counts {3: 526, 2: 207, 4: 101, 1: 48}\ndept-role\
+        \ JobRole                 Healthcare Representative  Human Resources  Laboratory\
+        \ Technician  Manager  Manufacturing Director  Research Director  Research\
+        \ Scientist  Sales Executive  Sales Representative\nDepartment           \
+        \                                                                        \
+        \                                                                        \
+        \                                   \nHuman Resources                    \
+        \             0               31                      0        5         \
+        \              0                  0                   0                0 \
+        \                    0\nResearch & Development                         70\
+        \                0                    175       29                      92\
+        \                 45                 185                0                \
+        \     0\nSales                                           0               \
+        \ 0                      0       18                       0              \
+        \    0                   0              183                    49\nage-agegroup\
+        \           min  max  count\nAgeGroup                 \n18-25      18   25\
+        \     83\n26-35      26   35    355\n36-45      36   45    289\n46-55    \
+        \  46   55    130\n55+        56   60     25\nsalary-bands               min\
+        \    max   median  count\nSalarySlab                              \n10k-15k\
+        \     10048  14732  11131.0     88\n15k+        15379  19999  18300.0    \
+        \ 71\n5k-10k       5003   9998   6527.0    256\nUpto 5k      1009   4999 \
+        \  2926.0    467\nworkgtage 0 0.0\ncompanygtwork 0 0.0\nmanagergtcompany 0\
+        \ 0.0\npromogtcompany 0 0.0\nrdshare 596 0.6757369614512472\nage26_45 644\
+        \ 0.7301587301587301\not 244 0.2766439909297052\nattr 158 0.17913832199546487\n\
+        attr/ot Attrition   No  Yes\nOverTime           \nNo         563   75\nYes\
+        \        161   83\n"
+      exit_code: 0
+      status: completed
+  - type: item.updated
+    item:
+      id: item_4
+      type: todo_list
+      items:
+      - text: Inspect program assumptions and observed data
+        completed: true
+      - text: Draft targeted PyDeequ constraints
+        completed: false
+      - text: Validate checks and write final JSON
+        completed: false
+  - type: item.completed
+    item:
+      id: item_10
+      type: agent_message
+      text: The staged data supports the expected bands, categories, and tenure relationships.
+        I’ll test the needed Deequ syntax.
+  - type: item.started
+    item:
+      id: item_11
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: probe.txt
+
+        +.satisfies(\"(SalarySlab = ''Upto 5k'' AND MonthlyIncome > 0 AND MonthlyIncome
+        <= 5000) OR (SalarySlab = ''5k-10k'' AND MonthlyIncome > 5000 AND MonthlyIncome
+        <= 10000) OR (SalarySlab = ''10k-15k'' AND MonthlyIncome > 10000 AND MonthlyIncome
+        <= 15000) OR (SalarySlab = ''15k+'' AND MonthlyIncome > 15000)\", \"income_matches_salary_slab\")
+
+        +.hasNumberOfDistinctValues(''SalarySlab'', lambda n: n == 4)
+
+        +.hasCompliance(''Department'', \"Department = ''Research & Development''\",
+        lambda fraction: fraction > 0.60)
+
+        +.isContainedIn(''Attrition'', [''Yes'', ''No''])
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints probe.txt"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_11
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: probe.txt
+
+        +.satisfies(\"(SalarySlab = ''Upto 5k'' AND MonthlyIncome > 0 AND MonthlyIncome
+        <= 5000) OR (SalarySlab = ''5k-10k'' AND MonthlyIncome > 5000 AND MonthlyIncome
+        <= 10000) OR (SalarySlab = ''10k-15k'' AND MonthlyIncome > 10000 AND MonthlyIncome
+        <= 15000) OR (SalarySlab = ''15k+'' AND MonthlyIncome > 15000)\", \"income_matches_salary_slab\")
+
+        +.hasNumberOfDistinctValues(''SalarySlab'', lambda n: n == 4)
+
+        +.hasCompliance(''Department'', \"Department = ''Research & Development''\",
+        lambda fraction: fraction > 0.60)
+
+        +.isContainedIn(''Attrition'', [''Yes'', ''No''])
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints probe.txt"'
+      aggregated_output: "SLF4J: Failed to load class \"org.slf4j.impl.StaticLoggerBinder\"\
+        .\nSLF4J: Defaulting to no-operation (NOP) logger implementation\nSLF4J: See\
+        \ http://www.slf4j.org/codes.html#StaticLoggerBinder for further details.\n\
+        SLF4J: Failed to load class \"org.slf4j.impl.StaticMDCBinder\".\nSLF4J: Defaulting\
+        \ to no-operation MDCAdapter implementation.\nSLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder\
+        \ for further details.\nPython Callback server started!\n[HOLDS] .satisfies(\"\
+        (SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND MonthlyIncome <= 5000) OR\
+        \ (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND MonthlyIncome <= 10000)\
+        \ OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND MonthlyIncome <=\
+        \ 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)\", \"income_matches_salary_slab\"\
+        )\n[FAILS] .hasNumberOfDistinctValues('SalarySlab', lambda n: n == 4)\n  \
+        \        reason: Unable to instantiate constraint 'hasNumberOfDistinctValues('SalarySlab',\
+        \ lambda n: n == 4)': Check.hasNumberOfDistinctValues() missing 2 required\
+        \ positional arguments: 'binningUdf' and 'maxBins'\n[FAILS] .hasCompliance('Department',\
+        \ \"Department = 'Research & Development'\", lambda fraction: fraction > 0.60)\n\
+        \          reason: Unable to instantiate constraint 'hasCompliance('Department',\
+        \ \"Department = 'Research & Development'\", lambda fraction: fraction > 0.60)':\
+        \ 'Check' object has no attribute 'hasCompliance'\n[HOLDS] .isContainedIn('Attrition',\
+        \ ['Yes', 'No'])\n\n2/4 constraint(s) hold on table 'observed_data' (882 rows).\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_12
+      type: agent_message
+      text: Row-level SQL checks work. The aggregate method I tried is unavailable,
+        so I’ll test `.satisfies` for proportions.
+  - type: item.started
+    item:
+      id: item_13
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Update File: probe.txt
+
+        @@
+
+        -.hasNumberOfDistinctValues(''SalarySlab'', lambda n: n == 4)
+
+        -.hasCompliance(''Department'', \"Department = ''Research & Development''\",
+        lambda fraction: fraction > 0.60)
+
+        +.satisfies(\"SalarySlab = ''15k+''\", ''top_band_present'', lambda fraction:
+        fraction > 0)
+
+        +.satisfies(\"Department = ''Research & Development''\", ''rd_majority'',
+        lambda fraction: fraction > 0.60)
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints probe.txt"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_14
+      type: reasoning
+      text: '**Evaluating completeness in data mapping**
+
+
+        I’m considering how to ensure categorical completeness when mapping weight,
+        especially with null values and their representation as NaN. It seems that
+        missing values could cause issues, particularly with the mean satisfaction
+        calculation. For `YearsWithCurrManager`, I need to check if it’s intentionally
+        left out. I also want to annotate all columns for completeness and ensure
+        the process is efficient, possibly cutting down on redundant checks. I might
+        need to test several items, which could take some time.'
+  - type: item.completed
+    item:
+      id: item_13
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Update File: probe.txt
+
+        @@
+
+        -.hasNumberOfDistinctValues(''SalarySlab'', lambda n: n == 4)
+
+        -.hasCompliance(''Department'', \"Department = ''Research & Development''\",
+        lambda fraction: fraction > 0.60)
+
+        +.satisfies(\"SalarySlab = ''15k+''\", ''top_band_present'', lambda fraction:
+        fraction > 0)
+
+        +.satisfies(\"Department = ''Research & Development''\", ''rd_majority'',
+        lambda fraction: fraction > 0.60)
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints probe.txt"'
+      aggregated_output: 'SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+
+        SLF4J: Defaulting to no-operation (NOP) logger implementation
+
+        SLF4J: See http://www.slf4j.org/codes.html#StaticLoggerBinder for further
+        details.
+
+        SLF4J: Failed to load class "org.slf4j.impl.StaticMDCBinder".
+
+        SLF4J: Defaulting to no-operation MDCAdapter implementation.
+
+        SLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder for further
+        details.
+
+        Python Callback server started!
+
+        [HOLDS] .satisfies("(SalarySlab = ''Upto 5k'' AND MonthlyIncome > 0 AND MonthlyIncome
+        <= 5000) OR (SalarySlab = ''5k-10k'' AND MonthlyIncome > 5000 AND MonthlyIncome
+        <= 10000) OR (SalarySlab = ''10k-15k'' AND MonthlyIncome > 10000 AND MonthlyIncome
+        <= 15000) OR (SalarySlab = ''15k+'' AND MonthlyIncome > 15000)", "income_matches_salary_slab")
+
+        [HOLDS] .satisfies("SalarySlab = ''15k+''", ''top_band_present'', lambda fraction:
+        fraction > 0)
+
+        [HOLDS] .satisfies("Department = ''Research & Development''", ''rd_majority'',
+        lambda fraction: fraction > 0.60)
+
+        [HOLDS] .isContainedIn(''Attrition'', [''Yes'', ''No''])
+
+
+        4/4 constraint(s) hold on table ''observed_data'' (882 rows).
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_15
+      type: agent_message
+      text: Aggregate checks now work. I’ll write the full constraint set, including
+        cross-column and calibration checks.
+  - type: item.started
+    item:
+      id: item_16
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {\"column_name\": \"EmpID\", \"code_for_constraint\": \".isComplete(''EmpID'')\"},
+
+        +    {\"column_name\": \"EmpID\", \"code_for_constraint\": \".isUnique(''EmpID'')\"},
+
+        +    {\"column_name\": \"EmployeeNumber\", \"code_for_constraint\": \".isComplete(''EmployeeNumber'')\"},
+
+        +    {\"column_name\": \"EmployeeNumber\", \"code_for_constraint\": \".isUnique(''EmployeeNumber'')\"},
+
+        +    {\"column_name\": \"MonthlyIncome\", \"code_for_constraint\": \".isComplete(''MonthlyIncome'')\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".isComplete(''SalarySlab'')\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"(SalarySlab
+        = ''Upto 5k'' AND MonthlyIncome > 0 AND MonthlyIncome <= 5000) OR (SalarySlab
+        = ''5k-10k'' AND MonthlyIncome > 5000 AND MonthlyIncome <= 10000) OR (SalarySlab
+        = ''10k-15k'' AND MonthlyIncome > 10000 AND MonthlyIncome <= 15000) OR (SalarySlab
+        = ''15k+'' AND MonthlyIncome > 15000)\\\", ''income_matches_salary_slab'')\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''Upto 5k''\\\", ''first_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''5k-10k''\\\", ''second_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''10k-15k''\\\", ''third_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''15k+''\\\", ''fourth_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"Department\", \"code_for_constraint\": \".isComplete(''Department'')\"},
+
+        +    {\"column_name\": \"Department\", \"code_for_constraint\": \".isContainedIn(''Department'',
+        [''Sales'', ''Research & Development'', ''Human Resources''])\"},
+
+        +    {\"column_name\": \"Department\", \"code_for_constraint\": \".satisfies(\\\"Department
+        = ''Research & Development''\\\", ''rd_majority'', lambda fraction: fraction
+        > 0.60)\"},
+
+        +    {\"column_name\": \"JobRole\", \"code_for_constraint\": \".isComplete(''JobRole'')\"},
+
+        +    {\"column_name\": \"JobRole\", \"code_for_constraint\": \".satisfies(\\\"(Department
+        = ''Sales'' AND JobRole IN (''Sales Executive'', ''Sales Representative'',
+        ''Manager'')) OR (Department = ''Research & Development'' AND JobRole IN (''Research
+        Scientist'', ''Laboratory Technician'', ''Research Director'', ''Manufacturing
+        Director'', ''Healthcare Representative'', ''Manager'')) OR (Department =
+        ''Human Resources'' AND JobRole IN (''Human Resources'', ''Manager''))\\\",
+        ''role_matches_department'')\"},
+
+        +    {\"column_name\": \"Age\", \"code_for_constraint\": \".isComplete(''Age'')\"},
+
+        +    {\"column_name\": \"AgeGroup\", \"code_for_constraint\": \".isComplete(''AgeGroup'')\"},
+
+        +    {\"column_name\": \"AgeGroup\", \"code_for_constraint\": \".satisfies(\\\"(AgeGroup
+        = ''18-25'' AND Age BETWEEN 18 AND 25) OR (AgeGroup = ''26-35'' AND Age BETWEEN
+        26 AND 35) OR (AgeGroup = ''36-45'' AND Age BETWEEN 36 AND 45) OR (AgeGroup
+        = ''46-55'' AND Age BETWEEN 46 AND 55) OR (AgeGroup = ''55+'' AND Age > 55)\\\",
+        ''age_matches_age_group'')\"},
+
+        +    {\"column_name\": \"AgeGroup\", \"code_for_constraint\": \".satisfies(\\\"AgeGroup
+        IN (''26-35'', ''36-45'')\\\", ''core_age_groups_majority'', lambda fraction:
+        fraction > 0.5)\"},
+
+        +    {\"column_name\": \"TotalWorkingYears\", \"code_for_constraint\": \".isComplete(''TotalWorkingYears'')\"},
+
+        +    {\"column_name\": \"TotalWorkingYears\", \"code_for_constraint\": \".satisfies(''TotalWorkingYears
+        >= 0 AND TotalWorkingYears <= Age - 15'', ''feasible_career_start'')\"},
+
+        +    {\"column_name\": \"YearsAtCompany\", \"code_for_constraint\": \".isComplete(''YearsAtCompany'')\"},
+
+        +    {\"column_name\": \"YearsAtCompany\", \"code_for_constraint\": \".satisfies(''YearsAtCompany
+        >= 0 AND YearsAtCompany <= TotalWorkingYears'', ''company_tenure_within_career'')\"},
+
+        +    {\"column_name\": \"YearsWithCurrManager\", \"code_for_constraint\":
+        \".satisfies(''YearsWithCurrManager IS NULL OR (YearsWithCurrManager >= 0
+        AND YearsWithCurrManager <= YearsAtCompany)'', ''manager_tenure_within_company'')\"},
+
+        +    {\"column_name\": \"YearsSinceLastPromotion\", \"code_for_constraint\":
+        \".isComplete(''YearsSinceLastPromotion'')\"},
+
+        +    {\"column_name\": \"YearsSinceLastPromotion\", \"code_for_constraint\":
+        \".satisfies(''YearsSinceLastPromotion >= 0 AND YearsSinceLastPromotion <=
+        YearsAtCompany'', ''promotion_tenure_within_company'')\"},
+
+        +    {\"column_name\": \"PerformanceRating\", \"code_for_constraint\": \".isComplete(''PerformanceRating'')\"},
+
+        +    {\"column_name\": \"PerformanceRating\", \"code_for_constraint\": \".satisfies(''PerformanceRating
+        IN (3, 4)'', ''known_performance_ratings'')\"},
+
+        +    {\"column_name\": \"PercentSalaryHike\", \"code_for_constraint\": \".isComplete(''PercentSalaryHike'')\"},
+
+        +    {\"column_name\": \"PercentSalaryHike\", \"code_for_constraint\": \".satisfies(''PercentSalaryHike
+        BETWEEN 11 AND 25'', ''salary_hike_calibration_range'')\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".isComplete(''Attrition'')\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".isContainedIn(''Attrition'',
+        [''Yes'', ''No''])\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".satisfies(\\\"Attrition
+        = ''Yes''\\\", ''nondegenerate_attrition_rate'', lambda fraction: 0 < fraction
+        < 1)\"},
+
+        +    {\"column_name\": \"OverTime\", \"code_for_constraint\": \".isComplete(''OverTime'')\"},
+
+        +    {\"column_name\": \"OverTime\", \"code_for_constraint\": \".isContainedIn(''OverTime'',
+        [''Yes'', ''No''])\"},
+
+        +    {\"column_name\": \"OverTime\", \"code_for_constraint\": \".satisfies(\\\"OverTime
+        = ''Yes''\\\", ''both_overtime_groups_present'', lambda fraction: 0 < fraction
+        < 1)\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".satisfies(\\\"OverTime
+        = ''Yes'' AND Attrition = ''Yes''\\\", ''overtime_attrition_present'', lambda
+        fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".satisfies(\\\"OverTime
+        = ''No'' AND Attrition = ''Yes''\\\", ''non_overtime_attrition_present'',
+        lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"JobSatisfaction\", \"code_for_constraint\": \".isComplete(''JobSatisfaction'')\"},
+
+        +    {\"column_name\": \"JobSatisfaction\", \"code_for_constraint\": \".satisfies(''JobSatisfaction
+        BETWEEN 1 AND 4'', ''job_satisfaction_scale'')\"},
+
+        +    {\"column_name\": \"EnvironmentSatisfaction\", \"code_for_constraint\":
+        \".isComplete(''EnvironmentSatisfaction'')\"},
+
+        +    {\"column_name\": \"EnvironmentSatisfaction\", \"code_for_constraint\":
+        \".satisfies(''EnvironmentSatisfaction BETWEEN 1 AND 4'', ''environment_satisfaction_scale'')\"},
+
+        +    {\"column_name\": \"WorkLifeBalance\", \"code_for_constraint\": \".isComplete(''WorkLifeBalance'')\"},
+
+        +    {\"column_name\": \"WorkLifeBalance\", \"code_for_constraint\": \".satisfies(''WorkLifeBalance
+        BETWEEN 1 AND 4'', ''work_life_balance_scale'')\"}
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python -m json.tool constraints.json >/dev/null && python deequ_check.py --table
+        observed_data --constraints constraints.json > validation.log 2>&1; rg ''"''^''"\\[FAILS\\]|"''^
+        *reason:|constraint''"\\(s\\) hold'' validation.log"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.updated
+    item:
+      id: item_4
+      type: todo_list
+      items:
+      - text: Inspect program assumptions and observed data
+        completed: true
+      - text: Draft targeted PyDeequ constraints
+        completed: true
+      - text: Validate checks and write final JSON
+        completed: false
+  - type: item.completed
+    item:
+      id: item_17
+      type: agent_message
+      text: '`constraints.json` is written. I’m checking every constraint against
+        the staged table now.'
+  - type: item.completed
+    item:
+      id: item_16
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {\"column_name\": \"EmpID\", \"code_for_constraint\": \".isComplete(''EmpID'')\"},
+
+        +    {\"column_name\": \"EmpID\", \"code_for_constraint\": \".isUnique(''EmpID'')\"},
+
+        +    {\"column_name\": \"EmployeeNumber\", \"code_for_constraint\": \".isComplete(''EmployeeNumber'')\"},
+
+        +    {\"column_name\": \"EmployeeNumber\", \"code_for_constraint\": \".isUnique(''EmployeeNumber'')\"},
+
+        +    {\"column_name\": \"MonthlyIncome\", \"code_for_constraint\": \".isComplete(''MonthlyIncome'')\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".isComplete(''SalarySlab'')\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"(SalarySlab
+        = ''Upto 5k'' AND MonthlyIncome > 0 AND MonthlyIncome <= 5000) OR (SalarySlab
+        = ''5k-10k'' AND MonthlyIncome > 5000 AND MonthlyIncome <= 10000) OR (SalarySlab
+        = ''10k-15k'' AND MonthlyIncome > 10000 AND MonthlyIncome <= 15000) OR (SalarySlab
+        = ''15k+'' AND MonthlyIncome > 15000)\\\", ''income_matches_salary_slab'')\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''Upto 5k''\\\", ''first_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''5k-10k''\\\", ''second_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''10k-15k''\\\", ''third_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"SalarySlab\", \"code_for_constraint\": \".satisfies(\\\"SalarySlab
+        = ''15k+''\\\", ''fourth_band_present'', lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"Department\", \"code_for_constraint\": \".isComplete(''Department'')\"},
+
+        +    {\"column_name\": \"Department\", \"code_for_constraint\": \".isContainedIn(''Department'',
+        [''Sales'', ''Research & Development'', ''Human Resources''])\"},
+
+        +    {\"column_name\": \"Department\", \"code_for_constraint\": \".satisfies(\\\"Department
+        = ''Research & Development''\\\", ''rd_majority'', lambda fraction: fraction
+        > 0.60)\"},
+
+        +    {\"column_name\": \"JobRole\", \"code_for_constraint\": \".isComplete(''JobRole'')\"},
+
+        +    {\"column_name\": \"JobRole\", \"code_for_constraint\": \".satisfies(\\\"(Department
+        = ''Sales'' AND JobRole IN (''Sales Executive'', ''Sales Representative'',
+        ''Manager'')) OR (Department = ''Research & Development'' AND JobRole IN (''Research
+        Scientist'', ''Laboratory Technician'', ''Research Director'', ''Manufacturing
+        Director'', ''Healthcare Representative'', ''Manager'')) OR (Department =
+        ''Human Resources'' AND JobRole IN (''Human Resources'', ''Manager''))\\\",
+        ''role_matches_department'')\"},
+
+        +    {\"column_name\": \"Age\", \"code_for_constraint\": \".isComplete(''Age'')\"},
+
+        +    {\"column_name\": \"AgeGroup\", \"code_for_constraint\": \".isComplete(''AgeGroup'')\"},
+
+        +    {\"column_name\": \"AgeGroup\", \"code_for_constraint\": \".satisfies(\\\"(AgeGroup
+        = ''18-25'' AND Age BETWEEN 18 AND 25) OR (AgeGroup = ''26-35'' AND Age BETWEEN
+        26 AND 35) OR (AgeGroup = ''36-45'' AND Age BETWEEN 36 AND 45) OR (AgeGroup
+        = ''46-55'' AND Age BETWEEN 46 AND 55) OR (AgeGroup = ''55+'' AND Age > 55)\\\",
+        ''age_matches_age_group'')\"},
+
+        +    {\"column_name\": \"AgeGroup\", \"code_for_constraint\": \".satisfies(\\\"AgeGroup
+        IN (''26-35'', ''36-45'')\\\", ''core_age_groups_majority'', lambda fraction:
+        fraction > 0.5)\"},
+
+        +    {\"column_name\": \"TotalWorkingYears\", \"code_for_constraint\": \".isComplete(''TotalWorkingYears'')\"},
+
+        +    {\"column_name\": \"TotalWorkingYears\", \"code_for_constraint\": \".satisfies(''TotalWorkingYears
+        >= 0 AND TotalWorkingYears <= Age - 15'', ''feasible_career_start'')\"},
+
+        +    {\"column_name\": \"YearsAtCompany\", \"code_for_constraint\": \".isComplete(''YearsAtCompany'')\"},
+
+        +    {\"column_name\": \"YearsAtCompany\", \"code_for_constraint\": \".satisfies(''YearsAtCompany
+        >= 0 AND YearsAtCompany <= TotalWorkingYears'', ''company_tenure_within_career'')\"},
+
+        +    {\"column_name\": \"YearsWithCurrManager\", \"code_for_constraint\":
+        \".satisfies(''YearsWithCurrManager IS NULL OR (YearsWithCurrManager >= 0
+        AND YearsWithCurrManager <= YearsAtCompany)'', ''manager_tenure_within_company'')\"},
+
+        +    {\"column_name\": \"YearsSinceLastPromotion\", \"code_for_constraint\":
+        \".isComplete(''YearsSinceLastPromotion'')\"},
+
+        +    {\"column_name\": \"YearsSinceLastPromotion\", \"code_for_constraint\":
+        \".satisfies(''YearsSinceLastPromotion >= 0 AND YearsSinceLastPromotion <=
+        YearsAtCompany'', ''promotion_tenure_within_company'')\"},
+
+        +    {\"column_name\": \"PerformanceRating\", \"code_for_constraint\": \".isComplete(''PerformanceRating'')\"},
+
+        +    {\"column_name\": \"PerformanceRating\", \"code_for_constraint\": \".satisfies(''PerformanceRating
+        IN (3, 4)'', ''known_performance_ratings'')\"},
+
+        +    {\"column_name\": \"PercentSalaryHike\", \"code_for_constraint\": \".isComplete(''PercentSalaryHike'')\"},
+
+        +    {\"column_name\": \"PercentSalaryHike\", \"code_for_constraint\": \".satisfies(''PercentSalaryHike
+        BETWEEN 11 AND 25'', ''salary_hike_calibration_range'')\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".isComplete(''Attrition'')\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".isContainedIn(''Attrition'',
+        [''Yes'', ''No''])\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".satisfies(\\\"Attrition
+        = ''Yes''\\\", ''nondegenerate_attrition_rate'', lambda fraction: 0 < fraction
+        < 1)\"},
+
+        +    {\"column_name\": \"OverTime\", \"code_for_constraint\": \".isComplete(''OverTime'')\"},
+
+        +    {\"column_name\": \"OverTime\", \"code_for_constraint\": \".isContainedIn(''OverTime'',
+        [''Yes'', ''No''])\"},
+
+        +    {\"column_name\": \"OverTime\", \"code_for_constraint\": \".satisfies(\\\"OverTime
+        = ''Yes''\\\", ''both_overtime_groups_present'', lambda fraction: 0 < fraction
+        < 1)\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".satisfies(\\\"OverTime
+        = ''Yes'' AND Attrition = ''Yes''\\\", ''overtime_attrition_present'', lambda
+        fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"Attrition\", \"code_for_constraint\": \".satisfies(\\\"OverTime
+        = ''No'' AND Attrition = ''Yes''\\\", ''non_overtime_attrition_present'',
+        lambda fraction: fraction > 0)\"},
+
+        +    {\"column_name\": \"JobSatisfaction\", \"code_for_constraint\": \".isComplete(''JobSatisfaction'')\"},
+
+        +    {\"column_name\": \"JobSatisfaction\", \"code_for_constraint\": \".satisfies(''JobSatisfaction
+        BETWEEN 1 AND 4'', ''job_satisfaction_scale'')\"},
+
+        +    {\"column_name\": \"EnvironmentSatisfaction\", \"code_for_constraint\":
+        \".isComplete(''EnvironmentSatisfaction'')\"},
+
+        +    {\"column_name\": \"EnvironmentSatisfaction\", \"code_for_constraint\":
+        \".satisfies(''EnvironmentSatisfaction BETWEEN 1 AND 4'', ''environment_satisfaction_scale'')\"},
+
+        +    {\"column_name\": \"WorkLifeBalance\", \"code_for_constraint\": \".isComplete(''WorkLifeBalance'')\"},
+
+        +    {\"column_name\": \"WorkLifeBalance\", \"code_for_constraint\": \".satisfies(''WorkLifeBalance
+        BETWEEN 1 AND 4'', ''work_life_balance_scale'')\"}
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python -m json.tool constraints.json >/dev/null && python deequ_check.py --table
+        observed_data --constraints constraints.json > validation.log 2>&1; rg ''"''^''"\\[FAILS\\]|"''^
+        *reason:|constraint''"\\(s\\) hold'' validation.log"'
+      aggregated_output: '45/45 constraint(s) hold on table ''observed_data'' (882
+        rows).
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_18
+      type: reasoning
+      text: '**Cleaning up temp probe log**
+
+
+        I need to clean up the temp probe log for the user, consolidating everything
+        into a single file named constraints.json. To do this, I’ll remove the probe
+        and logs with the apply_patch tool to delete the specific entries. It seems
+        like the log is quite large, but I should be able to manage it with the appropriate
+        coding instructions and validation. My goal is to ensure only the single,
+        necessary output file remains.'
+  - type: item.started
+    item:
+      id: item_19
+      type: file_change
+      changes:
+      - path: /tmp/codex_synth_g6os01nq/probe.txt
+        kind: delete
+      - path: /tmp/codex_synth_g6os01nq/validation.log
+        kind: delete
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_19
+      type: file_change
+      changes:
+      - path: /tmp/codex_synth_g6os01nq/probe.txt
+        kind: delete
+      - path: /tmp/codex_synth_g6os01nq/validation.log
+        kind: delete
+      status: completed
+  - type: item.updated
+    item:
+      id: item_4
+      type: todo_list
+      items:
+      - text: Inspect program assumptions and observed data
+        completed: true
+      - text: Draft targeted PyDeequ constraints
+        completed: true
+      - text: Validate checks and write final JSON
+        completed: true
+  - type: item.completed
+    item:
+      id: item_20
+      type: agent_message
+      text: Created `constraints.json` with 45 PyDeequ constraints covering pay bands,
+        employee identifiers, department and age mappings, tenure, and risk-scoring
+        inputs. All 45 hold on the staged table.
+  - type: item.completed
+    item:
+      id: item_4
+      type: todo_list
+      items:
+      - text: Inspect program assumptions and observed data
+        completed: true
+      - text: Draft targeted PyDeequ constraints
+        completed: true
+      - text: Validate checks and write final JSON
+        completed: true
+  - type: turn.completed
+    usage: *id001
+  stderr_tail: 'Reading additional input from stdin...
+
+    '
+constraints:
+  constraints:
+    Age:
+      code:
+      - - .isComplete('Age')
+        - Valid
+      assumptions: []
+      column_name: Age
+    AgeGroup:
+      code:
+      - - .isComplete('AgeGroup')
+        - Valid
+      - - .satisfies("(AgeGroup = '18-25' AND Age BETWEEN 18 AND 25) OR (AgeGroup
+          = '26-35' AND Age BETWEEN 26 AND 35) OR (AgeGroup = '36-45' AND Age BETWEEN
+          36 AND 45) OR (AgeGroup = '46-55' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+          = '55+' AND Age > 55)", 'age_matches_age_group')
+        - Valid
+      - - '.satisfies("AgeGroup IN (''26-35'', ''36-45'')", ''core_age_groups_majority'',
+          lambda fraction: fraction > 0.5)'
+        - Valid
+      assumptions: []
+      column_name: AgeGroup
+    Attrition:
+      code:
+      - - .isComplete('Attrition')
+        - Valid
+      - - .isContainedIn('Attrition', ['Yes', 'No'])
+        - Valid
+      - - '.satisfies("Attrition = ''Yes''", ''nondegenerate_attrition_rate'', lambda
+          fraction: 0 < fraction < 1)'
+        - Valid
+      - - '.satisfies("OverTime = ''No'' AND Attrition = ''Yes''", ''non_overtime_attrition_present'',
+          lambda fraction: fraction > 0)'
+        - Valid
+      - - '.satisfies("OverTime = ''Yes'' AND Attrition = ''Yes''", ''overtime_attrition_present'',
+          lambda fraction: fraction > 0)'
+        - Valid
+      assumptions: []
+      column_name: Attrition
+    Department:
+      code:
+      - - .isComplete('Department')
+        - Valid
+      - - .isContainedIn('Department', ['Sales', 'Research & Development', 'Human
+          Resources'])
+        - Valid
+      - - '.satisfies("Department = ''Research & Development''", ''rd_majority'',
+          lambda fraction: fraction > 0.60)'
+        - Valid
+      assumptions: []
+      column_name: Department
+    EmpID:
+      code:
+      - - .isComplete('EmpID')
+        - Valid
+      - - .isUnique('EmpID')
+        - Valid
+      assumptions: []
+      column_name: EmpID
+    EmployeeNumber:
+      code:
+      - - .isComplete('EmployeeNumber')
+        - Valid
+      - - .isUnique('EmployeeNumber')
+        - Valid
+      assumptions: []
+      column_name: EmployeeNumber
+    EnvironmentSatisfaction:
+      code:
+      - - .isComplete('EnvironmentSatisfaction')
+        - Valid
+      - - .satisfies('EnvironmentSatisfaction BETWEEN 1 AND 4', 'environment_satisfaction_scale')
+        - Valid
+      assumptions: []
+      column_name: EnvironmentSatisfaction
+    JobRole:
+      code:
+      - - .isComplete('JobRole')
+        - Valid
+      - - .satisfies("(Department = 'Sales' AND JobRole IN ('Sales Executive', 'Sales
+          Representative', 'Manager')) OR (Department = 'Research & Development' AND
+          JobRole IN ('Research Scientist', 'Laboratory Technician', 'Research Director',
+          'Manufacturing Director', 'Healthcare Representative', 'Manager')) OR (Department
+          = 'Human Resources' AND JobRole IN ('Human Resources', 'Manager'))", 'role_matches_department')
+        - Valid
+      assumptions: []
+      column_name: JobRole
+    JobSatisfaction:
+      code:
+      - - .isComplete('JobSatisfaction')
+        - Valid
+      - - .satisfies('JobSatisfaction BETWEEN 1 AND 4', 'job_satisfaction_scale')
+        - Valid
+      assumptions: []
+      column_name: JobSatisfaction
+    MonthlyIncome:
+      code:
+      - - .isComplete('MonthlyIncome')
+        - Valid
+      assumptions: []
+      column_name: MonthlyIncome
+    OverTime:
+      code:
+      - - .isComplete('OverTime')
+        - Valid
+      - - .isContainedIn('OverTime', ['Yes', 'No'])
+        - Valid
+      - - '.satisfies("OverTime = ''Yes''", ''both_overtime_groups_present'', lambda
+          fraction: 0 < fraction < 1)'
+        - Valid
+      assumptions: []
+      column_name: OverTime
+    PercentSalaryHike:
+      code:
+      - - .isComplete('PercentSalaryHike')
+        - Valid
+      - - .satisfies('PercentSalaryHike BETWEEN 11 AND 25', 'salary_hike_calibration_range')
+        - Valid
+      assumptions: []
+      column_name: PercentSalaryHike
+    PerformanceRating:
+      code:
+      - - .isComplete('PerformanceRating')
+        - Valid
+      - - .satisfies('PerformanceRating IN (3, 4)', 'known_performance_ratings')
+        - Valid
+      assumptions: []
+      column_name: PerformanceRating
+    SalarySlab:
+      code:
+      - - .isComplete('SalarySlab')
+        - Valid
+      - - .satisfies("(SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND MonthlyIncome
+          <= 5000) OR (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND MonthlyIncome
+          <= 10000) OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND MonthlyIncome
+          <= 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)", 'income_matches_salary_slab')
+        - Valid
+      - - '.satisfies("SalarySlab = ''10k-15k''", ''third_band_present'', lambda fraction:
+          fraction > 0)'
+        - Valid
+      - - '.satisfies("SalarySlab = ''15k+''", ''fourth_band_present'', lambda fraction:
+          fraction > 0)'
+        - Valid
+      - - '.satisfies("SalarySlab = ''5k-10k''", ''second_band_present'', lambda fraction:
+          fraction > 0)'
+        - Valid
+      - - '.satisfies("SalarySlab = ''Upto 5k''", ''first_band_present'', lambda fraction:
+          fraction > 0)'
+        - Valid
+      assumptions: []
+      column_name: SalarySlab
+    TotalWorkingYears:
+      code:
+      - - .isComplete('TotalWorkingYears')
+        - Valid
+      - - .satisfies('TotalWorkingYears >= 0 AND TotalWorkingYears <= Age - 15', 'feasible_career_start')
+        - Valid
+      assumptions: []
+      column_name: TotalWorkingYears
+    WorkLifeBalance:
+      code:
+      - - .isComplete('WorkLifeBalance')
+        - Valid
+      - - .satisfies('WorkLifeBalance BETWEEN 1 AND 4', 'work_life_balance_scale')
+        - Valid
+      assumptions: []
+      column_name: WorkLifeBalance
+    YearsAtCompany:
+      code:
+      - - .isComplete('YearsAtCompany')
+        - Valid
+      - - .satisfies('YearsAtCompany >= 0 AND YearsAtCompany <= TotalWorkingYears',
+          'company_tenure_within_career')
+        - Valid
+      assumptions: []
+      column_name: YearsAtCompany
+    YearsSinceLastPromotion:
+      code:
+      - - .isComplete('YearsSinceLastPromotion')
+        - Valid
+      - - .satisfies('YearsSinceLastPromotion >= 0 AND YearsSinceLastPromotion <=
+          YearsAtCompany', 'promotion_tenure_within_company')
+        - Valid
+      assumptions: []
+      column_name: YearsSinceLastPromotion
+    YearsWithCurrManager:
+      code:
+      - - .satisfies('YearsWithCurrManager IS NULL OR (YearsWithCurrManager >= 0 AND
+          YearsWithCurrManager <= YearsAtCompany)', 'manager_tenure_within_company')
+        - Valid
+      assumptions: []
+      column_name: YearsWithCurrManager

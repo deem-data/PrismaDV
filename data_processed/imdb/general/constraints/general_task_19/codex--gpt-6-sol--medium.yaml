@@ -1,0 +1,1840 @@
+baseline_method: codex
+model_name: gpt-6-sol
+created_at: '20260927_190540'
+prompt_source: /sc-scratch/sc-scratch-ikim-prismadv/prismadv-revision/workflow_prismadv/eid_bench_baselines/prompts/codex.md
+prompt_template: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ\
+  \ constraints describing what\nthe program below assumes about its input data. If\
+  \ new data arrived that violated\none of your constraints, the program should be\
+  \ expected to misbehave -- crash,\nsilently produce a wrong number, or drop records\
+  \ it should have kept.\n\nYour output is a single file, `constraints.json`, in the\
+  \ current folder.\n\n# The program\n\nThis program consumes the dataset.\n\n```python\n\
+  {{CODE}}\n```\n\nThe same program is on disk at `{{CODE_PATH}}`, so you can run\
+  \ it against the\nstaged table, step through it, or search it, rather than working\
+  \ from the\nlisting alone.\n\n# The data\n\nThree rows sampled from the dataset\
+  \ the program consumes:\n\n{{DATA_SAMPLE}}\n\nThe full table is on disk at `{{TABLE_PATH}}`.\
+  \ You have complete access to it:\nload it with pandas, profile it, plot it, run\
+  \ whatever analysis helps. It is a\nthrowaway copy -- nothing you do to it has any\
+  \ effect outside this workspace.\n\n# Verifying your constraints\n\nYou can execute\
+  \ PyDeequ constraint code against the staged table and read back\nthe result of\
+  \ every check:\n\n```\n{{CHECKER_CMD}}\n```\n\nwhere the constraints file is plain\
+  \ text with one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"\
+  age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"closed\"\
+  ])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure prints\
+  \ the reason,\nincluding compilation errors. Use it as often as you like.\n\n# Output\
+  \ format\n\nWrite `constraints.json` in the current folder, containing the union\
+  \ of what you\nsettled on for every column:\n\n{\n    \"constraints\": [\n     \
+  \   {\n            \"column_name\": \"some_column\",\n            \"code_for_constraint\"\
+  : \".isComplete('some_column')\"\n        },\n        {\n            \"column_name\"\
+  : \"another_column\",\n            \"code_for_constraint\": \".isPositive('another_column')\"\
+  \n        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+  \ Each\nentry names the single column it constrains; for a constraint spanning several\n\
+  columns, name the one it is primarily about.\n"
+prompt_text: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+  \ describing what\nthe program below assumes about its input data. If new data arrived\
+  \ that violated\none of your constraints, the program should be expected to misbehave\
+  \ -- crash,\nsilently produce a wrong number, or drop records it should have kept.\n\
+  \nYour output is a single file, `constraints.json`, in the current folder.\n\n#\
+  \ The program\n\nThis program consumes the dataset.\n\n```python\nimport argparse\n\
+  import os\nfrom datetime import datetime\nimport numpy as np\nimport pandas as pd\n\
+  \n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument('--input',\
+  \ type=str, required=True)\n    parser.add_argument('--output', type=str, required=True)\n\
+  \    args = parser.parse_args()\n\n    input_file = os.path.join(args.input, 'new_data.csv')\n\
+  \    os.makedirs(args.output, exist_ok=True)\n\n    df = pd.read_csv(input_file)\n\
+  \n    # Basic type normalization for downstream logic\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'],\
+  \ errors='coerce')\n    df['Released_Year'] = pd.to_numeric(df['Released_Year'],\
+  \ errors='coerce').astype('Int64')\n    df['No_of_Votes'] = pd.to_numeric(df['No_of_Votes'],\
+  \ errors='coerce').fillna(0).astype(int)\n\n    current_year = datetime.now().year\n\
+  \n    allowed_genres = {\n        'Action', 'Adventure', 'Animation', 'Biography',\
+  \ 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family',\n        'Fantasy', 'Film-Noir',\
+  \ 'History', 'Horror', 'Music', 'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Sport',\n\
+  \        'Thriller', 'War', 'Western'\n    }\n    allowed_certificates = {\n   \
+  \     'U', 'UA', 'A', 'G', 'PG', 'PG-13', 'R', 'NC-17', 'Not Rated', 'Unrated',\
+  \ 'Passed', 'Approved'\n    }\n    # Use the unique key as index for deterministic\
+  \ scoring and dedupe safety\n    df = df.set_index(['Series_Title', 'Released_Year'],\
+  \ verify_integrity=True)\n    # Quality component derived from rating; relies on\
+  \ bounded rating to keep scores in [0,1]\n    rating_score = (df['IMDB_Rating']\
+  \ / 10.0).clip(0, 1)\n\n    # Popularity component (log-scaled votes); calibrated\
+  \ assuming high-rated entries have strong vote counts\n    votes_log = np.log10(df['No_of_Votes'].clip(lower=1))\n\
+  \    pop_score = ((votes_log - 3.0) / (6.0 - 3.0)).clip(0, 1)  # 1k->0, 1M->1\n\
+  \    # Freshness factor decaying after ~30 years\n    age_years = (current_year\
+  \ - df.reset_index()['Released_Year']).astype(float)\n    freshness = (1.0 - (age_years\
+  \ / 30.0)).clip(0, 1).values\n    # Parse runtime minutes for engagement modeling\n\
+  \    runtime_min = df['Runtime'].str.extract(r'(\\d+)', expand=False).astype(int)\n\
+  \n    runtime_diff = (runtime_min - 110).astype(float)\n    engagement = np.exp(-((runtime_diff\
+  \ / 50.0) ** 2))\n\n    genre_weights = {\n        'Action': 1.1, 'Adventure': 1.05,\
+  \ 'Animation': 1.05, 'Biography': 1.0, 'Comedy': 1.0, 'Crime': 1.05,\n        'Documentary':\
+  \ 0.85, 'Drama': 1.1, 'Family': 1.05, 'Fantasy': 1.0, 'Film-Noir': 1.0, 'History':\
+  \ 0.95,\n        'Horror': 0.85, 'Music': 0.95, 'Musical': 0.90, 'Mystery': 1.0,\
+  \ 'Romance': 0.95, 'Sci-Fi': 1.0,\n        'Sport': 0.95, 'Thriller': 1.05, 'War':\
+  \ 0.90, 'Western': 0.85\n    }\n\n    def avg_genre_weight(genre_str: str) -> float:\n\
+  \        parts = [p.strip() for p in str(genre_str).split(',') if p.strip()]\n \
+  \       weights = [genre_weights.get(p, 1.0) for p in parts]\n        if not weights:\n\
+  \            return 1.0\n        return float(np.mean(weights))\n\n    genre_pref\
+  \ = df['Genre'].map(avg_genre_weight)\n\n    cert_weights = {\n        'U': 1.10,\
+  \ 'G': 1.10, 'PG': 1.05, 'PG-13': 1.00, 'UA': 1.00, 'Passed': 0.95, 'Approved':\
+  \ 0.95,\n        'Not Rated': 0.95, 'Unrated': 0.90, 'R': 0.80, 'A': 0.75, 'NC-17':\
+  \ 0.00\n    }\n    cert_series = df['Certificate'].fillna('Not Rated').astype(str)\n\
+  \    suitability = cert_series.map(cert_weights).fillna(0.90)\n\n    # Content suitability\
+  \ gating (e.g., avoid NC-17 for licensing)\n    eligible_mask = suitability > 0.0\n\
+  \n    # Combine signals into recommendation score\n    # The weighting structure\
+  \ assumes all upstream fields adhere to the asserted contracts\n    combined_score\
+  \ = (\n        (0.55 * rating_score + 0.45 * pop_score)\n        * (0.6 + 0.4 *\
+  \ freshness)\n        * (0.6 + 0.4 * engagement)\n        * (0.85 + 0.15 * genre_pref)\n\
+  \        * suitability\n    )\n\n    rec = df.copy()\n    rec['rating_score'] =\
+  \ rating_score\n    rec['pop_score'] = pop_score\n    rec['freshness'] = freshness\n\
+  \    rec['engagement'] = engagement\n    rec['genre_pref'] = genre_pref\n    rec['suitability']\
+  \ = suitability\n    rec['priority_score'] = combined_score\n\n    # Apply eligibility\
+  \ filter and minimum quality threshold for licensing\n    quality_gate = rec['IMDB_Rating']\
+  \ >= 6.5\n    final = rec[eligible_mask & quality_gate].sort_values('priority_score',\
+  \ ascending=False)\n\n    # Persist results\n    out_cols = [\n        'Poster_Link',\
+  \ 'Certificate', 'Runtime', 'Genre', 'IMDB_Rating', 'No_of_Votes',\n        'Meta_score',\
+  \ 'Director', 'Star1', 'Star2', 'Star3', 'Star4', 'Gross',\n        'rating_score',\
+  \ 'pop_score', 'freshness', 'engagement', 'genre_pref', 'suitability', 'priority_score'\n\
+  \    ]\n    # Keep only columns that exist in the input plus derived metrics\n \
+  \   out_cols = [c for c in out_cols if c in final.columns]\n\n    output_file =\
+  \ os.path.join(args.output, 'licensing_recommendations.csv')\n    final.reset_index().to_csv(output_file,\
+  \ index=False, columns=['Series_Title', 'Released_Year'] + out_cols)\n\n\nif __name__\
+  \ == '__main__':\n    main()\n\n```\n\nThe same program is on disk at `./code/general_task_19.py`,\
+  \ so you can run it against the\nstaged table, step through it, or search it, rather\
+  \ than working from the\nlisting alone.\n\n# The data\n\nThree rows sampled from\
+  \ the dataset the program consumes:\n\n[{'id': 200, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BZjZlZDlkYTktMmU1My00ZDBiLWFlNjEtYTBhNjVhOTM4ZjJjXkEyXkFqcGdeQXVyMTMxODk2OTU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+  \ 'Series_Title': 'Donnie Darko', 'Released_Year': 2001, 'Certificate': 'R', 'Runtime':\
+  \ '113 min', 'Genre': 'Drama, Mystery, Sci-Fi', 'IMDB_Rating': 8.0, 'Overview':\
+  \ 'After narrowly escaping a bizarre accident, a troubled teenager is plagued by\
+  \ visions of a man in a large rabbit suit who manipulates him to commit a series\
+  \ of crimes.', 'Meta_score': 88.0, 'Director': 'Richard Kelly', 'Star1': 'Jake Gyllenhaal',\
+  \ 'Star2': 'Jena Malone', 'Star3': 'Mary McDonnell', 'Star4': 'Holmes Osborne',\
+  \ 'No_of_Votes': 740086, 'Gross': '1,480,006'}, {'id': 56, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BOWVmZGQ0MGYtMDI1Yy00MDkxLWJiYjQtMmZjZmQ0NDFmMDRhXkEyXkFqcGdeQXVyNjg3MDMxNzU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+  \ 'Series_Title': 'The Peanut Butter Falcon', 'Released_Year': 2019, 'Certificate':\
+  \ 'PG-13', 'Runtime': '97 min', 'Genre': 'Adventure, Comedy, Drama', 'IMDB_Rating':\
+  \ 7.6, 'Overview': 'Zak runs away from his care home to make his dream of becoming\
+  \ a wrestler come true.', 'Meta_score': 70.0, 'Director': 'Tyler Nilson', 'Star1':\
+  \ 'Michael Schwartz', 'Star2': 'Zack Gottsagen', 'Star3': 'Ann Owens', 'Star4':\
+  \ 'Dakota Johnson', 'No_of_Votes': 66346, 'Gross': '13,122,642'}, {'id': 43, 'Poster_Link':\
+  \ 'https://m.media-amazon.com/images/M/MV5BMDU2ZWJlMjktMTRhMy00ZTA5LWEzNDgtYmNmZTEwZTViZWJkXkEyXkFqcGdeQXVyNDQ2OTk4MzI@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+  \ 'Series_Title': 'Toy Story', 'Released_Year': 1995, 'Certificate': 'U', 'Runtime':\
+  \ '81 min', 'Genre': 'Animation, Adventure, Comedy', 'IMDB_Rating': 8.3, 'Overview':\
+  \ \"A cowboy doll is profoundly threatened and jealous when a new spaceman figure\
+  \ supplants him as top toy in a boy's room.\", 'Meta_score': 95.0, 'Director': 'John\
+  \ Lasseter', 'Star1': 'Tom Hanks', 'Star2': 'Tim Allen', 'Star3': 'Don Rickles',\
+  \ 'Star4': 'Jim Varney', 'No_of_Votes': 887429, 'Gross': '191,796,233'}]\n\nThe\
+  \ full table is on disk at `./data/tables/observed_data.csv`. You have complete\
+  \ access to it:\nload it with pandas, profile it, plot it, run whatever analysis\
+  \ helps. It is a\nthrowaway copy -- nothing you do to it has any effect outside\
+  \ this workspace.\n\n# Verifying your constraints\n\nYou can execute PyDeequ constraint\
+  \ code against the staged table and read back\nthe result of every check:\n\n```\n\
+  python deequ_check.py --table observed_data --constraints <your_constraints_file>\n\
+  ```\n\nwhere the constraints file is plain text with one PyDeequ `Check` call per\
+  \ line,\nfor example:\n\n```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"\
+  status\", [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or\
+  \ `[FAILS]`, and a failure prints the reason,\nincluding compilation errors. Use\
+  \ it as often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+  \ current folder, containing the union of what you\nsettled on for every column:\n\
+  \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+  ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n       \
+  \ },\n        {\n            \"column_name\": \"another_column\",\n            \"\
+  code_for_constraint\": \".isPositive('another_column')\"\n        }\n    ]\n}\n\n\
+  Use only the PyDeequ `Check` object's methods in `code_for_constraint`. Each\nentry\
+  \ names the single column it constrains; for a constraint spanning several\ncolumns,\
+  \ name the one it is primarily about.\n\n# Workspace boundary\n\nYour workspace\
+  \ is the current folder, and for this task nothing else exists.\n\n- Read, list,\
+  \ search and write only inside this folder: `./data`, `./code`,\n  `deequ_check.py`,\
+  \ `task.txt`, and whatever you create here.\n- Do not touch anything outside it.\
+  \ That means no parent directory (`..`), no\n  other folder under /tmp, no home\
+  \ directory (`~`, $HOME), and no absolute path\n  anywhere else on the filesystem.\n\
+  - Do not search the wider filesystem -- no `rg`, `grep`, `find`, `ls` or\n  `python`\
+  \ over `/`, `/tmp`, `..`, `~` or any path outside this folder -- for\n  related\
+  \ data, prompts, examples, other runs, or previous answers. There is\n  nothing\
+  \ out there you are allowed to use, and a run that looks is discarded.\n- Running\
+  \ `python`, `deequ_check.py` and the tools on your PATH is fine; the\n  boundary\
+  \ is about what you read and write, not which interpreter runs.\n\nEverything you\
+  \ need is here. Work only from it.\n"
+reasoning_effort: medium
+isolation: audit
+staged_code_path: code/general_task_19.py
+replicate: 1
+token_accounting: &id002
+  input_tokens: 402112
+  cached_input_tokens: 373523
+  output_tokens: 4153
+  reasoning_tokens: 1581
+  total_tokens: null
+  turns: 1
+  cache_hit_rate: 0.9289
+  raw_turns:
+  - &id001
+    input_tokens: 402112
+    cached_input_tokens: 373523
+    cache_write_input_tokens: 27433
+    output_tokens: 4153
+    reasoning_output_tokens: 1581
+  agent_messages: 6
+  command_executions: 7
+  file_changes: 0
+  item_counts:
+    error: 1
+    agent_message: 6
+    command_execution: 7
+    reasoning: 3
+    todo_list: 1
+  llm_calls: 17
+  llm_calls_source: rollout token_count events
+  llm_calls_estimate: 13
+  calls:
+  - input_tokens: 13203
+    cached_input_tokens: 0
+    cache_write_input_tokens: 13135
+    output_tokens: 118
+    reasoning_output_tokens: 12
+    total_tokens: 13321
+  - input_tokens: 16201
+    cached_input_tokens: 13135
+    cache_write_input_tokens: 2998
+    output_tokens: 95
+    reasoning_output_tokens: 13
+    total_tokens: 16296
+  - input_tokens: 19526
+    cached_input_tokens: 16133
+    cache_write_input_tokens: 3325
+    output_tokens: 284
+    reasoning_output_tokens: 10
+    total_tokens: 19810
+  - input_tokens: 21697
+    cached_input_tokens: 19458
+    cache_write_input_tokens: 2171
+    output_tokens: 383
+    reasoning_output_tokens: 303
+    total_tokens: 22080
+  - input_tokens: 22093
+    cached_input_tokens: 21629
+    cache_write_input_tokens: 396
+    output_tokens: 713
+    reasoning_output_tokens: 413
+    total_tokens: 22806
+  - input_tokens: 23140
+    cached_input_tokens: 22025
+    cache_write_input_tokens: 1047
+    output_tokens: 1488
+    reasoning_output_tokens: 452
+    total_tokens: 24628
+  - input_tokens: 24688
+    cached_input_tokens: 23072
+    cache_write_input_tokens: 1548
+    output_tokens: 73
+    reasoning_output_tokens: 15
+    total_tokens: 24761
+  - input_tokens: 24774
+    cached_input_tokens: 24620
+    cache_write_input_tokens: 86
+    output_tokens: 37
+    reasoning_output_tokens: 0
+    total_tokens: 24811
+  - input_tokens: 24858
+    cached_input_tokens: 24706
+    cache_write_input_tokens: 84
+    output_tokens: 46
+    reasoning_output_tokens: 7
+    total_tokens: 24904
+  - input_tokens: 25012
+    cached_input_tokens: 24790
+    cache_write_input_tokens: 154
+    output_tokens: 80
+    reasoning_output_tokens: 18
+    total_tokens: 25092
+  - input_tokens: 25886
+    cached_input_tokens: 24944
+    cache_write_input_tokens: 874
+    output_tokens: 266
+    reasoning_output_tokens: 153
+    total_tokens: 26152
+  - input_tokens: 26220
+    cached_input_tokens: 25818
+    cache_write_input_tokens: 334
+    output_tokens: 234
+    reasoning_output_tokens: 65
+    total_tokens: 26454
+  - input_tokens: 26513
+    cached_input_tokens: 26152
+    cache_write_input_tokens: 293
+    output_tokens: 53
+    reasoning_output_tokens: 14
+    total_tokens: 26566
+  - input_tokens: 26615
+    cached_input_tokens: 26445
+    cache_write_input_tokens: 102
+    output_tokens: 37
+    reasoning_output_tokens: 0
+    total_tokens: 26652
+  - input_tokens: 26761
+    cached_input_tokens: 26547
+    cache_write_input_tokens: 146
+    output_tokens: 37
+    reasoning_output_tokens: 0
+    total_tokens: 26798
+  - input_tokens: 27424
+    cached_input_tokens: 26693
+    cache_write_input_tokens: 663
+    output_tokens: 64
+    reasoning_output_tokens: 7
+    total_tokens: 27488
+  - input_tokens: 27501
+    cached_input_tokens: 27356
+    cache_write_input_tokens: 77
+    output_tokens: 145
+    reasoning_output_tokens: 99
+    total_tokens: 27646
+  rollout_path: /home/hach13/.codex-eidbench/sessions/2026/09/27/rollout-2026-09-27T19-03-47-01a0e3d2-a43d-7a71-8989-f05ea8be19ed.jsonl
+cost: &id003
+  usd: 0.173413
+  priced: true
+  rates:
+    model: gpt-6-sol
+    provider: openai
+    input: 2.0
+    cached_input: 0.2
+    output: 10.0
+    source: developers.openai.com/api/docs/models/gpt-6-sol
+    as_of: '2026-09-27'
+    note: ''
+  source: developers.openai.com/api/docs/models/gpt-6-sol (as of 2026-09-27)
+cost_without_cache_usd: 0.845754
+failed_attempts: []
+cost_all_attempts:
+  attempts: 1
+  usd: 0.173413
+  usd_without_cache: 0.845754
+  failed_usd: 0
+  failed_usd_without_cache: 0
+wall_clock_seconds: 112.223
+attempts: 1
+deequ_tool_health: &id004
+  invocations: 3
+  verdict_lines: 32
+  usable: true
+  failure_tail: null
+raw_constraints:
+- column_name: Series_Title
+  code_for_constraint: .isComplete('Series_Title')
+- column_name: Series_Title
+  code_for_constraint: .satisfies("length(trim(Series_Title)) > 0", 'nonempty_title')
+- column_name: Released_Year
+  code_for_constraint: .isComplete('Released_Year')
+- column_name: Released_Year
+  code_for_constraint: .satisfies("Released_Year >= 1888 AND Released_Year <= year(current_date())
+    AND Released_Year = CAST(Released_Year AS BIGINT)", 'valid_release_year')
+- column_name: Series_Title
+  code_for_constraint: '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda
+    value: value == 1.0)'
+- column_name: IMDB_Rating
+  code_for_constraint: .isComplete('IMDB_Rating')
+- column_name: IMDB_Rating
+  code_for_constraint: .satisfies("IMDB_Rating >= 0 AND IMDB_Rating <= 10", 'rating_on_ten_point_scale')
+- column_name: No_of_Votes
+  code_for_constraint: .isComplete('No_of_Votes')
+- column_name: No_of_Votes
+  code_for_constraint: .satisfies("No_of_Votes > 0 AND No_of_Votes = CAST(No_of_Votes
+    AS BIGINT)", 'positive_integer_votes')
+- column_name: No_of_Votes
+  code_for_constraint: .satisfies("IMDB_Rating < 8 OR No_of_Votes >= 1000", 'high_rated_films_have_popularity_signal')
+- column_name: Runtime
+  code_for_constraint: .isComplete('Runtime')
+- column_name: Runtime
+  code_for_constraint: .satisfies("Runtime RLIKE '^[1-9][0-9]* min$'", 'runtime_in_minutes')
+- column_name: Genre
+  code_for_constraint: .isComplete('Genre')
+- column_name: Genre
+  code_for_constraint: .satisfies("Genre RLIKE '^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,
+    (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$'",
+    'known_genres_only')
+- column_name: Certificate
+  code_for_constraint: .satisfies("Certificate IS NULL OR Certificate IN ('U','UA','A','G','PG','PG-13','R','NC-17','Not
+    Rated','Unrated','Passed','Approved','TV-PG','TV-14','GP','16')", 'known_certificates_only')
+constraint_normalization:
+  entries: 15
+  plain_strings: 0
+  column_inferred: 0
+  dropped_no_column: 0
+  dropped_no_code: 0
+raw_constraints_as_written:
+- column_name: Series_Title
+  code_for_constraint: .isComplete('Series_Title')
+- column_name: Series_Title
+  code_for_constraint: .satisfies("length(trim(Series_Title)) > 0", 'nonempty_title')
+- column_name: Released_Year
+  code_for_constraint: .isComplete('Released_Year')
+- column_name: Released_Year
+  code_for_constraint: .satisfies("Released_Year >= 1888 AND Released_Year <= year(current_date())
+    AND Released_Year = CAST(Released_Year AS BIGINT)", 'valid_release_year')
+- column_name: Series_Title
+  code_for_constraint: '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda
+    value: value == 1.0)'
+- column_name: IMDB_Rating
+  code_for_constraint: .isComplete('IMDB_Rating')
+- column_name: IMDB_Rating
+  code_for_constraint: .satisfies("IMDB_Rating >= 0 AND IMDB_Rating <= 10", 'rating_on_ten_point_scale')
+- column_name: No_of_Votes
+  code_for_constraint: .isComplete('No_of_Votes')
+- column_name: No_of_Votes
+  code_for_constraint: .satisfies("No_of_Votes > 0 AND No_of_Votes = CAST(No_of_Votes
+    AS BIGINT)", 'positive_integer_votes')
+- column_name: No_of_Votes
+  code_for_constraint: .satisfies("IMDB_Rating < 8 OR No_of_Votes >= 1000", 'high_rated_films_have_popularity_signal')
+- column_name: Runtime
+  code_for_constraint: .isComplete('Runtime')
+- column_name: Runtime
+  code_for_constraint: .satisfies("Runtime RLIKE '^[1-9][0-9]* min$'", 'runtime_in_minutes')
+- column_name: Genre
+  code_for_constraint: .isComplete('Genre')
+- column_name: Genre
+  code_for_constraint: .satisfies("Genre RLIKE '^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,
+    (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$'",
+    'known_genres_only')
+- column_name: Certificate
+  code_for_constraint: .satisfies("Certificate IS NULL OR Certificate IN ('U','UA','A','G','PG','PG-13','R','NC-17','Not
+    Rated','Unrated','Passed','Approved','TV-PG','TV-14','GP','16')", 'known_certificates_only')
+trajectory:
+  codex_version: codex-cli 0.147.0
+  model: gpt-6-sol
+  reasoning_effort: medium
+  command:
+  - codex
+  - exec
+  - --model
+  - gpt-6-sol
+  - -C
+  - /tmp/codex_synth_i91d64pd
+  - --sandbox
+  - workspace-write
+  - --skip-git-repo-check
+  - --ignore-user-config
+  - --color
+  - never
+  - --json
+  - -c
+  - sandbox_workspace_write.network_access=true
+  - -c
+  - model_reasoning_effort="medium"
+  - Solve the task specified in task.txt.
+  usage: *id001
+  token_accounting: *id002
+  cost: *id003
+  cost_without_cache_usd: 0.845754
+  failed_attempts: []
+  wall_clock_seconds: 112.223
+  wall_clock_seconds_including_retries: 112.223
+  attempts: 1
+  timeout_seconds: 1800
+  returncode: 0
+  isolation: audit
+  workspace_escapes: []
+  outside_workspace: []
+  deequ_tool_health: *id004
+  events:
+  - type: thread.started
+    thread_id: 01a0e3d2-a43d-7a71-8989-f05ea8be19ed
+  - type: item.completed
+    item:
+      id: item_0
+      type: error
+      message: Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata;
+        this can degrade performance and cause issues.
+  - type: turn.started
+  - type: item.completed
+    item:
+      id: item_1
+      type: agent_message
+      text: I’ll read `task.txt` and the local files, then implement and check the
+        solution.
+  - type: item.started
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; ls -la; cat task.txt; rg --files data code
+        2>/dev/null | head -80; sed -n '1,220p' deequ_check.py"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; ls -la; cat task.txt; rg --files data code
+        2>/dev/null | head -80; sed -n '1,220p' deequ_check.py"
+      aggregated_output: "/tmp/codex_synth_i91d64pd\ntotal 32\ndrwx------  7 hach13\
+        \ posix-nogroup   188 Sep 27 19:03 .\ndrwx------ 15 hach13 nobody        \
+        \ 4096 Sep 27 19:03 ..\ndr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 27 19:03\
+        \ .agents\ndr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 27 19:03 .codex\n\
+        dr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 27 19:03 .git\n-rw-r--r--  1\
+        \ hach13 posix-nogroup   937 Sep 27 19:03 AGENTS.md\ndrwxr-xr-x  2 hach13\
+        \ posix-nogroup    40 Sep 27 19:03 code\ndrwxr-xr-x  3 hach13 posix-nogroup\
+        \    28 Sep 27 19:03 data\n-rw-r--r--  1 hach13 posix-nogroup  4817 Sep 27\
+        \ 19:03 deequ_check.py\n-rw-r--r--  1 hach13 posix-nogroup  1337 Sep 27 19:03\
+        \ deequ_jars.txt\n-rw-r--r--  1 hach13 posix-nogroup 10017 Sep 27 19:03 task.txt\n\
+        # Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+        \ describing what\nthe program below assumes about its input data. If new\
+        \ data arrived that violated\none of your constraints, the program should\
+        \ be expected to misbehave -- crash,\nsilently produce a wrong number, or\
+        \ drop records it should have kept.\n\nYour output is a single file, `constraints.json`,\
+        \ in the current folder.\n\n# The program\n\nThis program consumes the dataset.\n\
+        \n```python\nimport argparse\nimport os\nfrom datetime import datetime\nimport\
+        \ numpy as np\nimport pandas as pd\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n\
+        \    parser.add_argument('--input', type=str, required=True)\n    parser.add_argument('--output',\
+        \ type=str, required=True)\n    args = parser.parse_args()\n\n    input_file\
+        \ = os.path.join(args.input, 'new_data.csv')\n    os.makedirs(args.output,\
+        \ exist_ok=True)\n\n    df = pd.read_csv(input_file)\n\n    # Basic type normalization\
+        \ for downstream logic\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'],\
+        \ errors='coerce')\n    df['Released_Year'] = pd.to_numeric(df['Released_Year'],\
+        \ errors='coerce').astype('Int64')\n    df['No_of_Votes'] = pd.to_numeric(df['No_of_Votes'],\
+        \ errors='coerce').fillna(0).astype(int)\n\n    current_year = datetime.now().year\n\
+        \n    allowed_genres = {\n        'Action', 'Adventure', 'Animation', 'Biography',\
+        \ 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family',\n        'Fantasy',\
+        \ 'Film-Noir', 'History', 'Horror', 'Music', 'Musical', 'Mystery', 'Romance',\
+        \ 'Sci-Fi', 'Sport',\n        'Thriller', 'War', 'Western'\n    }\n    allowed_certificates\
+        \ = {\n        'U', 'UA', 'A', 'G', 'PG', 'PG-13', 'R', 'NC-17', 'Not Rated',\
+        \ 'Unrated', 'Passed', 'Approved'\n    }\n    # Use the unique key as index\
+        \ for deterministic scoring and dedupe safety\n    df = df.set_index(['Series_Title',\
+        \ 'Released_Year'], verify_integrity=True)\n    # Quality component derived\
+        \ from rating; relies on bounded rating to keep scores in [0,1]\n    rating_score\
+        \ = (df['IMDB_Rating'] / 10.0).clip(0, 1)\n\n    # Popularity component (log-scaled\
+        \ votes); calibrated assuming high-rated entries have strong vote counts\n\
+        \    votes_log = np.log10(df['No_of_Votes'].clip(lower=1))\n    pop_score\
+        \ = ((votes_log - 3.0) / (6.0 - 3.0)).clip(0, 1)  # 1k->0, 1M->1\n    # Freshness\
+        \ factor decaying after ~30 years\n    age_years = (current_year - df.reset_index()['Released_Year']).astype(float)\n\
+        \    freshness = (1.0 - (age_years / 30.0)).clip(0, 1).values\n    # Parse\
+        \ runtime minutes for engagement modeling\n    runtime_min = df['Runtime'].str.extract(r'(\\\
+        d+)', expand=False).astype(int)\n\n    runtime_diff = (runtime_min - 110).astype(float)\n\
+        \    engagement = np.exp(-((runtime_diff / 50.0) ** 2))\n\n    genre_weights\
+        \ = {\n        'Action': 1.1, 'Adventure': 1.05, 'Animation': 1.05, 'Biography':\
+        \ 1.0, 'Comedy': 1.0, 'Crime': 1.05,\n        'Documentary': 0.85, 'Drama':\
+        \ 1.1, 'Family': 1.05, 'Fantasy': 1.0, 'Film-Noir': 1.0, 'History': 0.95,\n\
+        \        'Horror': 0.85, 'Music': 0.95, 'Musical': 0.90, 'Mystery': 1.0, 'Romance':\
+        \ 0.95, 'Sci-Fi': 1.0,\n        'Sport': 0.95, 'Thriller': 1.05, 'War': 0.90,\
+        \ 'Western': 0.85\n    }\n\n    def avg_genre_weight(genre_str: str) -> float:\n\
+        \        parts = [p.strip() for p in str(genre_str).split(',') if p.strip()]\n\
+        \        weights = [genre_weights.get(p, 1.0) for p in parts]\n        if\
+        \ not weights:\n            return 1.0\n        return float(np.mean(weights))\n\
+        \n    genre_pref = df['Genre'].map(avg_genre_weight)\n\n    cert_weights =\
+        \ {\n        'U': 1.10, 'G': 1.10, 'PG': 1.05, 'PG-13': 1.00, 'UA': 1.00,\
+        \ 'Passed': 0.95, 'Approved': 0.95,\n        'Not Rated': 0.95, 'Unrated':\
+        \ 0.90, 'R': 0.80, 'A': 0.75, 'NC-17': 0.00\n    }\n    cert_series = df['Certificate'].fillna('Not\
+        \ Rated').astype(str)\n    suitability = cert_series.map(cert_weights).fillna(0.90)\n\
+        \n    # Content suitability gating (e.g., avoid NC-17 for licensing)\n   \
+        \ eligible_mask = suitability > 0.0\n\n    # Combine signals into recommendation\
+        \ score\n    # The weighting structure assumes all upstream fields adhere\
+        \ to the asserted contracts\n    combined_score = (\n        (0.55 * rating_score\
+        \ + 0.45 * pop_score)\n        * (0.6 + 0.4 * freshness)\n        * (0.6 +\
+        \ 0.4 * engagement)\n        * (0.85 + 0.15 * genre_pref)\n        * suitability\n\
+        \    )\n\n    rec = df.copy()\n    rec['rating_score'] = rating_score\n  \
+        \  rec['pop_score'] = pop_score\n    rec['freshness'] = freshness\n    rec['engagement']\
+        \ = engagement\n    rec['genre_pref'] = genre_pref\n    rec['suitability']\
+        \ = suitability\n    rec['priority_score'] = combined_score\n\n    # Apply\
+        \ eligibility filter and minimum quality threshold for licensing\n    quality_gate\
+        \ = rec['IMDB_Rating'] >= 6.5\n    final = rec[eligible_mask & quality_gate].sort_values('priority_score',\
+        \ ascending=False)\n\n    # Persist results\n    out_cols = [\n        'Poster_Link',\
+        \ 'Certificate', 'Runtime', 'Genre', 'IMDB_Rating', 'No_of_Votes',\n     \
+        \   'Meta_score', 'Director', 'Star1', 'Star2', 'Star3', 'Star4', 'Gross',\n\
+        \        'rating_score', 'pop_score', 'freshness', 'engagement', 'genre_pref',\
+        \ 'suitability', 'priority_score'\n    ]\n    # Keep only columns that exist\
+        \ in the input plus derived metrics\n    out_cols = [c for c in out_cols if\
+        \ c in final.columns]\n\n    output_file = os.path.join(args.output, 'licensing_recommendations.csv')\n\
+        \    final.reset_index().to_csv(output_file, index=False, columns=['Series_Title',\
+        \ 'Released_Year'] + out_cols)\n\n\nif __name__ == '__main__':\n    main()\n\
+        \n```\n\nThe same program is on disk at `./code/general_task_19.py`, so you\
+        \ can run it against the\nstaged table, step through it, or search it, rather\
+        \ than working from the\nlisting alone.\n\n# The data\n\nThree rows sampled\
+        \ from the dataset the program consumes:\n\n[{'id': 200, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BZjZlZDlkYTktMmU1My00ZDBiLWFlNjEtYTBhNjVhOTM4ZjJjXkEyXkFqcGdeQXVyMTMxODk2OTU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Donnie Darko', 'Released_Year': 2001, 'Certificate': 'R',\
+        \ 'Runtime': '113 min', 'Genre': 'Drama, Mystery, Sci-Fi', 'IMDB_Rating':\
+        \ 8.0, 'Overview': 'After narrowly escaping a bizarre accident, a troubled\
+        \ teenager is plagued by visions of a man in a large rabbit suit who manipulates\
+        \ him to commit a series of crimes.', 'Meta_score': 88.0, 'Director': 'Richard\
+        \ Kelly', 'Star1': 'Jake Gyllenhaal', 'Star2': 'Jena Malone', 'Star3': 'Mary\
+        \ McDonnell', 'Star4': 'Holmes Osborne', 'No_of_Votes': 740086, 'Gross': '1,480,006'},\
+        \ {'id': 56, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BOWVmZGQ0MGYtMDI1Yy00MDkxLWJiYjQtMmZjZmQ0NDFmMDRhXkEyXkFqcGdeQXVyNjg3MDMxNzU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'The Peanut Butter Falcon', 'Released_Year': 2019, 'Certificate':\
+        \ 'PG-13', 'Runtime': '97 min', 'Genre': 'Adventure, Comedy, Drama', 'IMDB_Rating':\
+        \ 7.6, 'Overview': 'Zak runs away from his care home to make his dream of\
+        \ becoming a wrestler come true.', 'Meta_score': 70.0, 'Director': 'Tyler\
+        \ Nilson', 'Star1': 'Michael Schwartz', 'Star2': 'Zack Gottsagen', 'Star3':\
+        \ 'Ann Owens', 'Star4': 'Dakota Johnson', 'No_of_Votes': 66346, 'Gross': '13,122,642'},\
+        \ {'id': 43, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BMDU2ZWJlMjktMTRhMy00ZTA5LWEzNDgtYmNmZTEwZTViZWJkXkEyXkFqcGdeQXVyNDQ2OTk4MzI@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Toy Story', 'Released_Year': 1995, 'Certificate': 'U',\
+        \ 'Runtime': '81 min', 'Genre': 'Animation, Adventure, Comedy', 'IMDB_Rating':\
+        \ 8.3, 'Overview': \"A cowboy doll is profoundly threatened and jealous when\
+        \ a new spaceman figure supplants him as top toy in a boy's room.\", 'Meta_score':\
+        \ 95.0, 'Director': 'John Lasseter', 'Star1': 'Tom Hanks', 'Star2': 'Tim Allen',\
+        \ 'Star3': 'Don Rickles', 'Star4': 'Jim Varney', 'No_of_Votes': 887429, 'Gross':\
+        \ '191,796,233'}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\ncode/general_task_19.py\ndata/tables/observed_data.csv\n\"\
+        \"\"Run PyDeequ constraint code against the example tables and report results.\"\
+        \"\"\nimport argparse\nimport json\nimport os\nimport sys\nfrom pathlib import\
+        \ Path\n\nimport prismadv  # noqa: F401\n\nos.environ.pop(\"OPENAI_API_KEY\"\
+        , None)\n\nimport pandas as pd  # noqa: E402\nfrom prismadv.dq_manager import\
+        \ DeequDataQualityManager  # noqa: E402\n\nHERE = Path(__file__).resolve().parent\n\
+        TABLES_DIR = HERE / \"data\" / \"tables\"\nJARS_FILE = HERE / \"deequ_jars.txt\"\
+        \n\n\ndef build_spark():\n    \"\"\"A Spark session whose Deequ classpath\
+        \ is pinned to already-resolved jars.\n\n    The default session config asks\
+        \ Spark to fetch `spark.jars.packages` through\n    Ivy. That cannot work\
+        \ here: Ivy writes its resolution cache under $HOME, and\n    inside the agent's\
+        \ sandbox only the workspace is writable, so resolution dies\n    before the\
+        \ JVM starts and every check reports FAILS for a reason that has\n    nothing\
+        \ to do with the constraint. The jars were resolved once by the driver\n \
+        \   that staged this file; naming them directly removes the resolution step,\
+        \ and\n    with it the network and $HOME-write dependencies.\n    \"\"\"\n\
+        \    from pyspark.sql import SparkSession\n\n    jars = [line.strip() for\
+        \ line in JARS_FILE.read_text(encoding=\"utf-8\").split() if line.strip()]\n\
+        \    if not jars:\n        raise RuntimeError(f\"{JARS_FILE.name} is empty;\
+        \ the Deequ classpath cannot be pinned\")\n    # `spark.jars` takes URIs;\
+        \ the driver classpath takes plain filesystem paths.\n    local = [jar[len(\"\
+        file://\"):] if jar.startswith(\"file://\") else jar for jar in jars]\n  \
+        \  return (\n        SparkSession.builder.appName(\"deequ-local\")\n     \
+        \   .master(\"local[2]\")\n        .config(\"spark.driver.memory\", \"4g\"\
+        )\n        .config(\"spark.jars\", \",\".join(jars))\n        .config(\"spark.driver.extraClassPath\"\
+        , \":\".join(local))\n        .config(\"spark.executor.extraClassPath\", \"\
+        :\".join(local))\n        .config(\"spark.driver.host\", \"localhost\")\n\
+        \        .config(\"spark.ui.enabled\", \"false\")\n        .config(\"spark.sql.execution.arrow.pyspark.enabled\"\
+        , \"true\")\n        .getOrCreate()\n    )\n\n\ndef load_codes(path: Path)\
+        \ -> list[str]:\n    \"\"\"Accept JSON, or one constraint per line so quoting\
+        \ never blocks a check.\"\"\"\n    text = path.read_text(encoding=\"utf-8\"\
+        ).strip()\n    if not text:\n        return []\n    if text.lstrip()[0] in\
+        \ \"[{\":\n        try:\n            payload = json.loads(text)\n        except\
+        \ json.JSONDecodeError as exc:\n            print(f\"warning: {path.name}\
+        \ is not valid JSON ({exc}); \"\n                  f\"falling back to one-constraint-per-line\
+        \ parsing.\")\n            payload = None\n        if payload is not None:\n\
+        \            if isinstance(payload, dict):\n                payload = payload.get(\"\
+        constraints\", [])\n            codes = []\n            for item in payload:\n\
+        \                if isinstance(item, str):\n                    codes.append(item)\n\
+        \                else:\n                    codes.append(item.get(\"code_for_constraint\"\
+        ) or item.get(\"suggestion\"))\n            return [code for code in codes\
+        \ if code]\n    codes = []\n    for line in text.splitlines():\n        line\
+        \ = line.strip()\n        if not line or line.startswith(\"#\"):\n       \
+        \     continue\n        codes.append(line)\n    return codes\n\n\ndef main()\
+        \ -> int:\n    parser = argparse.ArgumentParser(description=__doc__)\n   \
+        \ parser.add_argument(\"--table\", required=True, help=\"Table name (file\
+        \ stem under data/tables).\")\n    parser.add_argument(\"--constraints\",\
+        \ required=True,\n                        help='JSON: [\"<code>\", ...] or\
+        \ {\"constraints\": [{\"code_for_constraint\": ...}]}')\n    args = parser.parse_args()\n\
+        \n    csv_path = TABLES_DIR / f\"{args.table}.csv\"\n    if not csv_path.exists():\n\
+        \        available = sorted(p.stem for p in TABLES_DIR.glob(\"*.csv\"))\n\
+        \        print(f\"no such table: {args.table}. available: {available}\")\n\
+        \        return 2\n\n    codes = load_codes(Path(args.constraints))\n    if\
+        \ not codes:\n        print(\"no constraint code found in the given file\"\
+        )\n        return 2\n\n    dataframe = pd.read_csv(csv_path)\n    manager\
+        \ = DeequDataQualityManager()\n    spark_df, spark = manager.spark_df_from_pandas_df(dataframe,\
+        \ spark_session=build_spark())\n    results = manager.validate_constraints_with_reasons(spark,\
+        \ spark_df, codes, isolated_check=True)\n\n    held = 0\n    for code, (is_valid,\
+        \ reason) in zip(codes, results):\n        held += int(bool(is_valid))\n \
+        \       print(f\"[{'HOLDS' if is_valid else 'FAILS'}] {code}\")\n        if\
+        \ not is_valid:\n            print(f\"          reason: {reason}\")\n    print(f\"\
+        \\n{held}/{len(codes)} constraint(s) hold on table '{args.table}' \"\n   \
+        \       f\"({len(dataframe)} rows).\")\n\n    try:\n        spark.sparkContext._gateway.shutdown_callback_server()\n\
+        \    except Exception:\n        pass\n    try:\n        spark.stop()\n   \
+        \ except Exception:\n        pass\n    return 0\n\n\nif __name__ == \"__main__\"\
+        :\n    code = main()\n    sys.stdout.flush()\n    os._exit(code)\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_3
+      type: command_execution
+      command: /usr/bin/bash -lc 'cat task.txt; cat code/general_task_19.py; head
+        -8 data/tables/observed_data.csv; wc -l data/tables/observed_data.csv; cat
+        AGENTS.md'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_3
+      type: command_execution
+      command: /usr/bin/bash -lc 'cat task.txt; cat code/general_task_19.py; head
+        -8 data/tables/observed_data.csv; wc -l data/tables/observed_data.csv; cat
+        AGENTS.md'
+      aggregated_output: "# Task\n\nYou are writing a **data unit test**: a set of\
+        \ PyDeequ constraints describing what\nthe program below assumes about its\
+        \ input data. If new data arrived that violated\none of your constraints,\
+        \ the program should be expected to misbehave -- crash,\nsilently produce\
+        \ a wrong number, or drop records it should have kept.\n\nYour output is a\
+        \ single file, `constraints.json`, in the current folder.\n\n# The program\n\
+        \nThis program consumes the dataset.\n\n```python\nimport argparse\nimport\
+        \ os\nfrom datetime import datetime\nimport numpy as np\nimport pandas as\
+        \ pd\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument('--input',\
+        \ type=str, required=True)\n    parser.add_argument('--output', type=str,\
+        \ required=True)\n    args = parser.parse_args()\n\n    input_file = os.path.join(args.input,\
+        \ 'new_data.csv')\n    os.makedirs(args.output, exist_ok=True)\n\n    df =\
+        \ pd.read_csv(input_file)\n\n    # Basic type normalization for downstream\
+        \ logic\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'], errors='coerce')\n\
+        \    df['Released_Year'] = pd.to_numeric(df['Released_Year'], errors='coerce').astype('Int64')\n\
+        \    df['No_of_Votes'] = pd.to_numeric(df['No_of_Votes'], errors='coerce').fillna(0).astype(int)\n\
+        \n    current_year = datetime.now().year\n\n    allowed_genres = {\n     \
+        \   'Action', 'Adventure', 'Animation', 'Biography', 'Comedy', 'Crime', 'Documentary',\
+        \ 'Drama', 'Family',\n        'Fantasy', 'Film-Noir', 'History', 'Horror',\
+        \ 'Music', 'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Sport',\n        'Thriller',\
+        \ 'War', 'Western'\n    }\n    allowed_certificates = {\n        'U', 'UA',\
+        \ 'A', 'G', 'PG', 'PG-13', 'R', 'NC-17', 'Not Rated', 'Unrated', 'Passed',\
+        \ 'Approved'\n    }\n    # Use the unique key as index for deterministic scoring\
+        \ and dedupe safety\n    df = df.set_index(['Series_Title', 'Released_Year'],\
+        \ verify_integrity=True)\n    # Quality component derived from rating; relies\
+        \ on bounded rating to keep scores in [0,1]\n    rating_score = (df['IMDB_Rating']\
+        \ / 10.0).clip(0, 1)\n\n    # Popularity component (log-scaled votes); calibrated\
+        \ assuming high-rated entries have strong vote counts\n    votes_log = np.log10(df['No_of_Votes'].clip(lower=1))\n\
+        \    pop_score = ((votes_log - 3.0) / (6.0 - 3.0)).clip(0, 1)  # 1k->0, 1M->1\n\
+        \    # Freshness factor decaying after ~30 years\n    age_years = (current_year\
+        \ - df.reset_index()['Released_Year']).astype(float)\n    freshness = (1.0\
+        \ - (age_years / 30.0)).clip(0, 1).values\n    # Parse runtime minutes for\
+        \ engagement modeling\n    runtime_min = df['Runtime'].str.extract(r'(\\d+)',\
+        \ expand=False).astype(int)\n\n    runtime_diff = (runtime_min - 110).astype(float)\n\
+        \    engagement = np.exp(-((runtime_diff / 50.0) ** 2))\n\n    genre_weights\
+        \ = {\n        'Action': 1.1, 'Adventure': 1.05, 'Animation': 1.05, 'Biography':\
+        \ 1.0, 'Comedy': 1.0, 'Crime': 1.05,\n        'Documentary': 0.85, 'Drama':\
+        \ 1.1, 'Family': 1.05, 'Fantasy': 1.0, 'Film-Noir': 1.0, 'History': 0.95,\n\
+        \        'Horror': 0.85, 'Music': 0.95, 'Musical': 0.90, 'Mystery': 1.0, 'Romance':\
+        \ 0.95, 'Sci-Fi': 1.0,\n        'Sport': 0.95, 'Thriller': 1.05, 'War': 0.90,\
+        \ 'Western': 0.85\n    }\n\n    def avg_genre_weight(genre_str: str) -> float:\n\
+        \        parts = [p.strip() for p in str(genre_str).split(',') if p.strip()]\n\
+        \        weights = [genre_weights.get(p, 1.0) for p in parts]\n        if\
+        \ not weights:\n            return 1.0\n        return float(np.mean(weights))\n\
+        \n    genre_pref = df['Genre'].map(avg_genre_weight)\n\n    cert_weights =\
+        \ {\n        'U': 1.10, 'G': 1.10, 'PG': 1.05, 'PG-13': 1.00, 'UA': 1.00,\
+        \ 'Passed': 0.95, 'Approved': 0.95,\n        'Not Rated': 0.95, 'Unrated':\
+        \ 0.90, 'R': 0.80, 'A': 0.75, 'NC-17': 0.00\n    }\n    cert_series = df['Certificate'].fillna('Not\
+        \ Rated').astype(str)\n    suitability = cert_series.map(cert_weights).fillna(0.90)\n\
+        \n    # Content suitability gating (e.g., avoid NC-17 for licensing)\n   \
+        \ eligible_mask = suitability > 0.0\n\n    # Combine signals into recommendation\
+        \ score\n    # The weighting structure assumes all upstream fields adhere\
+        \ to the asserted contracts\n    combined_score = (\n        (0.55 * rating_score\
+        \ + 0.45 * pop_score)\n        * (0.6 + 0.4 * freshness)\n        * (0.6 +\
+        \ 0.4 * engagement)\n        * (0.85 + 0.15 * genre_pref)\n        * suitability\n\
+        \    )\n\n    rec = df.copy()\n    rec['rating_score'] = rating_score\n  \
+        \  rec['pop_score'] = pop_score\n    rec['freshness'] = freshness\n    rec['engagement']\
+        \ = engagement\n    rec['genre_pref'] = genre_pref\n    rec['suitability']\
+        \ = suitability\n    rec['priority_score'] = combined_score\n\n    # Apply\
+        \ eligibility filter and minimum quality threshold for licensing\n    quality_gate\
+        \ = rec['IMDB_Rating'] >= 6.5\n    final = rec[eligible_mask & quality_gate].sort_values('priority_score',\
+        \ ascending=False)\n\n    # Persist results\n    out_cols = [\n        'Poster_Link',\
+        \ 'Certificate', 'Runtime', 'Genre', 'IMDB_Rating', 'No_of_Votes',\n     \
+        \   'Meta_score', 'Director', 'Star1', 'Star2', 'Star3', 'Star4', 'Gross',\n\
+        \        'rating_score', 'pop_score', 'freshness', 'engagement', 'genre_pref',\
+        \ 'suitability', 'priority_score'\n    ]\n    # Keep only columns that exist\
+        \ in the input plus derived metrics\n    out_cols = [c for c in out_cols if\
+        \ c in final.columns]\n\n    output_file = os.path.join(args.output, 'licensing_recommendations.csv')\n\
+        \    final.reset_index().to_csv(output_file, index=False, columns=['Series_Title',\
+        \ 'Released_Year'] + out_cols)\n\n\nif __name__ == '__main__':\n    main()\n\
+        \n```\n\nThe same program is on disk at `./code/general_task_19.py`, so you\
+        \ can run it against the\nstaged table, step through it, or search it, rather\
+        \ than working from the\nlisting alone.\n\n# The data\n\nThree rows sampled\
+        \ from the dataset the program consumes:\n\n[{'id': 200, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BZjZlZDlkYTktMmU1My00ZDBiLWFlNjEtYTBhNjVhOTM4ZjJjXkEyXkFqcGdeQXVyMTMxODk2OTU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Donnie Darko', 'Released_Year': 2001, 'Certificate': 'R',\
+        \ 'Runtime': '113 min', 'Genre': 'Drama, Mystery, Sci-Fi', 'IMDB_Rating':\
+        \ 8.0, 'Overview': 'After narrowly escaping a bizarre accident, a troubled\
+        \ teenager is plagued by visions of a man in a large rabbit suit who manipulates\
+        \ him to commit a series of crimes.', 'Meta_score': 88.0, 'Director': 'Richard\
+        \ Kelly', 'Star1': 'Jake Gyllenhaal', 'Star2': 'Jena Malone', 'Star3': 'Mary\
+        \ McDonnell', 'Star4': 'Holmes Osborne', 'No_of_Votes': 740086, 'Gross': '1,480,006'},\
+        \ {'id': 56, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BOWVmZGQ0MGYtMDI1Yy00MDkxLWJiYjQtMmZjZmQ0NDFmMDRhXkEyXkFqcGdeQXVyNjg3MDMxNzU@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'The Peanut Butter Falcon', 'Released_Year': 2019, 'Certificate':\
+        \ 'PG-13', 'Runtime': '97 min', 'Genre': 'Adventure, Comedy, Drama', 'IMDB_Rating':\
+        \ 7.6, 'Overview': 'Zak runs away from his care home to make his dream of\
+        \ becoming a wrestler come true.', 'Meta_score': 70.0, 'Director': 'Tyler\
+        \ Nilson', 'Star1': 'Michael Schwartz', 'Star2': 'Zack Gottsagen', 'Star3':\
+        \ 'Ann Owens', 'Star4': 'Dakota Johnson', 'No_of_Votes': 66346, 'Gross': '13,122,642'},\
+        \ {'id': 43, 'Poster_Link': 'https://m.media-amazon.com/images/M/MV5BMDU2ZWJlMjktMTRhMy00ZTA5LWEzNDgtYmNmZTEwZTViZWJkXkEyXkFqcGdeQXVyNDQ2OTk4MzI@._V1_UX67_CR0,0,67,98_AL_.jpg',\
+        \ 'Series_Title': 'Toy Story', 'Released_Year': 1995, 'Certificate': 'U',\
+        \ 'Runtime': '81 min', 'Genre': 'Animation, Adventure, Comedy', 'IMDB_Rating':\
+        \ 8.3, 'Overview': \"A cowboy doll is profoundly threatened and jealous when\
+        \ a new spaceman figure supplants him as top toy in a boy's room.\", 'Meta_score':\
+        \ 95.0, 'Director': 'John Lasseter', 'Star1': 'Tom Hanks', 'Star2': 'Tim Allen',\
+        \ 'Star3': 'Don Rickles', 'Star4': 'Jim Varney', 'No_of_Votes': 887429, 'Gross':\
+        \ '191,796,233'}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\nimport argparse\nimport os\nfrom datetime import datetime\n\
+        import numpy as np\nimport pandas as pd\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n\
+        \    parser.add_argument('--input', type=str, required=True)\n    parser.add_argument('--output',\
+        \ type=str, required=True)\n    args = parser.parse_args()\n\n    input_file\
+        \ = os.path.join(args.input, 'new_data.csv')\n    os.makedirs(args.output,\
+        \ exist_ok=True)\n\n    df = pd.read_csv(input_file)\n\n    # Basic type normalization\
+        \ for downstream logic\n    df['IMDB_Rating'] = pd.to_numeric(df['IMDB_Rating'],\
+        \ errors='coerce')\n    df['Released_Year'] = pd.to_numeric(df['Released_Year'],\
+        \ errors='coerce').astype('Int64')\n    df['No_of_Votes'] = pd.to_numeric(df['No_of_Votes'],\
+        \ errors='coerce').fillna(0).astype(int)\n\n    current_year = datetime.now().year\n\
+        \n    allowed_genres = {\n        'Action', 'Adventure', 'Animation', 'Biography',\
+        \ 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family',\n        'Fantasy',\
+        \ 'Film-Noir', 'History', 'Horror', 'Music', 'Musical', 'Mystery', 'Romance',\
+        \ 'Sci-Fi', 'Sport',\n        'Thriller', 'War', 'Western'\n    }\n    allowed_certificates\
+        \ = {\n        'U', 'UA', 'A', 'G', 'PG', 'PG-13', 'R', 'NC-17', 'Not Rated',\
+        \ 'Unrated', 'Passed', 'Approved'\n    }\n    # Use the unique key as index\
+        \ for deterministic scoring and dedupe safety\n    df = df.set_index(['Series_Title',\
+        \ 'Released_Year'], verify_integrity=True)\n    # Quality component derived\
+        \ from rating; relies on bounded rating to keep scores in [0,1]\n    rating_score\
+        \ = (df['IMDB_Rating'] / 10.0).clip(0, 1)\n\n    # Popularity component (log-scaled\
+        \ votes); calibrated assuming high-rated entries have strong vote counts\n\
+        \    votes_log = np.log10(df['No_of_Votes'].clip(lower=1))\n    pop_score\
+        \ = ((votes_log - 3.0) / (6.0 - 3.0)).clip(0, 1)  # 1k->0, 1M->1\n    # Freshness\
+        \ factor decaying after ~30 years\n    age_years = (current_year - df.reset_index()['Released_Year']).astype(float)\n\
+        \    freshness = (1.0 - (age_years / 30.0)).clip(0, 1).values\n    # Parse\
+        \ runtime minutes for engagement modeling\n    runtime_min = df['Runtime'].str.extract(r'(\\\
+        d+)', expand=False).astype(int)\n\n    runtime_diff = (runtime_min - 110).astype(float)\n\
+        \    engagement = np.exp(-((runtime_diff / 50.0) ** 2))\n\n    genre_weights\
+        \ = {\n        'Action': 1.1, 'Adventure': 1.05, 'Animation': 1.05, 'Biography':\
+        \ 1.0, 'Comedy': 1.0, 'Crime': 1.05,\n        'Documentary': 0.85, 'Drama':\
+        \ 1.1, 'Family': 1.05, 'Fantasy': 1.0, 'Film-Noir': 1.0, 'History': 0.95,\n\
+        \        'Horror': 0.85, 'Music': 0.95, 'Musical': 0.90, 'Mystery': 1.0, 'Romance':\
+        \ 0.95, 'Sci-Fi': 1.0,\n        'Sport': 0.95, 'Thriller': 1.05, 'War': 0.90,\
+        \ 'Western': 0.85\n    }\n\n    def avg_genre_weight(genre_str: str) -> float:\n\
+        \        parts = [p.strip() for p in str(genre_str).split(',') if p.strip()]\n\
+        \        weights = [genre_weights.get(p, 1.0) for p in parts]\n        if\
+        \ not weights:\n            return 1.0\n        return float(np.mean(weights))\n\
+        \n    genre_pref = df['Genre'].map(avg_genre_weight)\n\n    cert_weights =\
+        \ {\n        'U': 1.10, 'G': 1.10, 'PG': 1.05, 'PG-13': 1.00, 'UA': 1.00,\
+        \ 'Passed': 0.95, 'Approved': 0.95,\n        'Not Rated': 0.95, 'Unrated':\
+        \ 0.90, 'R': 0.80, 'A': 0.75, 'NC-17': 0.00\n    }\n    cert_series = df['Certificate'].fillna('Not\
+        \ Rated').astype(str)\n    suitability = cert_series.map(cert_weights).fillna(0.90)\n\
+        \n    # Content suitability gating (e.g., avoid NC-17 for licensing)\n   \
+        \ eligible_mask = suitability > 0.0\n\n    # Combine signals into recommendation\
+        \ score\n    # The weighting structure assumes all upstream fields adhere\
+        \ to the asserted contracts\n    combined_score = (\n        (0.55 * rating_score\
+        \ + 0.45 * pop_score)\n        * (0.6 + 0.4 * freshness)\n        * (0.6 +\
+        \ 0.4 * engagement)\n        * (0.85 + 0.15 * genre_pref)\n        * suitability\n\
+        \    )\n\n    rec = df.copy()\n    rec['rating_score'] = rating_score\n  \
+        \  rec['pop_score'] = pop_score\n    rec['freshness'] = freshness\n    rec['engagement']\
+        \ = engagement\n    rec['genre_pref'] = genre_pref\n    rec['suitability']\
+        \ = suitability\n    rec['priority_score'] = combined_score\n\n    # Apply\
+        \ eligibility filter and minimum quality threshold for licensing\n    quality_gate\
+        \ = rec['IMDB_Rating'] >= 6.5\n    final = rec[eligible_mask & quality_gate].sort_values('priority_score',\
+        \ ascending=False)\n\n    # Persist results\n    out_cols = [\n        'Poster_Link',\
+        \ 'Certificate', 'Runtime', 'Genre', 'IMDB_Rating', 'No_of_Votes',\n     \
+        \   'Meta_score', 'Director', 'Star1', 'Star2', 'Star3', 'Star4', 'Gross',\n\
+        \        'rating_score', 'pop_score', 'freshness', 'engagement', 'genre_pref',\
+        \ 'suitability', 'priority_score'\n    ]\n    # Keep only columns that exist\
+        \ in the input plus derived metrics\n    out_cols = [c for c in out_cols if\
+        \ c in final.columns]\n\n    output_file = os.path.join(args.output, 'licensing_recommendations.csv')\n\
+        \    final.reset_index().to_csv(output_file, index=False, columns=['Series_Title',\
+        \ 'Released_Year'] + out_cols)\n\n\nif __name__ == '__main__':\n    main()\n\
+        id,Poster_Link,Series_Title,Released_Year,Certificate,Runtime,Genre,IMDB_Rating,Overview,Meta_score,Director,Star1,Star2,Star3,Star4,No_of_Votes,Gross\n\
+        0,\"https://m.media-amazon.com/images/M/MV5BMWQ2MjQ0OTctMWE1OC00NjZjLTk3ZDAtNTk3NTZiYWMxYTlmXkEyXkFqcGdeQXVyMTQxNzMzNDI@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Ying xiong,2002,PG-13,120 min,\"Action, Adventure, History\",7.9,\"A defense\
+        \ officer, Nameless, was summoned by the King of Qin regarding his success\
+        \ of terminating three warriors.\",85.0,Yimou Zhang,Jet Li,Tony Chiu-Wai Leung,Maggie\
+        \ Cheung,Ziyi Zhang,173999,\"53,710,019\"\n1,\"https://m.media-amazon.com/images/M/MV5BY2ViOTU5MDQtZTRiZi00YjViLWFiY2ItOTRhNWYyN2ZiMzUyXkEyXkFqcGdeQXVyNTAyODkwOQ@@._V1_UY98_CR1,0,67,98_AL_.jpg\"\
+        ,Chugyeokja,2008,,125 min,\"Action, Crime, Thriller\",7.8,A disgraced ex-policeman\
+        \ who runs a small ring of prostitutes finds himself in a race against time\
+        \ when one of his women goes missing.,64.0,Hong-jin Na,Kim Yoon-seok,Jung-woo\
+        \ Ha,Yeong-hie Seo,Yoo-Jeong Kim,58468,\n2,\"https://m.media-amazon.com/images/M/MV5BYWQ0MGNjOTYtMWJlNi00YWMxLWFmMzktYjAyNTVkY2U1NWNhL2ltYWdlL2ltYWdlXkEyXkFqcGdeQXVyNjc1NTYyMjg@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Brief Encounter,1945,U,86 min,\"Drama, Romance\",8.0,\"Meeting a stranger\
+        \ in a railway station, a woman is tempted to cheat on her husband.\",92.0,David\
+        \ Lean,Celia Johnson,Trevor Howard,Stanley Holloway,Joyce Carey,35601,\n3,\"\
+        https://m.media-amazon.com/images/M/MV5BMDI5ZWJhOWItYTlhOC00YWNhLTlkNzctNDU5YTI1M2E1MWZhXkEyXkFqcGdeQXVyNTIzOTk5ODM@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Casino Royale,2006,PG-13,144 min,\"Action, Adventure, Thriller\",8.0,\"After\
+        \ earning 00 status and a licence to kill, Secret Agent James Bond sets out\
+        \ on his first mission as 007. Bond must defeat a private banker funding terrorists\
+        \ in a high-stakes game of poker at Casino Royale, Montenegro.\",80.0,Martin\
+        \ Campbell,Daniel Craig,Eva Green,Judi Dench,Jeffrey Wright,582239,\"167,445,960\"\
+        \n4,\"https://m.media-amazon.com/images/M/MV5BZTAzNWZlNmUtZDEzYi00ZjA5LWIwYjEtZGM1NWE1MjE4YWRhXkEyXkFqcGdeQXVyNjU0OTQ0OTY@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Finding Nemo,2003,U,100 min,\"Animation, Adventure, Comedy\",8.1,\"After\
+        \ his son is captured in the Great Barrier Reef and taken to Sydney, a timid\
+        \ clownfish sets out on a journey to bring him home.\",90.0,Andrew Stanton,Lee\
+        \ Unkrich,Albert Brooks,Ellen DeGeneres,Alexander Gould,949565,\"380,843,261\"\
+        \n5,\"https://m.media-amazon.com/images/M/MV5BNWMxYTZlOTUtZDExMi00YzZmLTkwYTMtZmM2MmRjZmQ3OGY4XkEyXkFqcGdeQXVyMTAwMzUyMzUy._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,300,2006,A,117 min,\"Action, Drama\",7.6,King Leonidas of Sparta and a force\
+        \ of 300 men fight the Persians at Thermopylae in 480 B.C.,52.0,Zack Snyder,Gerard\
+        \ Butler,Lena Headey,David Wenham,Dominic West,732876,\"210,614,939\"\n6,\"\
+        https://m.media-amazon.com/images/M/MV5BMjM2MDgxMDg0Nl5BMl5BanBnXkFtZTgwNTM2OTM5NDE@._V1_UX67_CR0,0,67,98_AL_.jpg\"\
+        ,Jurassic Park,1993,UA,127 min,\"Action, Adventure, Sci-Fi\",8.1,A pragmatic\
+        \ paleontologist visiting an almost complete theme park is tasked with protecting\
+        \ a couple of kids after a power failure causes the park's cloned dinosaurs\
+        \ to run loose.,68.0,Steven Spielberg,Sam Neill,Laura Dern,Jeff Goldblum,Richard\
+        \ Attenborough,867615,\"402,453,882\"\n600 data/tables/observed_data.csv\n\
+        # Workspace boundary\n\nYour workspace is the current folder, and for this\
+        \ task nothing else exists.\n\n- Read, list, search and write only inside\
+        \ this folder: `./data`, `./code`,\n  `deequ_check.py`, `task.txt`, and whatever\
+        \ you create here.\n- Do not touch anything outside it. That means no parent\
+        \ directory (`..`), no\n  other folder under /tmp, no home directory (`~`,\
+        \ $HOME), and no absolute path\n  anywhere else on the filesystem.\n- Do not\
+        \ search the wider filesystem -- no `rg`, `grep`, `find`, `ls` or\n  `python`\
+        \ over `/`, `/tmp`, `..`, `~` or any path outside this folder -- for\n  related\
+        \ data, prompts, examples, other runs, or previous answers. There is\n  nothing\
+        \ out there you are allowed to use, and a run that looks is discarded.\n-\
+        \ Running `python`, `deequ_check.py` and the tools on your PATH is fine; the\n\
+        \  boundary is about what you read and write, not which interpreter runs.\n\
+        \nEverything you need is here. Work only from it.\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_4
+      type: command_execution
+      command: '/usr/bin/bash -lc "sed -n ''125,270p'' task.txt; sed -n ''270,370p''
+        task.txt; python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv'');print(x.shape);print(x.dtypes.to_string());print(x.isna().sum().to_string());print(''year
+        range'',x.Released_Year.min(),x.Released_Year.max()); print(''ratings'',x.IMDB_Rating.min(),x.IMDB_Rating.max());print(''vote'',x.No_of_Votes.min(),x.No_of_Votes.max());print(''certs'',x.Certificate.value_counts(dropna=False).to_string());print(''genre
+        distinct tokens'', sorted({p.strip() for s in x.Genre.dropna() for p in s.split('','')}));print(''runtime
+        examples'',x.Runtime.value_counts().head(8));print(''key dupes'',x.duplicated([''Series_Title'',''Released_Year'']).sum());print(''rating
+        votes min >8'',x.loc[x.IMDB_Rating>=8,''No_of_Votes''].min());
+
+        PY"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_4
+      type: command_execution
+      command: '/usr/bin/bash -lc "sed -n ''125,270p'' task.txt; sed -n ''270,370p''
+        task.txt; python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv'');print(x.shape);print(x.dtypes.to_string());print(x.isna().sum().to_string());print(''year
+        range'',x.Released_Year.min(),x.Released_Year.max()); print(''ratings'',x.IMDB_Rating.min(),x.IMDB_Rating.max());print(''vote'',x.No_of_Votes.min(),x.No_of_Votes.max());print(''certs'',x.Certificate.value_counts(dropna=False).to_string());print(''genre
+        distinct tokens'', sorted({p.strip() for s in x.Genre.dropna() for p in s.split('','')}));print(''runtime
+        examples'',x.Runtime.value_counts().head(8));print(''key dupes'',x.duplicated([''Series_Title'',''Released_Year'']).sum());print(''rating
+        votes min >8'',x.loc[x.IMDB_Rating>=8,''No_of_Votes''].min());
+
+        PY"'
+      aggregated_output: '(599, 17)
+
+        id                 int64
+
+        Poster_Link       object
+
+        Series_Title      object
+
+        Released_Year      int64
+
+        Certificate       object
+
+        Runtime           object
+
+        Genre             object
+
+        IMDB_Rating      float64
+
+        Overview          object
+
+        Meta_score       float64
+
+        Director          object
+
+        Star1             object
+
+        Star2             object
+
+        Star3             object
+
+        Star4             object
+
+        No_of_Votes        int64
+
+        Gross             object
+
+        id                 0
+
+        Poster_Link        0
+
+        Series_Title       0
+
+        Released_Year      0
+
+        Certificate       61
+
+        Runtime            0
+
+        Genre              0
+
+        IMDB_Rating        0
+
+        Overview           0
+
+        Meta_score        86
+
+        Director           0
+
+        Star1              0
+
+        Star2              0
+
+        Star3              0
+
+        Star4              0
+
+        No_of_Votes        0
+
+        Gross            103
+
+        year range 1924 2020
+
+        ratings 7.6 9.3
+
+        vote 25198 2343110
+
+        certs Certificate
+
+        U           150
+
+        A           121
+
+        UA           99
+
+        R            91
+
+        NaN          61
+
+        PG-13        25
+
+        Passed       20
+
+        PG           15
+
+        G             7
+
+        Approved      5
+
+        TV-PG         2
+
+        GP            1
+
+        TV-14         1
+
+        16            1
+
+        genre distinct tokens [''Action'', ''Adventure'', ''Animation'', ''Biography'',
+        ''Comedy'', ''Crime'', ''Drama'', ''Family'', ''Fantasy'', ''Film-Noir'',
+        ''History'', ''Horror'', ''Music'', ''Musical'', ''Mystery'', ''Romance'',
+        ''Sci-Fi'', ''Sport'', ''Thriller'', ''War'', ''Western'']
+
+        runtime examples Runtime
+
+        122 min    15
+
+        129 min    15
+
+        120 min    13
+
+        113 min    13
+
+        119 min    13
+
+        130 min    13
+
+        110 min    12
+
+        108 min    12
+
+        Name: count, dtype: int64
+
+        key dupes 0
+
+        rating votes min >8 26725
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_5
+      type: reasoning
+      text: '**Evaluating constraints for ratings**
+
+
+        I''m considering the current year of 2026 and the need for constraints focused
+        on unique completeness. I''m looking at rating thresholds, particularly the
+        idea of requiring a score of at least 6.5, though maybe that''s too strict
+        since we''re seeing a minimum of 7.6. There are also vote thresholds and ratings
+        over 1000 to consider for popularity. I think we might need to address certificates
+        for TV ratings and how to manage unknowns without enforcing too harshly. I''ll
+        check the constraints to see what holds true.
+
+        **Exploring tool limitations**
+
+
+        I need to find documentation for the tools I''m allowed to use. It seems I
+        may only perform local Python introspection, which means I can''t read from
+        external sites. I wonder if I can inspect installed methods using the interpreter
+        and check what''s available. I could use `dir(Check)` to see runtime functions,
+        but I can''t read anything outside the specified folder. I''ll have to utilize
+        the `deequ_check` to test within these limitations. It sounds like I need
+        a multi-phase plan to keep things concise.'
+  - type: item.completed
+    item:
+      id: item_6
+      type: agent_message
+      text: The key fields look complete; I’ll turn the scoring assumptions into constraints.
+  - type: item.started
+    item:
+      id: item_7
+      type: todo_list
+      items:
+      - text: Identify program-dependent input invariants
+        completed: true
+      - text: Draft constraints matching observed data
+        completed: false
+      - text: Validate constraints against staged table
+        completed: false
+  - type: item.completed
+    item:
+      id: item_8
+      type: reasoning
+      text: '**Evaluating contracts and years**
+
+
+        I need to decide on contract terms focusing on a valid year range from 1888
+        to 2026. This involves checking if the release year, from 1924 to 2020, satisfies
+        the condition using the `.satisfies()` method. I''ll hardcode the current
+        year dynamically in Python to ensure compliance. There might be concerns about
+        type contamination from Pandas to Spark. It''s essential to consider using
+        casts and checks for invalid data, ensuring I manage any potential errors
+        during processing.
+
+        **Setting voting criteria**
+
+
+        I''m looking at votes here, focusing on ensuring they are numeric, non-null,
+        and non-negative integers. To prevent fallbacks to zero, I want to check that
+        votes are positive using `.isPositive("No_of_Votes")` and ensure they match
+        the BIGINT type. A minimum threshold of 1,000 votes will be universally observed,
+        but I wonder if we should raise that to 10,000 for better reliability. I’ll
+        also account for genres through regex parsing while ensuring high-rated entries
+        maintain strong vote counts, particularly those rated above 8.5.'
+  - type: item.started
+    item:
+      id: item_9
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv''); print(''genres:'',x.Genre.value_counts().head(5).to_string());print(''runtime
+        min max'',x.Runtime.str.extract(r''(\\d+)'')[0].astype(int).agg([''min'',''max'']));print(''runtime
+        unusual'',x.loc[~x.Runtime.str.fullmatch(r''[1-9][0-9]* min''), ''Runtime''].unique());print(''titles
+        blank'',x.Series_Title.astype(str).str.strip().eq('''').sum());print(''genre
+        unusual'',x.loc[~x.Genre.str.fullmatch(r''[A-Za-z-]+(?:, [A-Za-z-]+)*''),
+        ''Genre''].unique()); print(''votes min by rating'',x.groupby(pd.cut(x.IMDB_Rating,[0,6.5,8,9,10])).No_of_Votes.min().to_string());print(''available
+        cert odd'',x.loc[~x.Certificate.isin([''U'',''UA'',''A'',''G'',''PG'',''PG-13'',''R'',''NC-17'',''Not
+        Rated'',''Unrated'',''Passed'',''Approved'']) & x.Certificate.notna(), ''Certificate''].value_counts().to_string())
+
+        PY"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_9
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv''); print(''genres:'',x.Genre.value_counts().head(5).to_string());print(''runtime
+        min max'',x.Runtime.str.extract(r''(\\d+)'')[0].astype(int).agg([''min'',''max'']));print(''runtime
+        unusual'',x.loc[~x.Runtime.str.fullmatch(r''[1-9][0-9]* min''), ''Runtime''].unique());print(''titles
+        blank'',x.Series_Title.astype(str).str.strip().eq('''').sum());print(''genre
+        unusual'',x.loc[~x.Genre.str.fullmatch(r''[A-Za-z-]+(?:, [A-Za-z-]+)*''),
+        ''Genre''].unique()); print(''votes min by rating'',x.groupby(pd.cut(x.IMDB_Rating,[0,6.5,8,9,10])).No_of_Votes.min().to_string());print(''available
+        cert odd'',x.loc[~x.Certificate.isin([''U'',''UA'',''A'',''G'',''PG'',''PG-13'',''R'',''NC-17'',''Not
+        Rated'',''Unrated'',''Passed'',''Approved'']) & x.Certificate.notna(), ''Certificate''].value_counts().to_string())
+
+        PY"'
+      aggregated_output: "/sc-scratch/sc-scratch-ikim-prismadv/prismadv-revision/.venv/lib/python3.12/site-packages/pandas/core/util/hashing.py:330:\
+        \ RuntimeWarning: invalid value encountered in cast\n  vals.astype(str).astype(object),\
+        \ hash_key, encoding\n<stdin>:2: FutureWarning: The default of observed=False\
+        \ is deprecated and will be changed to True in a future version of pandas.\
+        \ Pass observed=False to retain current behavior or observed=True to adopt\
+        \ the future default and silence this warning.\ngenres: Genre\nDrama     \
+        \                54\nDrama, Romance            28\nComedy, Drama, Romance\
+        \    22\nComedy, Drama             20\nAction, Crime, Drama      18\nruntime\
+        \ min max min     45\nmax    238\nName: 0, dtype: int64\nruntime unusual []\n\
+        titles blank 0\ngenre unusual []\nvotes min by rating IMDB_Rating\n(0.0, 6.5]\
+        \           NaN\n(6.5, 8.0]       25198.0\n(8.0, 9.0]       26875.0\n(9.0,\
+        \ 10.0]    2343110.0\navailable cert odd Certificate\nTV-PG    2\nGP     \
+        \  1\nTV-14    1\n16       1\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_10
+      type: agent_message
+      text: The observed data supports these checks; I’ll write them and run the validator.
+  - type: item.started
+    item:
+      id: item_11
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isComplete(''Series_Title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"length(trim(Series_Title))
+        > 0\\\", ''nonempty_title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".isComplete(''Released_Year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Released_Year >= 1888 AND
+        Released_Year <= year(current_date()) AND Released_Year = CAST(Released_Year
+        AS BIGINT)\\\", ''valid_release_year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".isComplete(''IMDB_Rating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"IMDB_Rating >= 0 AND IMDB_Rating
+        <= 10\\\", ''rating_on_ten_point_scale'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".isComplete(''No_of_Votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"No_of_Votes > 0 AND No_of_Votes
+        = CAST(No_of_Votes AS BIGINT)\\\", ''positive_integer_votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"IMDB_Rating < 8 OR No_of_Votes
+        >= 1000\\\", ''high_rated_films_have_popularity_signal'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Runtime\",
+
+        +      \"code_for_constraint\": \".isComplete(''Runtime'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Runtime\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Runtime RLIKE ''"''^[1-9][0-9]*
+        min$''"''\\\", ''runtime_in_minutes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Genre\",
+
+        +      \"code_for_constraint\": \".isComplete(''Genre'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Genre\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Genre RLIKE ''"''^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,
+        (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$''"''\\\",
+        ''known_genres_only'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Certificate\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Certificate IS NULL OR Certificate
+        IN (''U'',''UA'',''A'',''G'',''PG'',''PG-13'',''R'',''NC-17'',''Not Rated'',''Unrated'',''Passed'',''Approved'',''TV-PG'',''TV-14'',''GP'',''16'')\\\",
+        ''known_certificates_only'')\"
+
+        +    }
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.updated
+    item:
+      id: item_7
+      type: todo_list
+      items:
+      - text: Identify program-dependent input invariants
+        completed: true
+      - text: Draft constraints matching observed data
+        completed: true
+      - text: Validate constraints against staged table
+        completed: false
+  - type: item.completed
+    item:
+      id: item_12
+      type: agent_message
+      text: '`constraints.json` is written. The PyDeequ check is still running.'
+  - type: item.completed
+    item:
+      id: item_11
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isComplete(''Series_Title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"length(trim(Series_Title))
+        > 0\\\", ''nonempty_title'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".isComplete(''Released_Year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Released_Year\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Released_Year >= 1888 AND
+        Released_Year <= year(current_date()) AND Released_Year = CAST(Released_Year
+        AS BIGINT)\\\", ''valid_release_year'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Series_Title\",
+
+        +      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".isComplete(''IMDB_Rating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"IMDB_Rating\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"IMDB_Rating >= 0 AND IMDB_Rating
+        <= 10\\\", ''rating_on_ten_point_scale'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".isComplete(''No_of_Votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"No_of_Votes > 0 AND No_of_Votes
+        = CAST(No_of_Votes AS BIGINT)\\\", ''positive_integer_votes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"No_of_Votes\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"IMDB_Rating < 8 OR No_of_Votes
+        >= 1000\\\", ''high_rated_films_have_popularity_signal'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Runtime\",
+
+        +      \"code_for_constraint\": \".isComplete(''Runtime'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Runtime\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Runtime RLIKE ''"''^[1-9][0-9]*
+        min$''"''\\\", ''runtime_in_minutes'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Genre\",
+
+        +      \"code_for_constraint\": \".isComplete(''Genre'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Genre\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Genre RLIKE ''"''^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,
+        (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$''"''\\\",
+        ''known_genres_only'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Certificate\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"Certificate IS NULL OR Certificate
+        IN (''U'',''UA'',''A'',''G'',''PG'',''PG-13'',''R'',''NC-17'',''Not Rated'',''Unrated'',''Passed'',''Approved'',''TV-PG'',''TV-14'',''GP'',''16'')\\\",
+        ''known_certificates_only'')\"
+
+        +    }
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: "SLF4J: Failed to load class \"org.slf4j.impl.StaticLoggerBinder\"\
+        .\nSLF4J: Defaulting to no-operation (NOP) logger implementation\nSLF4J: See\
+        \ http://www.slf4j.org/codes.html#StaticLoggerBinder for further details.\n\
+        SLF4J: Failed to load class \"org.slf4j.impl.StaticMDCBinder\".\nSLF4J: Defaulting\
+        \ to no-operation MDCAdapter implementation.\nSLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder\
+        \ for further details.\n[HOLDS] .isComplete('Series_Title')\n[HOLDS] .satisfies(\"\
+        length(trim(Series_Title)) > 0\", 'nonempty_title')\n[HOLDS] .isComplete('Released_Year')\n\
+        [HOLDS] .satisfies(\"Released_Year >= 1888 AND Released_Year <= year(current_date())\
+        \ AND Released_Year = CAST(Released_Year AS BIGINT)\", 'valid_release_year')\n\
+        [FAILS] .isUnique(['Series_Title', 'Released_Year'])\n          reason: Unable\
+        \ to instantiate constraint 'isUnique(['Series_Title', 'Released_Year'])':\
+        \ An error occurred while calling o82.isUnique. Trace:\npy4j.Py4JException:\
+        \ Method isUnique([class java.util.ArrayList, class scala.None$, class scala.None$])\
+        \ does not exist\n\tat py4j.reflection.ReflectionEngine.getMethod(ReflectionEngine.java:321)\n\
+        \tat py4j.reflection.ReflectionEngine.getMethod(ReflectionEngine.java:329)\n\
+        \tat py4j.Gateway.invoke(Gateway.java:274)\n\tat py4j.commands.AbstractCommand.invokeMethod(AbstractCommand.java:132)\n\
+        \tat py4j.commands.CallCommand.execute(CallCommand.java:79)\n\tat py4j.ClientServerConnection.waitForCommands(ClientServerConnection.java:182)\n\
+        \tat py4j.ClientServerConnection.run(ClientServerConnection.java:106)\n\t\
+        at java.base/java.lang.Thread.run(Thread.java:829)\n\n\n[HOLDS] .isComplete('IMDB_Rating')\n\
+        [HOLDS] .satisfies(\"IMDB_Rating >= 0 AND IMDB_Rating <= 10\", 'rating_on_ten_point_scale')\n\
+        [HOLDS] .isComplete('No_of_Votes')\n[HOLDS] .satisfies(\"No_of_Votes > 0 AND\
+        \ No_of_Votes = CAST(No_of_Votes AS BIGINT)\", 'positive_integer_votes')\n\
+        [HOLDS] .satisfies(\"IMDB_Rating < 8 OR No_of_Votes >= 1000\", 'high_rated_films_have_popularity_signal')\n\
+        [HOLDS] .isComplete('Runtime')\n[HOLDS] .satisfies(\"Runtime RLIKE '^[1-9][0-9]*\
+        \ min$'\", 'runtime_in_minutes')\n[HOLDS] .isComplete('Genre')\n[HOLDS] .satisfies(\"\
+        Genre RLIKE '^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,\
+        \ (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$'\"\
+        , 'known_genres_only')\n[HOLDS] .satisfies(\"Certificate IS NULL OR Certificate\
+        \ IN ('U','UA','A','G','PG','PG-13','R','NC-17','Not Rated','Unrated','Passed','Approved','TV-PG','TV-14','GP','16')\"\
+        , 'known_certificates_only')\n\n14/15 constraint(s) hold on table 'observed_data'\
+        \ (599 rows).\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_13
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv'');print(''title dupes'',x.Series_Title.duplicated().sum());print(x.loc[x.Series_Title.duplicated(keep=False),[''Series_Title'',''Released_Year'']].to_string(index=False))
+
+        PY"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_13
+      type: command_execution
+      command: '/usr/bin/bash -lc "python - <<''PY''
+
+        import pandas as pd
+
+        x=pd.read_csv(''data/tables/observed_data.csv'');print(''title dupes'',x.Series_Title.duplicated().sum());print(x.loc[x.Series_Title.duplicated(keep=False),[''Series_Title'',''Released_Year'']].to_string(index=False))
+
+        PY"'
+      aggregated_output: 'title dupes 0
+
+        Empty DataFrame
+
+        Columns: [Series_Title, Released_Year]
+
+        Index: []
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_14
+      type: reasoning
+      text: '**Evaluating uniqueness checks**
+
+
+        I’m considering how to check for uniqueness in data. I think starting with
+        `.hasUniqueness([''Series_Title'',''Released_Year''], lambda x:x==1)` is a
+        better way to avoid a huge output. However, I also note that using `.isUnique(''Series_Title'')`
+        might be a bit too strong, as it would reject legitimate remakes that share
+        the same title but have different release years. So, I’m leaning towards the
+        composite approach with `.hasUniqueness`.'
+  - type: item.completed
+    item:
+      id: item_15
+      type: agent_message
+      text: Fourteen checks hold. I’ll adjust the composite-key check’s PyDeequ syntax.
+  - type: item.started
+    item:
+      id: item_16
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Update File: constraints.json
+
+        @@
+
+        -      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +      \"code_for_constraint\": \".hasUniqueness([''Series_Title'', ''Released_Year''],
+        lambda value: value == 1.0)\"
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_16
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Update File: constraints.json
+
+        @@
+
+        -      \"code_for_constraint\": \".isUnique([''Series_Title'', ''Released_Year''])\"
+
+        +      \"code_for_constraint\": \".hasUniqueness([''Series_Title'', ''Released_Year''],
+        lambda value: value == 1.0)\"
+
+        *** End Patch
+
+        PATCH
+
+        python deequ_check.py --table observed_data --constraints constraints.json"'
+      aggregated_output: 'SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+
+        SLF4J: Defaulting to no-operation (NOP) logger implementation
+
+        SLF4J: See http://www.slf4j.org/codes.html#StaticLoggerBinder for further
+        details.
+
+        SLF4J: Failed to load class "org.slf4j.impl.StaticMDCBinder".
+
+        SLF4J: Defaulting to no-operation MDCAdapter implementation.
+
+        SLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder for further
+        details.
+
+        Python Callback server started!
+
+        [HOLDS] .isComplete(''Series_Title'')
+
+        [HOLDS] .satisfies("length(trim(Series_Title)) > 0", ''nonempty_title'')
+
+        [HOLDS] .isComplete(''Released_Year'')
+
+        [HOLDS] .satisfies("Released_Year >= 1888 AND Released_Year <= year(current_date())
+        AND Released_Year = CAST(Released_Year AS BIGINT)", ''valid_release_year'')
+
+        [HOLDS] .hasUniqueness([''Series_Title'', ''Released_Year''], lambda value:
+        value == 1.0)
+
+        [HOLDS] .isComplete(''IMDB_Rating'')
+
+        [HOLDS] .satisfies("IMDB_Rating >= 0 AND IMDB_Rating <= 10", ''rating_on_ten_point_scale'')
+
+        [HOLDS] .isComplete(''No_of_Votes'')
+
+        [HOLDS] .satisfies("No_of_Votes > 0 AND No_of_Votes = CAST(No_of_Votes AS
+        BIGINT)", ''positive_integer_votes'')
+
+        [HOLDS] .satisfies("IMDB_Rating < 8 OR No_of_Votes >= 1000", ''high_rated_films_have_popularity_signal'')
+
+        [HOLDS] .isComplete(''Runtime'')
+
+        [HOLDS] .satisfies("Runtime RLIKE ''^[1-9][0-9]* min$''", ''runtime_in_minutes'')
+
+        [HOLDS] .isComplete(''Genre'')
+
+        [HOLDS] .satisfies("Genre RLIKE ''^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,
+        (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$''",
+        ''known_genres_only'')
+
+        [HOLDS] .satisfies("Certificate IS NULL OR Certificate IN (''U'',''UA'',''A'',''G'',''PG'',''PG-13'',''R'',''NC-17'',''Not
+        Rated'',''Unrated'',''Passed'',''Approved'',''TV-PG'',''TV-14'',''GP'',''16'')",
+        ''known_certificates_only'')
+
+
+        15/15 constraint(s) hold on table ''observed_data'' (599 rows).
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.updated
+    item:
+      id: item_7
+      type: todo_list
+      items:
+      - text: Identify program-dependent input invariants
+        completed: true
+      - text: Draft constraints matching observed data
+        completed: true
+      - text: Validate constraints against staged table
+        completed: true
+  - type: item.completed
+    item:
+      id: item_17
+      type: agent_message
+      text: Created `constraints.json` with 15 PyDeequ constraints covering the program’s
+        key, scoring, parsing, genre, and certificate assumptions. All 15 hold on
+        the 599-row observed table.
+  - type: item.completed
+    item:
+      id: item_7
+      type: todo_list
+      items:
+      - text: Identify program-dependent input invariants
+        completed: true
+      - text: Draft constraints matching observed data
+        completed: true
+      - text: Validate constraints against staged table
+        completed: true
+  - type: turn.completed
+    usage: *id001
+  stderr_tail: 'Reading additional input from stdin...
+
+    '
+constraints:
+  constraints:
+    Certificate:
+      code:
+      - - .satisfies("Certificate IS NULL OR Certificate IN ('U','UA','A','G','PG','PG-13','R','NC-17','Not
+          Rated','Unrated','Passed','Approved','TV-PG','TV-14','GP','16')", 'known_certificates_only')
+        - Valid
+      assumptions: []
+      column_name: Certificate
+    Genre:
+      code:
+      - - .isComplete('Genre')
+        - Valid
+      - - .satisfies("Genre RLIKE '^(Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western)(,
+          (Action|Adventure|Animation|Biography|Comedy|Crime|Documentary|Drama|Family|Fantasy|Film-Noir|History|Horror|Music|Musical|Mystery|Romance|Sci-Fi|Sport|Thriller|War|Western))*$'",
+          'known_genres_only')
+        - Valid
+      assumptions: []
+      column_name: Genre
+    IMDB_Rating:
+      code:
+      - - .isComplete('IMDB_Rating')
+        - Valid
+      - - .satisfies("IMDB_Rating >= 0 AND IMDB_Rating <= 10", 'rating_on_ten_point_scale')
+        - Valid
+      assumptions: []
+      column_name: IMDB_Rating
+    No_of_Votes:
+      code:
+      - - .isComplete('No_of_Votes')
+        - Valid
+      - - .satisfies("IMDB_Rating < 8 OR No_of_Votes >= 1000", 'high_rated_films_have_popularity_signal')
+        - Valid
+      - - .satisfies("No_of_Votes > 0 AND No_of_Votes = CAST(No_of_Votes AS BIGINT)",
+          'positive_integer_votes')
+        - Valid
+      assumptions: []
+      column_name: No_of_Votes
+    Released_Year:
+      code:
+      - - .isComplete('Released_Year')
+        - Valid
+      - - .satisfies("Released_Year >= 1888 AND Released_Year <= year(current_date())
+          AND Released_Year = CAST(Released_Year AS BIGINT)", 'valid_release_year')
+        - Valid
+      assumptions: []
+      column_name: Released_Year
+    Runtime:
+      code:
+      - - .isComplete('Runtime')
+        - Valid
+      - - .satisfies("Runtime RLIKE '^[1-9][0-9]* min$'", 'runtime_in_minutes')
+        - Valid
+      assumptions: []
+      column_name: Runtime
+    Series_Title:
+      code:
+      - - '.hasUniqueness([''Series_Title'', ''Released_Year''], lambda value: value
+          == 1.0)'
+        - Valid
+      - - .isComplete('Series_Title')
+        - Valid
+      - - .satisfies("length(trim(Series_Title)) > 0", 'nonempty_title')
+        - Valid
+      assumptions: []
+      column_name: Series_Title

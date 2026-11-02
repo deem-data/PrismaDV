@@ -1,0 +1,400 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261012_155256
+  final_program_round: final
+  final_program_val_score: 68.66
+  instructions:
+    generator: "markdown\nYou are an expert data quality engineer. Your task is to\
+      \ analyze an input dataset's profiling metadata (`columns_desc`), a data transformation\
+      \ script (`code_script`), and an optional downstream task description (`downstream_task_description`)\
+      \ to generate a comprehensive, highly calibrated set of data quality assumptions\
+      \ and PyDeequ validation checks.\n\nYour ultimate goal is to achieve an optimal\
+      \ Macro F1 score:\n1. **Catch Unsafe Batches (`\"level\": \"error\"`)**: Detect\
+      \ any data condition that causes runtime crashes, produces corrupted calculations\
+      \ (e.g., division by zero), or violates fundamental relational integrity required\
+      \ by the script.\n2. **Prevent False Alarms**: Safe batches must NEVER fail\
+      \ an `\"error\"` check or a brittle `\"warning\"` check. Baseline distributions\
+      \ in `columns_desc` dictate normal operational bounds.\n\n---\n\n### Critical\
+      \ Analysis Framework\n\n#### 1. Baseline Profiling Analysis (`columns_desc`)\n\
+      - **Baseline Completeness = 1.0**: Core structural columns (such as IDs, seasons/dates,\
+      \ primary entity names) that have 100% completeness in the baseline are non-negotiable.\
+      \ If they are used as identifiers, grouping keys, joining keys, or dictionary\
+      \ keys, add `.isComplete(...)` at `\"level\": \"error\"`.\n- **Baseline Completeness\
+      \ < 1.0**: If a column has nulls in the baseline (e.g., `0.989` or `0.025`),\
+      \ it is naturally nullable under certain domain conditions.\n  - NEVER set an\
+      \ unconditional `.isComplete(...)` at `\"level\": \"error\"` on naturally nullable\
+      \ columns.\n  - Formulate a conditional `.satisfies(...)` check if the nullability\
+      \ is restricted to specific branches (e.g., `result_margin` is only required\
+      \ when `result` is decisive).\n\n#### 2. Code Trace & Severity Level Decision\
+      \ Matrix\n\n| Code Operation Pattern | Data Defect | Downstream Impact | Severity\
+      \ Level |\n|---|---|---|---|\n| `int(row['x'])`, `float(row['x'])` | Null /\
+      \ Non-numeric | Unhandled `ValueError` / `TypeError` | `\"error\"` |\n| `int(float(row['x']))`\
+      \ | Null / Non-numeric / NaN | Unhandled `ValueError` / `TypeError` | `\"error\"\
+      ` |\n| `dict[row['key']]` or `dict[(season, team)]` | Missing / Unseen Key |\
+      \ Unhandled `KeyError` | `\"error\"` |\n| `row['x'].strip()`, `.split()` | Null\
+      \ / Non-string | Unhandled `AttributeError` | `\"error\"` |\n| `x / y` (even\
+      \ inside `np.where(...)`) | `y == 0` or `y IS NULL` | Division by zero / `inf`\
+      \ / corrupted metrics | `\"error\"` |\n| `winner` evaluated against `team1`/`team2`\
+      \ | `winner NOT IN (team1, team2)` | Relational corruption / `KeyError` / wrong\
+      \ standings | `\"error\"` |\n| Primary ID / Core Groupby Keys (`id`, `season`,\
+      \ `team1`, `team2`) | Missing / Null | Broken aggregations / Dropped groups\
+      \ / Index failure | `\"error\"` |\n| Explicit script constants / Enums (e.g.,\
+      \ `VALID_RESULTS = {...}`) | Unseen category | Unhandled outcome branch / Silent\
+      \ data omission | `\"error\"` |\n| Categorical fallbacks (`else: base = r`,\
+      \ `.isin()`) | Unseen category | Harmless fallthrough | `\"warning\"` |\n| Safe\
+      \ parsers (`errors='coerce'`) | Unparseable value | Coerced to `NaN`/`NaT` safely\
+      \ | `\"warning\"` |\n| Descriptive metadata (`city`, `venue`, `umpire1`, `player_of_match`)\
+      \ | Null / Missing | Non-critical informational fields | `\"warning\"` |\n\n\
+      ---\n\n### Detailed Check Formulation Guidelines\n\n#### 1. Divisors & Mathematical\
+      \ Calculations (Never Ignore Division by Zero)\n- In Python and NumPy, dividing\
+      \ by zero produces unhandled errors or invalid `inf`/`NaN` propagating downstream.\n\
+      - If the script computes `result_margin / target_overs` when `result == 'runs'`,\
+      \ `target_overs` MUST be non-null and strictly positive:\n  ```python\n  .satisfies(\"\
+      (`result` IS NULL OR `result` != 'runs') OR (`target_overs` IS NOT NULL AND\
+      \ `target_overs` > 0)\", \"target_overs_positive_when_runs\")\n  ```\n  Set\
+      \ `\"level\": \"error\"`.\n\n#### 2. Cross-Column & Relational Invariants\n\
+      - **Entity Consistency**: When a record references competing entities (`team1`,\
+      \ `team2`) and a victor (`winner` or `toss_winner`):\n  - If a match concludes\
+      \ decisively (e.g., `result IN ('runs', 'wickets')`), `winner` MUST NOT be NULL\
+      \ and MUST be either `team1` or `team2`:\n    ```python\n    .satisfies(\"(`result`\
+      \ IS NULL OR `result` NOT IN ('runs', 'wickets')) OR (`winner` IS NOT NULL AND\
+      \ (`winner` = `team1` OR `winner` = `team2`))\", \"winner_in_participating_teams_for_decisive\"\
+      )\n    ```\n    Set `\"level\": \"error\"`.\n  - `toss_winner` should always\
+      \ be one of the participating teams:\n    ```python\n    .satisfies(\"`toss_winner`\
+      \ IS NOT NULL AND (`toss_winner` = `team1` OR `toss_winner` = `team2`)\", \"\
+      toss_winner_in_teams\")\n    ```\n    Set `\"level\": \"error\"`.\n- **Conditional\
+      \ Numeric Fields**: If `result_margin` is evaluated or cast when `result IN\
+      \ ('runs', 'wickets')`:\n  ```python\n  .satisfies(\"(`result` IS NULL OR `result`\
+      \ NOT IN ('runs', 'wickets')) OR (`result_margin` IS NOT NULL AND `result_margin`\
+      \ >= 0)\", \"result_margin_valid_for_decisive\")\n  ```\n  Set `\"level\": \"\
+      error\"`.\n\n#### 3. Core Structural Keys vs. Auxiliary Metadata\n- **Primary\
+      \ / Groupby Keys**: Columns like `id`, `season`, `team1`, `team2` that have\
+      \ `completeness: 1.0` in the baseline profile and serve as groupings (`df.groupby(['season',\
+      \ 'team'])`) or match identifiers MUST have `.isComplete(...)` at `\"level\"\
+      : \"error\"`. A corrupt batch missing these values causes corrupted output tables\
+      \ or dropped groups.\n- **Categorical Integrity for Control Flow**: If `result`\
+      \ dictates control flow branches (e.g., `runs`, `wickets`, `tie`, `no result`),\
+      \ validate its completeness at `\"level\": \"error\"` and its allowed values\
+      \ with `.isContainedIn(...)`.\n- **Auxiliary Columns**: Columns like `city`,\
+      \ `venue`, `umpire1`, `umpire2`, `player_of_match` that are merely preserved\
+      \ in output CSVs or string summaries should be checked at `\"level\": \"warning\"\
+      ` or with relaxed constraints.\n\n#### 4. Spark SQL Three-Valued Logic & Backtick\
+      \ Escaping\nIn all `.satisfies(condition, name)` expressions:\n1. **Always escape\
+      \ column names with backticks**: e.g., `` `result` ``, `` `date` ``, `` `method`\
+      \ ``, `` `season` ``.\n2. **Guard against SQL three-valued logic**: In Spark\
+      \ SQL, `NULL NOT IN ('runs', 'wickets')` evaluates to `NULL` (falsy). To ensure\
+      \ the check does not fail when the gating column itself is null, write:\n  \
+      \ ``(`col` IS NULL OR `col` NOT IN ('val1', 'val2')) OR ...``\n3. **String Case\
+      \ & Trimming**: If the Python script performs `.str.strip().str.lower()`, normalize\
+      \ in SQL using `lower(trim(`col`))` when comparing string values.\n\n---\n\n\
+      ### Output JSON Format\n\nReturn ONLY a valid JSON array of objects conforming\
+      \ to the schema below:\n\n```json\n[\n  {\n    \"column_group\": \"col_name\"\
+      \ | [\"col_1\", \"col_2\"],\n    \"assumptions\": [\n      {\n        \"text\"\
+      : \"Precise description of the assumption rooted in script operations and data\
+      \ contracts.\",\n        \"sources\": [\n          {\n            \"start_line\"\
+      : 25,\n            \"end_line\": 30\n          }\n        ]\n      }\n    ],\n\
+      \    \"code\": [\n      {\n        \"suggestion\": \".satisfies(\\\"(`result`\
+      \ IS NULL OR `result` != 'runs') OR (`target_overs` IS NOT NULL AND `target_overs`\
+      \ > 0)\\\", \\\"target_overs_positive_when_runs\\\")\",\n        \"level\":\
+      \ \"error\",\n        \"linked_assumptions\": [0]\n      }\n    ]\n  }\n]\n\
+      ```\n\n### Self-Audit Verification Checklist\n1. **Did I flag all crash-prone\
+      \ operations as `\"error\"`?** Check every `int(...)`, `float(...)`, dictionary\
+      \ key access, division operation, and unhandled conditional conversion.\n2.\
+      \ **Did I check divisor non-zero status?** Any column in the denominator of\
+      \ a division (even within `np.where`) must be checked for `IS NOT NULL AND >\
+      \ 0` at `\"level\": \"error\"`.\n3. **Did I protect primary grouping keys?**\
+      \ Core entities with baseline completeness 1.0 (`id`, `season`, `team1`, `team2`)\
+      \ must have `.isComplete(...)` at `\"level\": \"error\"`.\n4. **Did I handle\
+      \ SQL three-valued logic?** Ensure all conditional `.satisfies()` checks explicitly\
+      \ account for `IS NULL` on the gating column.\n5. **Did I prevent false alarms?**\
+      \ Columns with baseline completeness < 1.0 must not have unconditional `.isComplete(...,\
+      \ level=\"error\")`."
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 1
+split_seed: 1
+constraints:
+  '["result","result_margin"]':
+    code:
+    - suggestion: .satisfies("(`result` IS NULL OR `result` NOT IN ('runs', 'wickets'))
+        OR (`result_margin` IS NOT NULL AND `result_margin` >= 0)", "result_margin_valid_for_decisive")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c2b488e5-082f-4704-a1e8-ae18355199f7
+      source_assumptions:
+      - e78feab4-6bb8-4a1e-ba7b-a9292be1e266
+    assumptions:
+    - text: When 'result' is 'runs' or 'wickets', the script executes int(float(row['result_margin'])),
+        which raises an unhandled ValueError/TypeError if result_margin is null or
+        non-numeric.
+      sources:
+      - start_line: 68
+        end_line: 73
+        file: ''
+      uid: e78feab4-6bb8-4a1e-ba7b-a9292be1e266
+  '["result","team1","team2","winner"]':
+    code:
+    - suggestion: .satisfies("(`result` IS NULL OR `result` = 'no result') OR (`winner`
+        IS NOT NULL AND (`winner` = `team1` OR `winner` = `team2`))", "winner_in_teams_when_decisive")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 22c77c02-3878-491c-81da-77b0168bbfc1
+      source_assumptions:
+      - 81347370-a697-4efe-8aad-704f9c19b6ce
+    assumptions:
+    - text: When a match concludes with a decisive outcome or tie ('runs', 'wickets',
+        'tie'), 'winner' must not be null and must correspond to either team1 or team2
+        to calculate the loser and generate the summary text accurately.
+      sources:
+      - start_line: 35
+        end_line: 39
+        file: ''
+      - start_line: 70
+        end_line: 75
+        file: ''
+      uid: 81347370-a697-4efe-8aad-704f9c19b6ce
+  '["team1","team2","toss_winner"]':
+    code:
+    - suggestion: .isComplete(`toss_winner`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`toss_winner`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: b9308366-62c7-4311-848b-bded59e0712f
+      source_assumptions:
+      - a6439129-0c42-480f-abfa-4c8798b86ad9
+    - suggestion: .satisfies("`toss_winner` IS NOT NULL AND (`toss_winner` = `team1`
+        OR `toss_winner` = `team2`)", "toss_winner_in_teams")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 21d9e3e0-df20-4744-8d21-1a0adbf6817f
+      source_assumptions:
+      - a6439129-0c42-480f-abfa-4c8798b86ad9
+    assumptions:
+    - text: '''toss_winner'' is 100% complete in the baseline and must match one of
+        the participating teams (team1 or team2) for consistent toss and batting side
+        derivations.'
+      sources:
+      - start_line: 22
+        end_line: 31
+        file: ''
+      uid: a6439129-0c42-480f-abfa-4c8798b86ad9
+  '["team1","team2"]':
+    code:
+    - suggestion: .isComplete(`team1`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`team1`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: 92036f03-6dbd-4086-a9f7-b1bed21ac894
+      source_assumptions:
+      - 2e893c80-d985-417d-b751-0b3f953ba75c
+    - suggestion: .isComplete(`team2`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`team2`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: 4dbc30b5-4a0e-4b54-8292-7a869dfb983d
+      source_assumptions:
+      - 2e893c80-d985-417d-b751-0b3f953ba75c
+    assumptions:
+    - text: '''team1'' and ''team2'' are mandatory match participants, baseline complete
+        (1.0), used to determine toss sides, batting order, and match losers.'
+      sources:
+      - start_line: 22
+        end_line: 39
+        file: ''
+      uid: 2e893c80-d985-417d-b751-0b3f953ba75c
+  date:
+    code:
+    - suggestion: .isComplete(`date`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`date`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: 8a43734a-bc66-4601-a21b-1bfdf2edfc04
+      source_assumptions:
+      - 9867a1e1-aead-4c3b-968f-ea2f17a723c6
+    assumptions:
+    - text: '''date'' is parsed via pd.to_datetime(row[''date'']) without errors=''coerce''
+        inside build_summary, which will crash if date values are null or invalid.'
+      sources:
+      - start_line: 41
+        end_line: 41
+        file: ''
+      uid: 9867a1e1-aead-4c3b-968f-ea2f17a723c6
+  id:
+    code:
+    - suggestion: .isComplete(`id`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`id`)'': invalid
+        syntax (<string>, line 1)'
+      level: error
+      uid: a7288def-4609-44b6-8a67-2baff2f7d2e1
+      source_assumptions:
+      - eabb5efb-70d0-4b61-a399-521ae860cd30
+    assumptions:
+    - text: '''id'' is the primary match identifier, baseline complete (1.0), and
+        is explicitly cast using int(row[''id'']) during syndication JSON export.'
+      sources:
+      - start_line: 48
+        end_line: 48
+        file: ''
+      - start_line: 104
+        end_line: 104
+        file: ''
+      uid: eabb5efb-70d0-4b61-a399-521ae860cd30
+  result:
+    code:
+    - suggestion: .isComplete(`result`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`result`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: 14d2d272-4a90-421a-a327-d9ee77a9944d
+      source_assumptions:
+      - 6990e96f-2619-40c9-a8b3-5afc1be174b5
+    - suggestion: .isContainedIn(`result`, ["runs", "wickets", "tie", "no result"])
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isContainedIn(`result`,
+        ["runs", "wickets", "tie", "no result"])'': invalid syntax (<string>, line
+        1)'
+      level: warning
+      uid: 345bf6d9-a21d-4fae-b481-b2bd4317a1c7
+      source_assumptions:
+      - 6990e96f-2619-40c9-a8b3-5afc1be174b5
+    assumptions:
+    - text: '''result'' is 100% complete in the baseline and directs the summary construction
+        control flow and loser calculations.'
+      sources:
+      - start_line: 35
+        end_line: 39
+        file: ''
+      - start_line: 66
+        end_line: 76
+        file: ''
+      uid: 6990e96f-2619-40c9-a8b3-5afc1be174b5
+  season:
+    code:
+    - suggestion: .isComplete(`season`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`season`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: d55a2c34-756e-4b49-9720-85a95ce69be4
+      source_assumptions:
+      - 1354b03c-92a0-414f-b41d-1272b1ae46a8
+    assumptions:
+    - text: '''season'' is a core structural identifier with 100% baseline completeness,
+        formatted into the match summary and JSON feed.'
+      sources:
+      - start_line: 48
+        end_line: 48
+        file: ''
+      - start_line: 105
+        end_line: 105
+        file: ''
+      uid: 1354b03c-92a0-414f-b41d-1272b1ae46a8
+  super_over:
+    code:
+    - suggestion: .isContainedIn(`super_over`, ["Y", "N"])
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isContainedIn(`super_over`,
+        ["Y", "N"])'': invalid syntax (<string>, line 1)'
+      level: warning
+      uid: 5c1ddff1-957c-4326-8c3f-5c243fdf8513
+      source_assumptions:
+      - bb7f9a4f-e37c-4d64-9714-3bc970de7951
+    assumptions:
+    - text: '''super_over'' indicates whether a super over was played, with observed
+        values ''Y'' and ''N''.'
+      sources:
+      - start_line: 92
+        end_line: 92
+        file: ''
+      - start_line: 110
+        end_line: 110
+        file: ''
+      uid: bb7f9a4f-e37c-4d64-9714-3bc970de7951
+  toss_decision:
+    code:
+    - suggestion: .isComplete(`toss_decision`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`toss_decision`)'':
+        invalid syntax (<string>, line 1)'
+      level: error
+      uid: 7475e92f-f4e7-4596-b7d6-cf6e9b7c9a1f
+      source_assumptions:
+      - f534894d-d313-4a87-b3d9-16f0a16aa8b3
+    - suggestion: .isContainedIn(`toss_decision`, ["bat", "field"])
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isContainedIn(`toss_decision`,
+        ["bat", "field"])'': invalid syntax (<string>, line 1)'
+      level: warning
+      uid: 383c6141-6767-4a52-ab99-98b85f836fe7
+      source_assumptions:
+      - f534894d-d313-4a87-b3d9-16f0a16aa8b3
+    assumptions:
+    - text: '''toss_decision'' is 100% complete and takes values ''bat'' or ''field'',
+        driving the logic for determining which team batted first.'
+      sources:
+      - start_line: 24
+        end_line: 30
+        file: ''
+      uid: f534894d-d313-4a87-b3d9-16f0a16aa8b3
+  venue:
+    code:
+    - suggestion: .isComplete(`venue`)
+      validity: false
+      reason_if_invalid: 'Unable to instantiate constraint ''isComplete(`venue`)'':
+        invalid syntax (<string>, line 1)'
+      level: warning
+      uid: cee0161c-fb34-4e18-b8c0-d2285ae226c3
+      source_assumptions:
+      - da6bb932-d81f-49be-b1f9-007d344e0db5
+    assumptions:
+    - text: '''venue'' is baseline complete (1.0) and populated directly into output
+        match summary strings.'
+      sources:
+      - start_line: 42
+        end_line: 42
+        file: ''
+      - start_line: 67
+        end_line: 76
+        file: ''
+      uid: da6bb932-d81f-49be-b1f9-007d344e0db5
+llm_usage:
+  task_lm:
+    cost: 0.022096
+    cost_spent: 0.0
+    total_tokens: 11481
+    prompt_tokens: 6986
+    completion_tokens: 4495
+    cached_prompt_tokens: 0
+    reasoning_tokens: 2376
+    requests: 1
+    cache_served_requests: 1
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 0.0
+    api_seconds_saved: 30.193
+  total:
+    cost: 0.022096
+    cost_spent: 0.0
+    total_tokens: 11481
+    prompt_tokens: 6986
+    completion_tokens: 4495
+    cached_prompt_tokens: 0
+    reasoning_tokens: 2376
+    requests: 1
+    cache_served_requests: 1
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 0.0
+    api_seconds_saved: 30.193
+wall_clock_seconds: 5.941

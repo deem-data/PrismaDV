@@ -1,0 +1,419 @@
+sifta_generation:
+  program: sifta
+  run_dir: optimization_runs/run_20261014_005420
+  run_settings:
+    batch_sampler_strategy: worst_first
+    feedback_level: full
+    silent_as_safe: 0.0
+  metric_rev: error_level
+  final_program_round: final
+  final_program_val_score: 26.67
+  instructions:
+    dataflow_inspector: 'Carefully inspect the provided code script to find every
+      line that references or touches the target column (by exact column name string
+      literal, column list inclusion, or direct variable assignment/reference): reads
+      it, writes it, filters on it, transforms it, merges it, or passes it along (including
+      inclusion in output column lists like `cols = [...]` or `df[[...]]`).
+
+
+      Match lines precisely using 1-based line numbers from the script:
+
+      - CRITICAL: Count every single line starting at line 1, including empty/blank
+      lines, comment lines, and whitespace lines. Every line increments the line counter
+      by 1. Do NOT skip or omit blank lines when numbering.
+
+      - Verify line numbers against the full script text to ensure exact physical
+      line matching.
+
+      - Combine contiguous line numbers into a single range. Do not include lines
+      that do not touch the target column.
+
+
+      Output only JSON: { "sources": [{ "start_line": int, "end_line": int }, ...]
+      }'
+    assumption_generation: "Code makes assumptions about its input data to execute\
+      \ properly and produce correct results. From the focused code that uses the\
+      \ target column, the target column description, and the task description, identify\
+      \ assumptions about the input data required for correct execution.\n\nGuidelines:\n\
+      - Ground assumptions strictly in the operations performed by the code and data\
+      \ integrity requirements.\n- Distinguish critical constraints from variations\
+      \ that the code safely handles. Do NOT treat silent data corruption as safe:\n\
+      \  - If a column is parsed with `pd.to_numeric(errors='coerce')` or feeds arithmetic,\
+      \ linear fits, or risk calculations, invalid non-numeric or missing values silently\
+      \ turn into NaNs or distorted scores. Assume the column must have valid numeric\
+      \ type and completeness.\n  - Physical and mathematical domain bounds: Numeric\
+      \ health features like `Sleep Duration`, `Heart Rate`, `Daily Steps`, and `Physical\
+      \ Activity Level` must be positive (> 0) or non-negative (>= 0). Negative values\
+      \ are invalid measurements that silently corrupt normalization, regression fits\
+      \ (`np.polyfit`), z-scores, and threshold comparisons.\n  - Mathematical headroom\
+      \ bounds: If operations like `np.log(col - bound)` or `np.sqrt(bound - col)`\
+      \ are applied, identify strict domain bounds (`col > bound`, `col <= bound`).\n\
+      \  - String parsing: If string parsing like `.str.split('/')` followed by `.astype(int)`\
+      \ is used (e.g., `Blood Pressure`), assume non-null values conforming to the\
+      \ `<systolic>/<diastolic>` format.\n  - Categorical constraints: If downstream\
+      \ code relies on a closed set of categories to compute complementary proportions/priors\
+      \ (e.g., `Sleep Disorder` where `1.0 - apnea_share` assumes the only other labeled\
+      \ class is `Insomnia`) or uses strict unhandled mappings, assume values must\
+      \ be contained in the allowed category set.\n  - Passthrough columns: If a column\
+      \ is merely selected and passed to output (e.g., `Person ID`) without being\
+      \ used in calculations, filtering, or joins, do NOT assume strict completeness\
+      \ or positive integer types, as safe partitions frequently contain nulls or\
+      \ alphanumeric IDs that the script tolerates without failure.\n- Dataset-specific\
+      \ patterns (`sleep_health` domain):\n  - `Blood Pressure`: non-null string matching\
+      \ integer pairs `<systolic>/<diastolic>`.\n  - `Sleep Duration`: positive float\
+      \ (> 0), respecting mathematical log/sqrt headroom bounds if present in the\
+      \ code.\n  - `Daily Steps`, `Physical Activity Level`, `Heart Rate`: positive\
+      \ or non-negative numeric measurements.\n  - `Sleep Disorder`: non-null entries\
+      \ must be from the allowed diagnostic categories (`Sleep Apnea`, `Insomnia`).\n\
+      \  - Passthrough identifiers (`Person ID`): do not require strict constraints.\n\
+      \nOutput only valid JSON (numbers without leading zeros): { \"assumptions\"\
+      : [{ \"text\": str, \"sources\": [{ \"start_line\": int, \"end_line\": int }]\
+      \ }, ...] }"
+    ir_generation: "Translate the assumptions into PyDeequ checks.\n\nAssign constraint\
+      \ levels carefully:\n- Set level \"error\" if and only if data that fails the\
+      \ check would cause the code to crash (e.g., uncaught casting exceptions like\
+      \ `.astype(int)` on non-numeric or null strings, division by zero) OR run without\
+      \ throwing an error but silently produce wrong or corrupted results:\n  - Physical\
+      \ & mathematical domain bounds: For core numeric measurements used in scoring,\
+      \ fits, or arithmetic (`Sleep Duration`, `Daily Steps`, `Heart Rate`, `Physical\
+      \ Activity Level`), domain constraints like `.isPositive(column)` or `.isNonNegative(column)`\
+      \ MUST be level \"error\" because negative or zero values silently corrupt mathematical\
+      \ models and risk scores.\n  - Domain bounds from log/sqrt headroom: Use `.satisfies('`col`\
+      \ > bound', 'name')` at level \"error\".\n  - Core numeric types & completeness:\
+      \ Use `.hasDataType(column, ConstrainableDataTypes.Numeric)` or `.isComplete(column)`\
+      \ at level \"error\" when invalid values or nulls coerce to NaNs and corrupt\
+      \ calculations.\n  - String format requirements: Use `.hasPattern(column, r'^\\\
+      d+/\\d+$')` at level \"error\" when `.split('/')` or integer parsing is performed.\n\
+      \  - Categorical validity: When code logic assumes a closed set for calculations\
+      \ (e.g., `Sleep Disorder` where complementary prevalence `1 - apnea_share` assumes\
+      \ only `['Sleep Apnea', 'Insomnia']`), use `.isContainedIn(column, allowed_values)`\
+      \ at level \"error\".\n- Set level \"warning\" if:\n  - The check validates\
+      \ a passthrough column (e.g., `Person ID` merely passed to output). To prevent\
+      \ false alarms on safe data partitions, never assign level \"error\" to columns\
+      \ not used in calculations, joins, or indexing.\n  - The check tests a secondary\
+      \ data quality expectation that downstream code safely tolerates with fallbacks\
+      \ without degrading result accuracy.\n\nTranslating checks into PyDeequ:\n-\
+      \ For format validation: use `.hasPattern(column, pattern)`. Always use raw\
+      \ strings (`r\"...\"`) for regex patterns.\n- For completeness: Use `.isComplete(column)`\
+      \ or `.hasCompleteness(column, assertion)`.\n- For data types: Use `.hasDataType(column,\
+      \ ConstrainableDataTypes.Numeric)` or `ConstrainableDataTypes.Integral`.\n-\
+      \ For numeric domain bounds: Use `.isPositive(column)`, `.isNonNegative(column)`,\
+      \ or `.satisfies('`col` > bound', 'name')`.\n- For categories: Use `.isContainedIn(column,\
+      \ allowed_values)`.\n\nLink each check to the indices (from 0) of the assumptions\
+      \ it tests.\n\nOutput: {\"constraint_code\": [{\"suggestion\": PyDeequ code\
+      \ (starting with \".\" or a function), \"level\": \"warning\"|\"error\", \"\
+      linked assumptions\": [indices]}, ...]}"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 3
+split_seed: 3
+columns_considered:
+- Blood Pressure
+- Daily Steps
+- Person ID
+- Physical Activity Level
+- Quality of Sleep
+- Sleep Disorder
+- Sleep Duration
+- Stress Level
+columns_failed: []
+constraints:
+  Blood Pressure:
+    code:
+    - suggestion: .isComplete('Blood Pressure')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: ba2401dd-1949-4a5f-bebf-b404c82e8791
+      source_assumptions:
+      - 51b65cc4-fcad-4c8f-b4b3-a703cfd2adeb
+    - suggestion: .hasPattern('Blood Pressure', r'^\d+/\d+$')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: ba6b20e5-2d41-4869-9bbb-d9ca8180eac8
+      source_assumptions:
+      - 51b65cc4-fcad-4c8f-b4b3-a703cfd2adeb
+    assumptions:
+    - text: The 'Blood Pressure' column must contain non-null strings formatted as
+        two integer values separated by a slash (e.g., '<systolic>/<diastolic>') to
+        allow splitting into two parts and converting to integers.
+      sources:
+      - start_line: 16
+        end_line: 18
+        file: ''
+      uid: 51b65cc4-fcad-4c8f-b4b3-a703cfd2adeb
+  Daily Steps:
+    code:
+    - suggestion: .isComplete("Daily Steps")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a5a9d7f5-e87c-4b4c-98c3-79805be1e1f6
+      source_assumptions:
+      - 7346e73a-dc4c-4c27-abb4-2db6727f5128
+    - suggestion: .hasDataType("Daily Steps", ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a7bfd085-142f-4c57-a78f-68d8cc8470c1
+      source_assumptions:
+      - 7346e73a-dc4c-4c27-abb4-2db6727f5128
+    - suggestion: .isNonNegative("Daily Steps")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 171bd50b-5cae-4c3e-9fc8-dbc27728a001
+      source_assumptions:
+      - 020f29d0-1da7-4335-9343-7a1daf1612e4
+    assumptions:
+    - text: The 'Daily Steps' column must exist in the input dataframe, have numeric
+        data types, and contain no null/missing values.
+      sources:
+      - start_line: 27
+        end_line: 31
+        file: ''
+      - start_line: 49
+        end_line: 51
+        file: ''
+      uid: 7346e73a-dc4c-4c27-abb4-2db6727f5128
+    - text: Values in 'Daily Steps' must be non-negative numeric measurements (>=
+        0) representing daily step counts, satisfying both physical domain bounds
+        and mathematical requirements for 'np.log1p'.
+      sources:
+      - start_line: 29
+        end_line: 29
+        file: ''
+      - start_line: 49
+        end_line: 49
+        file: ''
+      uid: 020f29d0-1da7-4335-9343-7a1daf1612e4
+  Person ID:
+    code:
+    - suggestion: .isComplete('Person ID')
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 0e7f94b3-7e53-4f0a-abfb-2c71479c4e42
+      source_assumptions:
+      - 50bf6e8d-62b6-4187-b96e-ca930a5d5fc0
+    assumptions:
+    - text: The column 'Person ID' must be present in the input dataset.
+      sources:
+      - start_line: 80
+        end_line: 85
+        file: ''
+      uid: 50bf6e8d-62b6-4187-b96e-ca930a5d5fc0
+  Physical Activity Level:
+    code:
+    - suggestion: .isComplete('Physical Activity Level')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2748a15c-18e1-41ef-b153-ab7621f305b3
+      source_assumptions:
+      - bad5de21-c262-48b8-8e47-52744b9b1902
+    - suggestion: .hasDataType('Physical Activity Level', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 640124e4-bb9c-4218-ad01-7c204fcb424a
+      source_assumptions:
+      - bad5de21-c262-48b8-8e47-52744b9b1902
+    - suggestion: .isNonNegative('Physical Activity Level')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1cdddece-01ba-42cb-9bd2-adc74bf2617b
+      source_assumptions:
+      - db2c2cb3-0f27-4cd8-9487-2d5363a48c98
+    - suggestion: .satisfies('`Physical Activity Level` <= 100', 'physical_activity_level_max_100')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 49dee492-2b39-456a-bdde-6f0e51b27948
+      source_assumptions:
+      - db2c2cb3-0f27-4cd8-9487-2d5363a48c98
+    assumptions:
+    - text: The 'Physical Activity Level' column must be numeric and contain no null
+        values to avoid producing NaN values during normalization and scoring calculations.
+      sources:
+      - start_line: 23
+        end_line: 26
+        file: ''
+      - start_line: 50
+        end_line: 51
+        file: ''
+      uid: bad5de21-c262-48b8-8e47-52744b9b1902
+    - text: Values in 'Physical Activity Level' must be non-negative (>= 0) and typically
+        on a scale up to 100 for proper normalization in the sedentary index calculation.
+      sources:
+      - start_line: 26
+        end_line: 26
+        file: ''
+      - start_line: 50
+        end_line: 51
+        file: ''
+      uid: db2c2cb3-0f27-4cd8-9487-2d5363a48c98
+  Quality of Sleep:
+    code:
+    - suggestion: .hasDataType("Quality of Sleep", ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1588057d-ae27-4891-9507-d9bed4aba00d
+      source_assumptions:
+      - 25e32e8c-b598-4fd8-8316-d75b36c3d557
+    - suggestion: .isComplete("Quality of Sleep")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 50ee8412-876c-49cc-9b2d-debbc86ea21c
+      source_assumptions:
+      - 8019b279-7e46-440f-bed4-057449e1e964
+    assumptions:
+    - text: The 'Quality of Sleep' column must be of numeric data type to support
+        clipping and arithmetic operations.
+      sources:
+      - start_line: 45
+        end_line: 45
+        file: ''
+      uid: 25e32e8c-b598-4fd8-8316-d75b36c3d557
+    - text: The 'Quality of Sleep' column must not contain null or missing values,
+        as missing values will propagate NaNs into 'sleep_need_index' and 'priority_score'.
+      sources:
+      - start_line: 45
+        end_line: 46
+        file: ''
+      uid: 8019b279-7e46-440f-bed4-057449e1e964
+  Sleep Disorder:
+    code:
+    - suggestion: .isContainedIn('Sleep Disorder', ['Sleep Apnea', 'Insomnia'])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: ade78fd1-f5e9-412c-840e-2a80bfe945b5
+      source_assumptions:
+      - ad97f3a0-f72a-40be-9585-bfdf7c3e0855
+    assumptions:
+    - text: Non-null entries in the 'Sleep Disorder' column must be from the allowed
+        diagnostic categories ('Sleep Apnea', 'Insomnia'), where absence of a disorder
+        is represented by null values.
+      sources:
+      - start_line: 57
+        end_line: 58
+        file: ''
+      uid: ad97f3a0-f72a-40be-9585-bfdf7c3e0855
+  Sleep Duration:
+    code:
+    - suggestion: .isComplete('Sleep Duration')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1833a5eb-0fc4-45da-8702-669601207520
+      source_assumptions:
+      - 4e45cffd-311b-4179-85d8-843ba7ba3536
+    - suggestion: .hasDataType('Sleep Duration', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2e566d30-319f-4113-add7-f4a4490d076a
+      source_assumptions:
+      - 4e45cffd-311b-4179-85d8-843ba7ba3536
+    - suggestion: .satisfies('`Sleep Duration` > 2.99', 'sleep_duration_gt_2_99')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 21292412-acee-4037-a95e-4ada6a764168
+      source_assumptions:
+      - 84c32094-7738-4e05-9be5-2f3e2664e2e1
+    - suggestion: .satisfies('`Sleep Duration` <= 14.01', 'sleep_duration_lte_14_01')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: fee09f79-7cdc-4b4f-8120-c1ef44f2d21e
+      source_assumptions:
+      - b95e95da-d3b4-402e-8c8b-487e0f904588
+    assumptions:
+    - text: The 'Sleep Duration' column must contain valid numeric float values with
+        no missing (null/NaN) entries to perform arithmetic calculations and numpy
+        mathematical functions.
+      sources:
+      - start_line: 21
+        end_line: 22
+        file: ''
+      - start_line: 42
+        end_line: 44
+        file: ''
+      uid: 4e45cffd-311b-4179-85d8-843ba7ba3536
+    - text: Each value in 'Sleep Duration' must be strictly greater than 2.99 so that
+        the argument in np.log(df['Sleep Duration'] - 2.99) is positive and does not
+        yield NaN or -inf.
+      sources:
+      - start_line: 21
+        end_line: 21
+        file: ''
+      uid: 84c32094-7738-4e05-9be5-2f3e2664e2e1
+    - text: Each value in 'Sleep Duration' must be less than or equal to 14.01 so
+        that the argument in np.sqrt(14.01 - df['Sleep Duration']) is non-negative
+        and does not produce NaN.
+      sources:
+      - start_line: 22
+        end_line: 22
+        file: ''
+      uid: b95e95da-d3b4-402e-8c8b-487e0f904588
+  Stress Level:
+    code:
+    - suggestion: .isComplete("Stress Level")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c226c208-8333-4541-b829-791063aa218d
+      source_assumptions:
+      - 5229c5a7-9f59-4f69-805c-6d8cfc4c4435
+    - suggestion: .hasDataType("Stress Level", ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f6f34af0-c039-4fdf-bed6-d9cb50153586
+      source_assumptions:
+      - 5229c5a7-9f59-4f69-805c-6d8cfc4c4435
+    assumptions:
+    - text: The 'Stress Level' column must contain valid, non-null numeric values.
+      sources:
+      - start_line: 54
+        end_line: 54
+        file: ''
+      uid: 5229c5a7-9f59-4f69-805c-6d8cfc4c4435
+llm_usage:
+  task_lm:
+    cost: 0.163473
+    cost_spent: 0.163473
+    total_tokens: 97548
+    prompt_tokens: 67444
+    completion_tokens: 30104
+    cached_prompt_tokens: 0
+    reasoning_tokens: 27344
+    requests: 26
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 226.623
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.163473
+    cost_spent: 0.163473
+    total_tokens: 97548
+    prompt_tokens: 67444
+    completion_tokens: 30104
+    cached_prompt_tokens: 0
+    reasoning_tokens: 27344
+    requests: 26
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 226.623
+    api_seconds_saved: 0.0
+wall_clock_seconds: 68.618

@@ -1,0 +1,248 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261013_182350
+  run_settings: {}
+  metric_rev: null
+  final_program_round: final
+  final_program_val_score: 46.52
+  instructions:
+    generator: "markdown\nYou are an expert data engineer, data quality analyst, and\
+      \ PyDeequ specialist. Your task is to analyze Python data processing scripts\
+      \ alongside input dataset profiles, deduce implicit and explicit assumptions\
+      \ made about the input data, and generate comprehensive, robust PyDeequ validation\
+      \ checks.\n\nYour primary optimization metric is **Macro F1 score on crash detection**:\n\
+      1. **Maximize Recall on Unsafe Batches:** Every input data condition that leads\
+      \ to an unhandled runtime exception (crash) in the script must be caught by\
+      \ a check with `level: \"error\"`.\n2. **Eliminate False Alarms on Safe Batches:**\
+      \ Never mark non-crashing defects or domain anomalies as `error`. Ensure checks\
+      \ do not fail on valid batches where the script executes successfully.\n\n---\n\
+      \n### INPUTS PROVIDED\n\n1. **`columns_desc`**: Summary profile of input columns\
+      \ (completeness, data types, type counts, histograms, distinct value counts).\n\
+      2. **`code_script`**: Numbered Python script (1-based line numbers) processing\
+      \ the dataset.\n3. **`downstream_task_description`**: (Optional) Details on\
+      \ how downstream consumers use the output.\n\n---\n\n### CRITICAL DOMAIN RULES\
+      \ & EVALUATION PRINCIPLES\n\n#### 1. Severity Calibration: `error` vs. `warning`\n\
+      - **`level: \"error\"`**: Assigned **if and only if** violating the constraint\
+      \ causes an **unhandled runtime exception (script crash)** in the Python script.\n\
+      \  - *Benchmark Impact:* The benchmark evaluates F1 strictly on `error`-level\
+      \ constraints catching unsafe batches. If you mark crash-inducing assumptions\
+      \ as `warning`, recall will drop to 0. If you mark non-crashing assumptions\
+      \ as `error`, precision collapses.\n- **`level: \"warning\"`**: Assigned when\
+      \ data is dirty, invalid, or degrades output quality, but the script executes\
+      \ to completion without crashing (e.g., protected by `errors='coerce'`, `fillna()`,\
+      \ `np.where()`, `.get(..., default)`, or non-strict filtering).\n\n---\n\n####\
+      \ 2. Safe Spark SQL Casting with `TRY_CAST` (Avoid the Empty String Trap)\n\
+      In Python, operations like `pd.to_numeric(col, errors='coerce')` convert empty\
+      \ strings `\"\"`, whitespace, and non-numeric tokens (e.g., `'N/A'`, `'abc'`)\
+      \ into `NaN`. Subsequent integer casting like `.astype(int)` or `int(...)` crashes\
+      \ with `IntCastingNaNError` or `ValueError`.\n- In Spark SQL, `\"\" IS NOT NULL`\
+      \ evaluates to **`TRUE`**!\n- **Anti-pattern:** `.satisfies(\"`result_margin`\
+      \ IS NOT NULL\")` — allows empty strings `\"\"` or dirty text `'N/A'` to pass\
+      \ validation, which then crash the script in pandas!\n- **Correct Pattern:**\
+      \ Always use `TRY_CAST` for numeric validity:\n  ```python\n  TRY_CAST(`col`\
+      \ AS DOUBLE) IS NOT NULL\n  ```\n  `TRY_CAST` safely evaluates to `NULL` for\
+      \ `NULL`, `\"\"`, whitespace, and non-numeric strings.\n\n---\n\n#### 3. Python\
+      \ Type Conversion Crash Archetypes & Translations\n\nTrace every type conversion\
+      \ in `code_script`:\n\n1. **`df.loc[mask, 'col'].astype(int)` or `.astype(float)`:**\n\
+      \   - Preceded by `pd.to_numeric(..., errors='coerce')` or raw text.\n   - **Crash\
+      \ Vector:** Raises `IntCastingNaNError` / `ValueError` if `col` is null, non-numeric,\
+      \ or empty on any row matching `mask`.\n   - **PyDeequ Check (`error`):**\n\
+      \     `.satisfies(\"NOT (<mask_sql>) OR (`col` IS NOT NULL AND TRY_CAST(`col`\
+      \ AS DOUBLE) IS NOT NULL)\", \"...\")`\n\n2. **Direct `int(row['col'])`:**\n\
+      \   - **Crash Vector:** Raises `ValueError` if `col` is `NaN`/null, non-numeric,\
+      \ or a string formatted as a float (e.g., `int(\"12.0\")` crashes in Python!).\n\
+      \   - **PyDeequ Check (`error`):** Check non-null AND castable to integer:\n\
+      \     `.satisfies(\"`col` IS NOT NULL AND TRY_CAST(`col` AS BIGINT) IS NOT NULL\
+      \ AND `col` NOT LIKE '%.%'\", \"...\")`\n\n3. **`int(float(row['col']))` or\
+      \ `float(row['col'])`:**\n   - **Crash Vector:** Raises `TypeError` on `None`/`null`\
+      \ and `ValueError` on non-numeric strings.\n   - **PyDeequ Check (`error`):**\n\
+      \     `.satisfies(\"`col` IS NOT NULL AND TRY_CAST(`col` AS DOUBLE) IS NOT NULL\"\
+      , \"...\")`\n\n4. **Multi-Branch & Unconditional Conversions:**\n   - If a cast\
+      \ occurs outside conditional blocks (e.g., `int(row['id'])` applied to every\
+      \ row in a loop), the column must satisfy the conversion across the entire dataset:\n\
+      \     `.isComplete(\"id\")` and `.satisfies(\"TRY_CAST(`id` AS BIGINT) IS NOT\
+      \ NULL\", \"id_is_integral\")` (both `error`).\n\n---\n\n#### 4. Dictionary\
+      \ Key Lookups (`KeyError`) & Key Hashing\n- **Uninitialized Key Lookup:**\n\
+      \  - If a dictionary is keyed by specific columns (e.g., `standings[(season,\
+      \ team1)]` and `standings[(season, team2)]`), any lookup using a third column\
+      \ (e.g., `standings[(season, winner)]`) crashes with `KeyError` unless `winner`\
+      \ matches `team1` or `team2`.\n  - **Crash Vector:** `winner` is null OR `winner\
+      \ NOT IN (team1, team2)`.\n  - **PyDeequ Check (`error`):**\n    `.satisfies(\"\
+      NOT (<branch_condition>) OR (`winner` IS NOT NULL AND (`winner` = `team1` OR\
+      \ `winner` = `team2`))\", \"winner_in_participating_teams\")`\n- **Missing /\
+      \ Null Key Components:**\n  - In Python dictionaries, hashing `(season, np.nan)`\
+      \ produces unstable key matches (`float('nan') != float('nan')`), causing subsequent\
+      \ lookups for the same key to raise `KeyError`.\n  - Columns serving as primary\
+      \ lookup keys in dictionaries must be complete:\n    `.isComplete(\"team1\"\
+      )`, `.isComplete(\"team2\")` (`error` if used in dictionary lookups without\
+      \ default fallback).\n\n---\n\n#### 5. Mirror Script Normalization in Spark\
+      \ SQL\nSpark SQL operates on the raw input data before Python applies transformations.\
+      \ You must mirror all normalization logic in `.satisfies()` expressions:\n-\
+      \ If Python runs `.astype(str).str.strip().str.lower()`, use: `lower(trim(coalesce(`col`,\
+      \ '')))`\n- If Python runs `.astype(str).str.strip().str.upper()`, use: `upper(trim(coalesce(`col`,\
+      \ '')))`\n- Always wrap nullable string comparisons in `coalesce(`col`, '')`\
+      \ to prevent SQL three-valued logic (`UNKNOWN`) from misclassifying records.\n\
+      \n---\n\n#### 6. False Alarm Prevention on Safe Batches\n- **Do not invent strict\
+      \ checks for handled branches:**\n  - If a script uses `if result == 'runs':\
+      \ ... elif result == 'wickets': ... else: summary = 'unrecognized'`, an unexpected\
+      \ `result` value does NOT crash the script!\n  - Never add a 100% strict check\
+      \ like `.isContainedIn(\"result\", ['runs', 'wickets', 'tie', 'no result'])`\
+      \ as `error`. Even as a `warning`, do not assert 1.0 completeness if `columns_desc`\
+      \ shows distinct/unknown values.\n- **Inspect `columns_desc` before setting\
+      \ assertions:**\n  - If `columns_desc` indicates a column has nulls (completeness\
+      \ < 1.0) and the script handles them gracefully (e.g., `errors='coerce'`, `dropna()`),\
+      \ do NOT check `.isComplete()` at `error` level.\n\n---\n\n### PYDEEQU CHECK\
+      \ SPECIFICATION\n\n#### Row-Level Constraints\n- `.isComplete(column)`: Column\
+      \ must not contain nulls.\n- `.hasCompleteness(column, assertion)`: Completeness\
+      \ ratio (e.g., `lambda x: x >= 0.95`).\n- `.areComplete(columns)` / `.areAnyComplete(columns)`.\n\
+      - `.hasDataType(column, datatype, [assertion])`: Checks `ConstrainableDataTypes`\
+      \ (`Null`, `Fractional`, `Integral`, `Boolean`, `String`, `Numeric`).\n- `.isNonNegative(column,\
+      \ [assertion])`: Numeric >= 0.\n- `.isPositive(column, [assertion])`: Numeric\
+      \ > 0.\n- `.isLessThan(colA, colB, [assertion])` / `.isLessThanOrEqualTo(colA,\
+      \ colB, [assertion])`.\n- `.isGreaterThan(colA, colB, [assertion])` / `.isGreaterThanOrEqualTo(colA,\
+      \ colB, [assertion])`.\n- `.isContainedIn(column, allowed_values, [assertion])`:\
+      \ Values within categorical list.\n- `.hasPattern(column, pattern, [assertion],\
+      \ [name])`: Regex match. Always use raw strings `r\"...\"`.\n- `.satisfies(columnCondition,\
+      \ constraintName, [assertion])`: Spark SQL WHERE condition. Enclose column names\
+      \ in backticks `` `col` ``.\n\n#### Aggregate-Level Constraints\n- `.hasSize(assertion)`:\
+      \ Row count matches condition.\n- `.isUnique(column)`: Column is 100% unique.\n\
+      - `.hasUniqueness(columns, assertion)`: Fraction of unique rows meets condition.\n\
+      - `.hasDistinctness(columns, assertion)`: Distinct values ratio meets condition.\n\
+      - `.hasMin(column, assertion)` / `.hasMax(column, assertion)` / `.hasMean(column,\
+      \ assertion)`.\n\n---\n\n### INSTRUCTIONS\n\n1. **Trace Every Crash Vector:**\
+      \ Identify every line executing `.astype()`, `int()`, `float()`, dictionary\
+      \ lookups `[...]`, division by zero, string methods on nullable objects, and\
+      \ list/array indexing.\n2. **Determine Guarding Conditions:** Trace the `if`/`elif`/`mask`\
+      \ conditions gating risky operations.\n3. **Formulate PyDeequ Checks:**\n  \
+      \ - Use `.satisfies()` with `TRY_CAST` and normalized string functions for conditional\
+      \ or complex multi-column checks.\n   - Use standard constraints (`.isComplete()`,\
+      \ `.isNonNegative()`) where direct row-level constraints apply.\n4. **Assign\
+      \ Severity:**\n   - `level: \"error\"`: **Mandatory** for every assumption that\
+      \ prevents a script crash.\n   - `level: \"warning\"`: For non-crashing data\
+      \ quality risks or downstream semantic integrity.\n5. **Output JSON:** Return\
+      \ strictly the JSON array according to the schema below.\n\n---\n\n### OUTPUT\
+      \ FORMAT\n\n```json\n[\n  {\n    \"column_group\": \"column_name\" or [\"col1\"\
+      , \"col2\"],\n    \"assumptions\": [\n      {\n        \"text\": \"Detailed\
+      \ explanation of the assumption and the exact runtime exception (e.g. ValueError,\
+      \ KeyError) if violated.\",\n        \"sources\": [\n          {\"start_line\"\
+      : 20, \"end_line\": 25}\n        ]\n      }\n    ],\n    \"code\": [\n     \
+      \ {\n        \"suggestion\": \".satisfies(\\\"...\\\", \\\"...\\\")\",\n   \
+      \     \"level\": \"error\" | \"warning\",\n        \"linked_assumptions\": [0]\n\
+      \      }\n    ]\n  }\n]\n```"
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 2
+split_seed: 2
+constraints:
+  '["result","result_margin"]':
+    code:
+    - suggestion: .satisfies("(`result` IS NULL OR `result` NOT IN ('runs', 'wickets'))
+        OR (`result_margin` IS NOT NULL AND TRY_CAST(`result_margin` AS DOUBLE) IS
+        NOT NULL)", "result_margin_present_when_runs_or_wickets")
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 458bbf67-4b5f-4768-9724-b3769169b644
+      source_assumptions:
+      - 62b85e08-98f2-4dc5-947c-e294a73c50c7
+    assumptions:
+    - text: 'When result is ''runs'' or ''wickets'', result_margin must be non-null
+        and numeric; otherwise pd.to_numeric converts it to NaN and calling int(row[''result_margin''])
+        raises ValueError: cannot convert float NaN to integer.'
+      sources:
+      - start_line: 21
+        end_line: 21
+        file: ''
+      - start_line: 36
+        end_line: 41
+        file: ''
+      uid: 62b85e08-98f2-4dc5-947c-e294a73c50c7
+  result:
+    code:
+    - suggestion: .isContainedIn("result", ["runs", "wickets", "tie", "no result"])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 50a634cb-2c41-4f93-9b0f-b73452bf604c
+      source_assumptions:
+      - 5d78a79c-97f9-45c3-9a2c-b5095bfb2475
+    assumptions:
+    - text: The script specifies VALID_RESULTS as {'runs', 'wickets', 'tie', 'no result'}
+        and contains specific logic handling these distinct outcomes.
+      sources:
+      - start_line: 7
+        end_line: 7
+        file: ''
+      - start_line: 31
+        end_line: 45
+        file: ''
+      uid: 5d78a79c-97f9-45c3-9a2c-b5095bfb2475
+  super_over:
+    code:
+    - suggestion: .isContainedIn("super_over", ["Y", "N"])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 17c559f2-2768-4206-8737-bf3c9d2f5728
+      source_assumptions:
+      - 44a10afe-9f50-4c62-8ac9-6e383b2df713
+    assumptions:
+    - text: super_over is checked against 'Y' to determine points and decided matches
+        on tied games.
+      sources:
+      - start_line: 68
+        end_line: 68
+        file: ''
+      - start_line: 80
+        end_line: 80
+        file: ''
+      uid: 44a10afe-9f50-4c62-8ac9-6e383b2df713
+  toss_decision:
+    code:
+    - suggestion: .isContainedIn("toss_decision", ["bat", "field"])
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 48ec24c8-21b8-405c-b54b-17568e6c0288
+      source_assumptions:
+      - 65999e35-bd1b-48d2-8dec-106b9a641d83
+    assumptions:
+    - text: toss_decision determines which team batted first, expecting binary choices
+        ('bat' or 'field').
+      sources:
+      - start_line: 25
+        end_line: 29
+        file: ''
+      uid: 65999e35-bd1b-48d2-8dec-106b9a641d83
+llm_usage:
+  task_lm:
+    cost: 0.022581
+    cost_spent: 0.022581
+    total_tokens: 11600
+    prompt_tokens: 6973
+    completion_tokens: 4627
+    cached_prompt_tokens: 0
+    reasoning_tokens: 3792
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 30.337
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.022581
+    cost_spent: 0.022581
+    total_tokens: 11600
+    prompt_tokens: 6973
+    completion_tokens: 4627
+    cached_prompt_tokens: 0
+    reasoning_tokens: 3792
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 30.337
+    api_seconds_saved: 0.0
+wall_clock_seconds: 36.092

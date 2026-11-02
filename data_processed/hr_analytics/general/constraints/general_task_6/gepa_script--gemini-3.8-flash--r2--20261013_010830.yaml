@@ -1,0 +1,642 @@
+sifta_generation:
+  program: gepa_script
+  run_dir: optimization_runs/baseline_gepa_run_20261013_003112
+  run_settings: {}
+  final_program_round: final
+  final_program_val_score: 52.65
+  instructions:
+    generator: "markdown\nYou are an expert data quality and data engineering assistant.\
+      \ Your task is to analyze a Python data processing script (`code_script`), metadata\
+      \ profiling the input dataset (`columns_desc`), and an optional downstream task\
+      \ description (`downstream_task_description`), and produce a comprehensive suite\
+      \ of PyDeequ data quality checks to validate incoming data batches.\n\nYour\
+      \ objective is to **maximize recall on unsafe data batches** (detecting schema\
+      \ violations, missing values, domain corruptions, invalid math operands, and\
+      \ relational discrepancies that crash execution or silently corrupt downstream\
+      \ metrics) while **preventing false alarms on safe data batches** (respecting\
+      \ baseline data distributions, null tolerances, and type representations).\n\
+      \n---\n\n### Input Information Available\n1. `columns_desc`: Statistical profile\
+      \ of the baseline input data:\n   - `completeness`: Ratio of non-null values\
+      \ (1.0 = fully populated).\n   - `dataType`: Baseline type (`Integral`, `Fractional`,\
+      \ `String`, `Boolean`).\n   - `approximateNumDistinctValues`: Distinct count\
+      \ estimate.\n   - `histogram`: Value counts and frequencies for categorical\
+      \ or discrete columns.\n2. `code_script`: The Python code that loads, transforms,\
+      \ and outputs data.\n3. `downstream_task_description`: Description of downstream\
+      \ consumers (if provided).\n\n---\n\n### Step-by-Step Instructions\n\n#### Step\
+      \ 1: Exhaustive Column Tracing\nIdentify **EVERY** input column referenced anywhere\
+      \ in `code_script`:\n- Include columns in variable lists (e.g., `numeric_cols\
+      \ = [...]`), loops, coercions (`pd.to_numeric`), dictionary lookups, grouping\
+      \ keys, aggregations, boolean conditions, math operations, and output selections.\n\
+      - **Do not omit any column.** Omitting a column mentioned in the script (even\
+      \ if only in a coercion loop or selection list) leaves corruptions in that column\
+      \ completely undetected, severely degrading recall.\n- Record exact 1-based\
+      \ line numbers where each column is referenced, merging contiguous lines into\
+      \ ranges `{\"start_line\": X, \"end_line\": Y}`.\n\n#### Step 2: Identify Failure\
+      \ Modes & Formulate Assumptions\nAnalyze how corrupted data could break script\
+      \ execution or invalidate business logic:\n1. **Completeness & Nullability**:\n\
+      \   - Operations like dictionary `.map()`, `.astype(int)`, string operations,\
+      \ comparisons, and arithmetic crash or produce `NaN` if values are missing.\n\
+      \   - If `columns_desc` indicates baseline `completeness == 1.0` and the code\
+      \ does not provide fallback handling (like `.fillna()`), the column must be\
+      \ complete.\n   - If baseline `completeness < 1.0` and the code handles nulls\
+      \ gracefully (e.g., `df['col'].fillna(0)`), allow missingness and avoid strict\
+      \ completeness requirements.\n2. **Data Types & Type Compatibility**:\n   -\
+      \ `pd.to_numeric(errors='coerce')` turns invalid strings into `NaN`. If downstream\
+      \ code performs `.astype(int)` or calculates sums/means, missing/coerced values\
+      \ cause crashes or corrupt calculations.\n   - **Integral vs. Fractional vs.\
+      \ Numeric**: In PySpark/Deequ, an integer column containing nulls is stored\
+      \ as a float/Fractional. If a safe batch arrives with 0 nulls, PySpark infers\
+      \ it as Integral. To avoid false alarms on numeric columns that can alternate\
+      \ between Integral and Fractional, use `ConstrainableDataTypes.Numeric` instead\
+      \ of locking to `Fractional` or `Integral`.\n3. **Categorical Domains & Dictionary\
+      \ Mappings**:\n   - When the code maps values via a dictionary (e.g., `df['col'].map({...})`),\
+      \ any value not present in the dictionary produces `NaN`. Unmapped keys propagate\
+      \ into NaN arithmetic and break `.astype(int)`.\n   - Inspect `columns_desc.histogram`\
+      \ and script logic (including `.replace()` normalizations): include **all valid\
+      \ baseline categories plus mapped variants** in the allowed set.\n4. **Numeric\
+      \ Signs, Bounds & Divisors**:\n   - **Strictly Positive (`.isPositive`)**: Any\
+      \ column used as a divisor (e.g., denominators in FTE calculations, rate calculations,\
+      \ compa-ratio midpoints, headcount divisions) or passed to `log()`. Zero or\
+      \ negative values lead to division-by-zero (`inf`) or undefined math.\n   -\
+      \ **Non-Negative (`.isNonNegative`)**: Experience, tenure, hours worked, salary,\
+      \ age, count metrics, promotion years, and salary hike percentages.\n   - **Bounded\
+      \ Scales**: Rating and discrete scale columns (e.g., 1–4 satisfaction/involvement,\
+      \ 1–5 job levels) must not have out-of-bounds values that distort composite\
+      \ indices.\n5. **Cross-Column / Relational Integrity**:\n   - Physical and logical\
+      \ hierarchies between columns must be maintained:\n     - Tenure vs. Total Experience:\
+      \ `YearsAtCompany <= TotalWorkingYears`\n     - Promotion vs. Company Tenure:\
+      \ `YearsSinceLastPromotion <= YearsAtCompany`\n     - Manager Tenure vs. Company\
+      \ Tenure: `YearsWithCurrManager <= YearsAtCompany`\n     - Age vs. Experience:\
+      \ `Age >= TotalWorkingYears + 14`\n   - Formulate relational rules using `.satisfies(...)`\
+      \ with PySpark SQL expressions (e.g., ``'`YearsSinceLastPromotion` <= `YearsAtCompany`'``).\n\
+      6. **Uniqueness**:\n   - Assert `.isUnique()` **only** if the column is an entity\
+      \ identifier AND `approximateNumDistinctValues == total_rows` in `columns_desc`.\
+      \ If duplicates exist in the baseline (e.g., distinct count < row count), do\
+      \ not assert uniqueness.\n\n#### Step 3: Assign Severity Levels (`level`)\n\n\
+      The evaluation harness evaluates test batches based on check failures:\n- **`\"\
+      error\"`**: Use whenever failure of the check indicates an unsafe batch that\
+      \ breaks code execution or invalidates outputs.\n  - **Crucial**: Schema, completeness\
+      \ on unhandled columns, categorical domains mapped by dictionaries, positive\
+      \ divisors, non-negativity of physical metrics, and **relational / cross-column\
+      \ integrity rules** (e.g., `YearsSinceLastPromotion <= YearsAtCompany`) must\
+      \ be set to `\"error\"`. *Demoting relational or domain checks to \"warning\"\
+      \ causes unsafe batches to pass undetected.*\n- **`\"warning\"`**: Use **strictly**\
+      \ when:\n  - The script explicitly implements graceful fallbacks (e.g., `.fillna(...)`,\
+      \ `.get(key, default)`).\n  - The check is an informational metric that does\
+      \ not impact execution stability or output validity.\n\n#### Step 4: Guard Against\
+      \ False Alarms on Safe Batches\n- **Never assert `.isComplete()` if baseline\
+      \ `completeness < 1.0`**: If baseline completeness is 0.95 and nulls are handled,\
+      \ either use `.hasCompleteness(column, lambda x: x >= 0.85)` at `\"warning\"\
+      ` level or omit completeness.\n- **Never assert uniqueness without baseline\
+      \ verification**: If `approximateNumDistinctValues` in `columns_desc` is less\
+      \ than the dataset size, the column naturally has duplicates.\n- **Complete\
+      \ allowed value lists**: Never restrict `.isContainedIn()` to a subset of observed\
+      \ baseline values. Cross-reference `columns_desc.histogram` to ensure every\
+      \ legitimate category is included.\n\n---\n\n### Available PyDeequ API Reference\n\
+      \n#### Row-Level Constraints:\n- `.isComplete(column)`: Validates column contains\
+      \ no null values.\n- `.hasCompleteness(column, assertion)`: Validates completeness\
+      \ fraction (e.g., `lambda x: x >= 0.90`).\n- `.areComplete(columns)`: Validates\
+      \ all listed columns contain no null values.\n- `.haveCompleteness(columns,\
+      \ assertion)`: Validates completeness across columns.\n- `.hasDataType(column,\
+      \ datatype)`: Validates conforming type. `datatype` must be one of:\n  - `ConstrainableDataTypes.Integral`\n\
+      \  - `ConstrainableDataTypes.Fractional`\n  - `ConstrainableDataTypes.Numeric`\
+      \ (matches either Integral or Fractional)\n  - `ConstrainableDataTypes.String`\n\
+      \  - `ConstrainableDataTypes.Boolean`\n- `.isContainedIn(column, allowed_values)`:\
+      \ Validates values are within `allowed_values` (list of strings).\n- `.isNonNegative(column)`:\
+      \ Validates numeric values are `>= 0`.\n- `.isPositive(column)`: Validates numeric\
+      \ values are `> 0`.\n- `.isLessThan(columnA, columnB)` / `.isLessThanOrEqualTo(columnA,\
+      \ columnB)`: Inequality between two columns.\n- `.isGreaterThan(columnA, columnB)`\
+      \ / `.isGreaterThanOrEqualTo(columnA, columnB)`: Inequality between two columns.\n\
+      - `.satisfies(columnCondition, constraintName)`: SQL WHERE clause expression\
+      \ (e.g., ``'`YearsAtCompany` <= `TotalWorkingYears`'``).\n- `.hasPattern(column,\
+      \ pattern)`: Matches regex pattern (use raw string `r\"...\"`).\n\n#### Aggregate-Level\
+      \ Constraints:\n- `.isUnique(column)`: Validates every value appears exactly\
+      \ once.\n- `.hasUniqueness(columns, assertion)`: Validates uniqueness fraction\
+      \ (e.g., `lambda x: x >= 0.99`).\n- `.hasSize(assertion)`: Validates row count\
+      \ (e.g., `lambda x: x >= 100`).\n- `.hasMin(column, assertion)` / `.hasMax(column,\
+      \ assertion)`: Validates boundary values.\n- `.hasMean(column, assertion)` /\
+      \ `.hasStandardDeviation(column, assertion)`: Validates distribution moments.\n\
+      \n---\n\n### Output Format Specification\n\nProvide your response strictly as\
+      \ a JSON list matching the following structure:\n\n```json\n[\n  {\n    \"column_group\"\
+      : \"ColumnName\",\n    \"assumptions\": [\n      {\n        \"text\": \"Detailed\
+      \ explanation of why this check is required for execution or data validity.\"\
+      ,\n        \"sources\": [\n          {\"start_line\": 20, \"end_line\": 27}\n\
+      \        ]\n      }\n    ],\n    \"code\": [\n      {\n        \"suggestion\"\
+      : \".isComplete('ColumnName')\",\n        \"level\": \"error\",\n        \"\
+      linked_assumptions\": [0]\n      },\n      {\n        \"suggestion\": \".hasDataType('ColumnName',\
+      \ ConstrainableDataTypes.Numeric)\",\n        \"level\": \"error\",\n      \
+      \  \"linked_assumptions\": [0]\n      }\n    ]\n  },\n  {\n    \"column_group\"\
+      : [\"ColA\", \"ColB\"],\n    \"assumptions\": [\n      {\n        \"text\":\
+      \ \"Cross-column relational integrity explanation.\",\n        \"sources\":\
+      \ [\n          {\"start_line\": 50, \"end_line\": 55}\n        ]\n      }\n\
+      \    ],\n    \"code\": [\n      {\n        \"suggestion\": \".satisfies('`ColA`\
+      \ <= `ColB`', 'ColALessThanOrEqualToColB')\",\n        \"level\": \"error\"\
+      ,\n        \"linked_assumptions\": [0]\n      }\n    ]\n  }\n]\n```\n\nEnsure\
+      \ valid JSON syntax with escaped strings. Check all referenced columns and interactions\
+      \ thoroughly."
+  llm:
+    model_name: gemini-3.8-flash
+    temperature: 0.6
+    max_tokens: 32000
+replicate: 2
+split_seed: 2
+constraints:
+  AgeGroup:
+    code:
+    - suggestion: .isComplete('AgeGroup')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 35db666e-498a-4fb1-b979-0b11681502bc
+      source_assumptions:
+      - 188343f9-401a-4004-962e-849e0fb1ea3f
+    - suggestion: .isContainedIn('AgeGroup', ['18-25', '26-35', '36-45', '46-55',
+        '55+'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 7957882d-5134-4405-bf0c-47ec99cd5820
+      source_assumptions:
+      - 188343f9-401a-4004-962e-849e0fb1ea3f
+    assumptions:
+    - text: AgeGroup is mapped to age_weight_map and included in risk_scores output.
+        Any unknown or missing value will yield NaN and corrupt raw_score and risk_score.
+      sources:
+      - start_line: 36
+        end_line: 43
+        file: ''
+      - start_line: 72
+        end_line: 72
+        file: ''
+      - start_line: 85
+        end_line: 87
+        file: ''
+      uid: 188343f9-401a-4004-962e-849e0fb1ea3f
+  Attrition:
+    code:
+    - suggestion: .isComplete('Attrition')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 38e93fcf-32ad-427d-86a5-aa1f0b1b4ca2
+      source_assumptions:
+      - a4b4098a-e738-4240-9efc-e485f68cc081
+    - suggestion: .isContainedIn('Attrition', ['Yes', 'No'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 1cf0448e-28f2-460f-87d9-391b27ac8842
+      source_assumptions:
+      - a4b4098a-e738-4240-9efc-e485f68cc081
+    assumptions:
+    - text: Attrition is evaluated via df['Attrition'] == 'Yes' to compute yes_rate
+        and intercept. Values should be complete and within domain ('Yes', 'No').
+      sources:
+      - start_line: 64
+        end_line: 65
+        file: ''
+      uid: a4b4098a-e738-4240-9efc-e485f68cc081
+  Department:
+    code:
+    - suggestion: .isComplete('Department')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: fcf5c125-a1d2-453b-984f-0d8aa4971827
+      source_assumptions:
+      - 02c1d38a-e9f0-4ae9-a24b-186f2cc0da56
+    - suggestion: .isContainedIn('Department', ['Sales', 'Research & Development',
+        'Human Resources'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 20e99bd6-fd35-4ce2-82eb-532a738dfe1b
+      source_assumptions:
+      - 02c1d38a-e9f0-4ae9-a24b-186f2cc0da56
+    assumptions:
+    - text: Department is used as a grouping key for dept_budget and written to outputs.
+        It must be non-null and belong to expected departments.
+      sources:
+      - start_line: 27
+        end_line: 30
+        file: ''
+      - start_line: 85
+        end_line: 87
+        file: ''
+      uid: 02c1d38a-e9f0-4ae9-a24b-186f2cc0da56
+  DistanceFromHome:
+    code:
+    - suggestion: .isComplete('DistanceFromHome')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a3911723-6a15-428c-b76f-fee97e5e18ff
+      source_assumptions:
+      - 28b7b2aa-ddcb-43fd-a431-a7386c152312
+    - suggestion: .hasDataType('DistanceFromHome', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 7d4afc13-dd14-4130-a8b5-9af19edb2161
+      source_assumptions:
+      - 28b7b2aa-ddcb-43fd-a431-a7386c152312
+    - suggestion: .isNonNegative('DistanceFromHome')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c1a62344-6f57-44d2-866b-2b7627850f7c
+      source_assumptions:
+      - 28b7b2aa-ddcb-43fd-a431-a7386c152312
+    assumptions:
+    - text: DistanceFromHome is cast to float and normalized by its maximum. It must
+        be complete and non-negative.
+      sources:
+      - start_line: 59
+        end_line: 60
+        file: ''
+      - start_line: 74
+        end_line: 74
+        file: ''
+      uid: 28b7b2aa-ddcb-43fd-a431-a7386c152312
+  EmpID:
+    code:
+    - suggestion: .isComplete('EmpID')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a545e5d7-bfba-4401-b5ad-9bc041eba326
+      source_assumptions:
+      - aca80d7d-9de8-4845-8cb9-86e29154a2c8
+    assumptions:
+    - text: EmpID is counted as Headcount in dept_budget and retained in output files
+        risk_scores.csv and merit_adjustments.csv. It must be complete.
+      sources:
+      - start_line: 28
+        end_line: 28
+        file: ''
+      - start_line: 85
+        end_line: 91
+        file: ''
+      uid: aca80d7d-9de8-4845-8cb9-86e29154a2c8
+  JobRole:
+    code:
+    - suggestion: .isComplete('JobRole')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9acb7950-884a-4cde-91e9-dda69dc4dcda
+      source_assumptions:
+      - 6bbcf09a-81b8-49a6-847c-e8c48883074b
+    - suggestion: .isContainedIn('JobRole', ['Research Director', 'Sales Representative',
+        'Research Scientist', 'Manufacturing Director', 'Healthcare Representative',
+        'Sales Executive', 'Manager', 'Human Resources', 'Laboratory Technician'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 51a90a36-2136-46ca-a425-d03aee9f1b50
+      source_assumptions:
+      - 6bbcf09a-81b8-49a6-847c-e8c48883074b
+    assumptions:
+    - text: JobRole is selected in output risk_scores.csv. It must be complete and
+        contain recognized roles.
+      sources:
+      - start_line: 85
+        end_line: 87
+        file: ''
+      uid: 6bbcf09a-81b8-49a6-847c-e8c48883074b
+  JobSatisfaction:
+    code:
+    - suggestion: .isComplete('JobSatisfaction')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 8a363a16-6c09-471d-8efc-50625d967d98
+      source_assumptions:
+      - c7a2decb-8bdf-4082-a9db-81856e5e478a
+    - suggestion: .isContainedIn('JobSatisfaction', ['1', '2', '3', '4'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: feb6148d-517c-4728-9ffb-0be391b6e8d9
+      source_assumptions:
+      - c7a2decb-8bdf-4082-a9db-81856e5e478a
+    assumptions:
+    - text: 'JobSatisfaction is mapped via job_sat_map ({1: 0.4, 2: 0.2, 3: -0.1,
+        4: -0.2}) and cast to float. Unmapped values result in NaN which propagates
+        through raw_score.'
+      sources:
+      - start_line: 54
+        end_line: 56
+        file: ''
+      - start_line: 70
+        end_line: 70
+        file: ''
+      uid: c7a2decb-8bdf-4082-a9db-81856e5e478a
+  MonthlyIncome:
+    code:
+    - suggestion: .isComplete('MonthlyIncome')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: a8b5ca34-08f3-46cc-8f84-818dfa60f5fb
+      source_assumptions:
+      - 36eafbd2-c779-4b0a-a4cf-3915ef576c7b
+    - suggestion: .hasDataType('MonthlyIncome', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c6b32463-686e-4857-aba6-bb85df83f7c6
+      source_assumptions:
+      - 36eafbd2-c779-4b0a-a4cf-3915ef576c7b
+    - suggestion: .isNonNegative('MonthlyIncome')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 50b4b784-c8b8-4356-ab73-eaa793c924d3
+      source_assumptions:
+      - 36eafbd2-c779-4b0a-a4cf-3915ef576c7b
+    assumptions:
+    - text: MonthlyIncome is multiplied by approved_percent to calculate approved_amount
+        and Department MeritBudget. It must be complete, numeric, and non-negative.
+      sources:
+      - start_line: 24
+        end_line: 24
+        file: ''
+      - start_line: 29
+        end_line: 29
+        file: ''
+      uid: 36eafbd2-c779-4b0a-a4cf-3915ef576c7b
+  OverTime:
+    code:
+    - suggestion: .isComplete('OverTime')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f05193a6-73e0-43d0-8044-3da95fa689b5
+      source_assumptions:
+      - 05d58ca6-f923-4b3d-be8c-c70a64c1bc5e
+    - suggestion: .isContainedIn('OverTime', ['Yes', 'No'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 87708a65-1644-4773-b6c5-7de090005eb4
+      source_assumptions:
+      - 05d58ca6-f923-4b3d-be8c-c70a64c1bc5e
+    assumptions:
+    - text: OverTime is checked for equality to 'Yes'. Completeness is 1.0 and expected
+        domain values are 'Yes' and 'No'.
+      sources:
+      - start_line: 53
+        end_line: 53
+        file: ''
+      uid: 05d58ca6-f923-4b3d-be8c-c70a64c1bc5e
+  PercentSalaryHike:
+    code:
+    - suggestion: .isComplete('PercentSalaryHike')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e3bfbf04-516d-46e4-a89b-f867e6e01dfd
+      source_assumptions:
+      - 9ec96c5c-1744-414e-af69-dede60b38cf3
+    - suggestion: .hasDataType('PercentSalaryHike', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 7dd1431f-7622-4992-b9cf-255f1b6c6aa7
+      source_assumptions:
+      - 9ec96c5c-1744-414e-af69-dede60b38cf3
+    - suggestion: .isNonNegative('PercentSalaryHike')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: c95b22c6-a9df-4797-8a04-922dc297e8aa
+      source_assumptions:
+      - 9ec96c5c-1744-414e-af69-dede60b38cf3
+    assumptions:
+    - text: PercentSalaryHike is added directly to rating_bonus in arithmetic operations
+        to calculate recommended_percent. It must be complete and non-negative.
+      sources:
+      - start_line: 20
+        end_line: 20
+        file: ''
+      uid: 9ec96c5c-1744-414e-af69-dede60b38cf3
+  PerformanceRating:
+    code:
+    - suggestion: .isComplete('PerformanceRating')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6b3b1677-c7ab-4387-95b8-918867ed765e
+      source_assumptions:
+      - 112b37f5-b979-47ce-94c4-bb04940b7f77
+    - suggestion: .isContainedIn('PerformanceRating', ['3', '4'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: fd198a78-f917-4d89-ac59-4d62990d976f
+      source_assumptions:
+      - 112b37f5-b979-47ce-94c4-bb04940b7f77
+    assumptions:
+    - text: 'PerformanceRating is mapped using rating_bonus_map ({3: 0.0, 4: 2.0})
+        without a default. Any missing or unmapped values will produce NaN in df[''rating_bonus''],
+        affecting merit bonus computations. In baseline data, completeness is 1.0
+        and allowed values are 3 and 4.'
+      sources:
+      - start_line: 18
+        end_line: 20
+        file: ''
+      uid: 112b37f5-b979-47ce-94c4-bb04940b7f77
+  SalarySlab:
+    code:
+    - suggestion: .isComplete('SalarySlab')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9d4dbabe-059c-4ab1-81a9-e697870075e1
+      source_assumptions:
+      - 0022acfd-9e2e-4a58-a1dd-73c31de3ccbd
+    - suggestion: .isContainedIn('SalarySlab', ['Upto 5k', '5k-10k', '10k-15k', '15k+'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: af80e723-e9ae-4c7d-8d1b-61d232ae2072
+      source_assumptions:
+      - 0022acfd-9e2e-4a58-a1dd-73c31de3ccbd
+    assumptions:
+    - text: SalarySlab is mapped via cap_map to cap_percent. Missing or out-of-domain
+        categories will produce NaN and corrupt approved_percent and approved_amount.
+      sources:
+      - start_line: 21
+        end_line: 24
+        file: ''
+      uid: 0022acfd-9e2e-4a58-a1dd-73c31de3ccbd
+  WorkLifeBalance:
+    code:
+    - suggestion: .isComplete('WorkLifeBalance')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 9c3f9642-be37-4ff9-b0c3-4c9ed50a72de
+      source_assumptions:
+      - f520669c-2781-41e6-8190-d8158b15bb68
+    - suggestion: .isContainedIn('WorkLifeBalance', ['1', '2', '3', '4'])
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 6cd0ac12-87e6-4223-8dc1-ed953678159d
+      source_assumptions:
+      - f520669c-2781-41e6-8190-d8158b15bb68
+    assumptions:
+    - text: 'WorkLifeBalance is mapped via wlb_map ({1: 0.5, 2: 0.2, 3: 0.0, 4: -0.1})
+        and cast to float. Unmapped values result in NaN.'
+      sources:
+      - start_line: 55
+        end_line: 57
+        file: ''
+      - start_line: 71
+        end_line: 71
+        file: ''
+      uid: f520669c-2781-41e6-8190-d8158b15bb68
+  YearsAtCompany:
+    code:
+    - suggestion: .isComplete('YearsAtCompany')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 2fd311d3-5996-4d71-9f3b-45c98c0d4122
+      source_assumptions:
+      - 6dd1aa71-23de-4437-8e14-874dd72b207b
+    - suggestion: .hasDataType('YearsAtCompany', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: b7a44d8c-6825-4249-b9a8-72d6f2ac997f
+      source_assumptions:
+      - 6dd1aa71-23de-4437-8e14-874dd72b207b
+    - suggestion: .isNonNegative('YearsAtCompany')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 5c1f801f-5a50-4119-9297-97ba11985b99
+      source_assumptions:
+      - 6dd1aa71-23de-4437-8e14-874dd72b207b
+    assumptions:
+    - text: YearsAtCompany is parsed to numeric and used as the denominator in tenure_ratio.
+        It must be non-negative.
+      sources:
+      - start_line: 45
+        end_line: 51
+        file: ''
+      uid: 6dd1aa71-23de-4437-8e14-874dd72b207b
+  YearsSinceLastPromotion:
+    code:
+    - suggestion: .isComplete('YearsSinceLastPromotion')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 80c3dd6c-7f51-421b-a052-726e3f25a7ab
+      source_assumptions:
+      - 16b34924-6ee2-4dc9-9a36-7d66673860da
+    - suggestion: .hasDataType('YearsSinceLastPromotion', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: e9a737c8-ec13-408d-b073-5314f2680aa9
+      source_assumptions:
+      - 16b34924-6ee2-4dc9-9a36-7d66673860da
+    - suggestion: .isNonNegative('YearsSinceLastPromotion')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 4b6b56d9-da3c-472e-a33d-ce2bc1dc117d
+      source_assumptions:
+      - 16b34924-6ee2-4dc9-9a36-7d66673860da
+    assumptions:
+    - text: YearsSinceLastPromotion is parsed to numeric and used as the numerator
+        in tenure_ratio. It must be non-negative.
+      sources:
+      - start_line: 46
+        end_line: 51
+        file: ''
+      uid: 16b34924-6ee2-4dc9-9a36-7d66673860da
+  YearsWithCurrManager:
+    code:
+    - suggestion: '.hasCompleteness(''YearsWithCurrManager'', lambda x: x >= 0.90)'
+      validity: true
+      reason_if_invalid: ''
+      level: warning
+      uid: 570ae398-80dc-4c11-9e9c-59e0f64528cb
+      source_assumptions:
+      - b1a7003b-c8d8-4c77-b76e-96c59e3dcad9
+    - suggestion: .hasDataType('YearsWithCurrManager', ConstrainableDataTypes.Numeric)
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: 115fdf4c-b855-49a6-9cd1-3bc4c6e83a42
+      source_assumptions:
+      - b1a7003b-c8d8-4c77-b76e-96c59e3dcad9
+    - suggestion: .satisfies('`YearsWithCurrManager` IS NULL OR `YearsWithCurrManager`
+        >= 0', 'YearsWithCurrManagerNonNegative')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: d749a6b0-f714-40d2-a6cc-d2d94d2c5f76
+      source_assumptions:
+      - b1a7003b-c8d8-4c77-b76e-96c59e3dcad9
+    assumptions:
+    - text: YearsWithCurrManager is used to compute manager tenure penalty. Nulls
+        are filled with 0, but values must be numeric and non-negative. Baseline completeness
+        is ~0.95.
+      sources:
+      - start_line: 62
+        end_line: 63
+        file: ''
+      uid: b1a7003b-c8d8-4c77-b76e-96c59e3dcad9
+  '["YearsAtCompany","YearsSinceLastPromotion"]':
+    code:
+    - suggestion: .satisfies('`YearsSinceLastPromotion` <= `YearsAtCompany`', 'PromotionYearsLTECompanyYears')
+      validity: true
+      reason_if_invalid: ''
+      level: error
+      uid: f4940608-3807-4570-baa1-4fe00f095094
+      source_assumptions:
+      - 70cbe5bc-2fb7-4289-9ffd-9e2091218023
+    assumptions:
+    - text: 'Relational integrity check: YearsSinceLastPromotion should logically
+        not exceed YearsAtCompany.'
+      sources:
+      - start_line: 45
+        end_line: 51
+        file: ''
+      uid: 70cbe5bc-2fb7-4289-9ffd-9e2091218023
+llm_usage:
+  task_lm:
+    cost: 0.021284
+    cost_spent: 0.021284
+    total_tokens: 13195
+    prompt_tokens: 9399
+    completion_tokens: 3796
+    cached_prompt_tokens: 0
+    reasoning_tokens: 0
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 17.933
+    api_seconds_saved: 0.0
+  total:
+    cost: 0.021284
+    cost_spent: 0.021284
+    total_tokens: 13195
+    prompt_tokens: 9399
+    completion_tokens: 3796
+    cached_prompt_tokens: 0
+    reasoning_tokens: 0
+    requests: 1
+    cache_served_requests: 0
+    uncosted_requests: 0
+    fallback_priced_requests: 0
+    api_seconds: 17.933
+    api_seconds_saved: 0.0
+wall_clock_seconds: 23.899

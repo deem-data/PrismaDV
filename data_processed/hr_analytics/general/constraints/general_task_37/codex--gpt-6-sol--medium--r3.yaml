@@ -1,0 +1,2150 @@
+baseline_method: codex
+model_name: gpt-6-sol
+created_at: '20260928_143148'
+prompt_source: /sc-scratch/sc-scratch-ikim-prismadv/prismadv-revision/workflow_prismadv/eid_bench_baselines/prompts/codex.md
+prompt_template: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ\
+  \ constraints describing what\nthe program below assumes about its input data. If\
+  \ new data arrived that violated\none of your constraints, the program should be\
+  \ expected to misbehave -- crash,\nsilently produce a wrong number, or drop records\
+  \ it should have kept.\n\nYour output is a single file, `constraints.json`, in the\
+  \ current folder.\n\n# The program\n\nThis program consumes the dataset.\n\n```python\n\
+  {{CODE}}\n```\n\nThe same program is on disk at `{{CODE_PATH}}`, so you can run\
+  \ it against the\nstaged table, step through it, or search it, rather than working\
+  \ from the\nlisting alone.\n\n# The data\n\nThree rows sampled from the dataset\
+  \ the program consumes:\n\n{{DATA_SAMPLE}}\n\nThe full table is on disk at `{{TABLE_PATH}}`.\
+  \ You have complete access to it:\nload it with pandas, profile it, plot it, run\
+  \ whatever analysis helps. It is a\nthrowaway copy -- nothing you do to it has any\
+  \ effect outside this workspace.\n\n# Verifying your constraints\n\nYou can execute\
+  \ PyDeequ constraint code against the staged table and read back\nthe result of\
+  \ every check:\n\n```\n{{CHECKER_CMD}}\n```\n\nwhere the constraints file is plain\
+  \ text with one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"\
+  age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"closed\"\
+  ])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure prints\
+  \ the reason,\nincluding compilation errors. Use it as often as you like.\n\n# Output\
+  \ format\n\nWrite `constraints.json` in the current folder, containing the union\
+  \ of what you\nsettled on for every column:\n\n{\n    \"constraints\": [\n     \
+  \   {\n            \"column_name\": \"some_column\",\n            \"code_for_constraint\"\
+  : \".isComplete('some_column')\"\n        },\n        {\n            \"column_name\"\
+  : \"another_column\",\n            \"code_for_constraint\": \".isPositive('another_column')\"\
+  \n        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+  \ Each\nentry names the single column it constrains; for a constraint spanning several\n\
+  columns, name the one it is primarily about.\n"
+prompt_text: "# Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+  \ describing what\nthe program below assumes about its input data. If new data arrived\
+  \ that violated\none of your constraints, the program should be expected to misbehave\
+  \ -- crash,\nsilently produce a wrong number, or drop records it should have kept.\n\
+  \nYour output is a single file, `constraints.json`, in the current folder.\n\n#\
+  \ The program\n\nThis program consumes the dataset.\n\n```python\nimport argparse\n\
+  import os\n\nimport numpy as np\nimport pandas as pd\n\nparser = argparse.ArgumentParser()\n\
+  parser.add_argument('--input', type=str, required=True)\nparser.add_argument('--output',\
+  \ type=str, required=True)\nargs = parser.parse_args()\n\nos.makedirs(args.output,\
+  \ exist_ok=True)\n\ninput_file = os.path.join(args.input, 'new_data.csv')\ndf =\
+  \ pd.read_csv(input_file)\n\n# Derive fields used by downstream eligibility/compensation\
+  \ logic\nagegroup_to_stage = {\n    '18-25': 'early',\n    '26-35': 'early',\n \
+  \   '36-45': 'mid',\n    '46-55': 'senior',\n    '55+': 'late'\n}\ndf['CareerStage']\
+  \ = df['AgeGroup'].map(agegroup_to_stage).fillna('unknown')\n# Tenure relationship\
+  \ checks before computing ratios and derived features\n# Ratios and derived tenure\
+  \ features\nratio_in_role = df['YearsInCurrentRole'] / df['YearsAtCompany']\nratio_in_role\
+  \ = ratio_in_role.replace([np.inf, -np.inf], np.nan).fillna(0.0)\nstagnation_years\
+  \ = df['YearsAtCompany'] - df['YearsSinceLastPromotion']\nsqrt_stagnation = np.sqrt(stagnation_years.clip(lower=0))\n\
+  \n# Department and JobRole alignment checks before budget multipliers\n# Budget\
+  \ multipliers by department\nbudget_multipliers = {\n    'Sales': 1.00,\n    'Research\
+  \ & Development': 1.05,\n    'Human Resources': 0.95\n}\ndf['BudgetMultiplier']\
+  \ = df['Department'].map(budget_multipliers).fillna(1.00)\n\n# Salary slab alignment\
+  \ and medians before compa ratios and caps\nslab_order = ['Upto 5k', '5k-10k', '10k-15k',\
+  \ '15k+']\nslab_bounds = {\n    'Upto 5k': (0, 5000),  # (0, 5000]\n    '5k-10k':\
+  \ (5000, 10000),  # (5000, 10000]\n    '10k-15k': (10000, 15000),  # (10000, 15000]\n\
+  \    '15k+': (15000, np.inf)  # (15000, inf)\n}\nslab_caps = {\n    'Upto 5k': 0.15,\n\
+  \    '5k-10k': 0.12,\n    '10k-15k': 0.10,\n    '15k+': 0.08\n}\n\nslab_medians\
+  \ = df.groupby('SalarySlab')['MonthlyIncome'].median()\n# Compa-ratio relative to\
+  \ slab median\ndf['SlabMedian'] = df['SalarySlab'].map(slab_medians.to_dict())\n\
+  df['CompaRatio'] = (df['MonthlyIncome'] / df['SlabMedian']).replace([np.inf, -np.inf],\
+  \ np.nan).fillna(1.0)\n\n# Base raise by performance\nbase_raise = np.where(df['PerformanceRating']\
+  \ >= 4, 0.08, 0.03)\n# Adjust for stagnation and time in role; diminish if already\
+  \ above slab median\nstagnation_adj = 1.0 + 0.02 * sqrt_stagnation.clip(upper=5)\n\
+  role_time_adj = 1.0 + 0.03 * ratio_in_role.clip(upper=1)\nmarket_adj = 1.0 + 0.02\
+  \ * (1 - df['CompaRatio'].clip(upper=1))\nbudget_adj = df['BudgetMultiplier']\n\n\
+  recommended_raise = base_raise * stagnation_adj * role_time_adj * market_adj * budget_adj\n\
+  \n# Cap by slab policy\ncap_series = df['SalarySlab'].map(slab_caps)\nrecommended_raise\
+  \ = np.minimum(recommended_raise, cap_series)\nrecommended_raise = recommended_raise.clip(lower=0.0)\n\
+  \nnew_income = (df['MonthlyIncome'] * (1.0 + recommended_raise)).round(2)\n\n# Promotion\
+  \ eligibility rules using career stage thresholds\nrequired_years_by_stage = {\n\
+  \    'early': 2,\n    'mid': 2,\n    'senior': 1,\n    'late': 1\n}\nrequired_years\
+  \ = df['CareerStage'].map(required_years_by_stage).fillna(2)\n\neligible_promo =\
+  \ (\n        (df['PerformanceRating'] >= 4) &\n        (df['YearsInCurrentRole']\
+  \ >= required_years) &\n        (df['YearsSinceLastPromotion'] >= 1) &\n       \
+  \ (df['JobLevel'] < 5) &\n        (df['Attrition'].str.upper() == 'NO')\n)\n\n#\
+  \ Output datasets for downstream engine\ncomp_out = df[['EmpID', 'EmployeeNumber',\
+  \ 'Department', 'JobRole', 'SalarySlab', 'MonthlyIncome']].copy()\ncomp_out['RecommendedRaisePct']\
+  \ = recommended_raise.round(4)\ncomp_out['NewMonthlyIncome'] = new_income\ncomp_out['CompaRatio']\
+  \ = df['CompaRatio'].round(4)\n\npromo_out = df[\n    ['EmpID', 'EmployeeNumber',\
+  \ 'Department', 'JobRole', 'JobLevel', 'PerformanceRating', 'YearsInCurrentRole',\n\
+  \     'YearsSinceLastPromotion', 'CareerStage']].copy()\npromo_out['EligibleForPromotion']\
+  \ = eligible_promo\n\ncomp_out.to_csv(os.path.join(args.output, 'compensation_recommendations.csv'),\
+  \ index=False)\npromo_out.to_csv(os.path.join(args.output, 'promotion_eligibility.csv'),\
+  \ index=False)\n\n# A filtered pre-validated subset that meets eligibility or high\
+  \ performers for downstream engine\ndownstream_feed = df.loc[\n    (eligible_promo)\
+  \ | (df['PerformanceRating'] >= 4), ['EmpID', 'EmployeeNumber', 'Department', 'JobRole',\
+  \ 'JobLevel',\n                                                        'PerformanceRating',\
+  \ 'MonthlyIncome', 'SalarySlab',\n                                             \
+  \           'CareerStage']].copy()\ndownstream_feed['RecommendedRaisePct'] = recommended_raise.round(4)\n\
+  downstream_feed['NewMonthlyIncome'] = new_income\n\ndownstream_feed.to_csv(os.path.join(args.output,\
+  \ 'prevalidated_feed.csv'), index=False)\n\n```\n\nThe same program is on disk at\
+  \ `./code/general_task_37.py`, so you can run it against the\nstaged table, step\
+  \ through it, or search it, rather than working from the\nlisting alone.\n\n# The\
+  \ data\n\nThree rows sampled from the dataset the program consumes:\n\n[{'id': 771,\
+  \ 'EmpID': 'RM777', 'Age': 20, 'AgeGroup': '18-25', 'Attrition': 'Yes', 'BusinessTravel':\
+  \ 'Travel_Frequently', 'DailyRate': 769, 'Department': 'Sales', 'DistanceFromHome':\
+  \ 9, 'Education': 3, 'EducationField': 'Marketing', 'EmployeeCount': 1, 'EmployeeNumber':\
+  \ 1077, 'EnvironmentSatisfaction': 4, 'Gender': 'Female', 'HourlyRate': 54, 'JobInvolvement':\
+  \ 3, 'JobLevel': 1, 'JobRole': 'Sales Representative', 'JobSatisfaction': 4, 'MaritalStatus':\
+  \ 'Single', 'MonthlyIncome': 2323, 'SalarySlab': 'Upto 5k', 'MonthlyRate': 17205,\
+  \ 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime': 'Yes', 'PercentSalaryHike':\
+  \ 14, 'PerformanceRating': 3, 'RelationshipSatisfaction': 2, 'StandardHours': 80,\
+  \ 'StockOptionLevel': 0, 'TotalWorkingYears': 2, 'TrainingTimesLastYear': 3, 'WorkLifeBalance':\
+  \ 3, 'YearsAtCompany': 2, 'YearsSinceLastPromotion': 0, 'YearsWithCurrManager':\
+  \ 2.0, 'YearsInCurrentRole': 2}, {'id': 322, 'EmpID': 'RM146', 'Age': 30, 'AgeGroup':\
+  \ '26-35', 'Attrition': 'No', 'BusinessTravel': 'Travel_Rarely', 'DailyRate': 201,\
+  \ 'Department': 'Research & Development', 'DistanceFromHome': 5, 'Education': 3,\
+  \ 'EducationField': 'Technical Degree', 'EmployeeCount': 1, 'EmployeeNumber': 197,\
+  \ 'EnvironmentSatisfaction': 4, 'Gender': 'Female', 'HourlyRate': 84, 'JobInvolvement':\
+  \ 3, 'JobLevel': 1, 'JobRole': 'Research Scientist', 'JobSatisfaction': 1, 'MaritalStatus':\
+  \ 'Divorced', 'MonthlyIncome': 3204, 'SalarySlab': 'Upto 5k', 'MonthlyRate': 10415,\
+  \ 'NumCompaniesWorked': 5, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike':\
+  \ 14, 'PerformanceRating': 3, 'RelationshipSatisfaction': 4, 'StandardHours': 80,\
+  \ 'StockOptionLevel': 1, 'TotalWorkingYears': 8, 'TrainingTimesLastYear': 3, 'WorkLifeBalance':\
+  \ 3, 'YearsAtCompany': 3, 'YearsSinceLastPromotion': 2, 'YearsWithCurrManager':\
+  \ nan, 'YearsInCurrentRole': 2}, {'id': 337, 'EmpID': 'RM1025', 'Age': 47, 'AgeGroup':\
+  \ '46-55', 'Attrition': 'No', 'BusinessTravel': 'Travel_Rarely', 'DailyRate': 359,\
+  \ 'Department': 'Research & Development', 'DistanceFromHome': 2, 'Education': 4,\
+  \ 'EducationField': 'Medical', 'EmployeeCount': 1, 'EmployeeNumber': 1443, 'EnvironmentSatisfaction':\
+  \ 1, 'Gender': 'Female', 'HourlyRate': 82, 'JobInvolvement': 3, 'JobLevel': 4, 'JobRole':\
+  \ 'Research Director', 'JobSatisfaction': 3, 'MaritalStatus': 'Married', 'MonthlyIncome':\
+  \ 17169, 'SalarySlab': '15k+', 'MonthlyRate': 26703, 'NumCompaniesWorked': 3, 'Over18':\
+  \ 'Y', 'OverTime': 'No', 'PercentSalaryHike': 19, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+  \ 2, 'StandardHours': 80, 'StockOptionLevel': 2, 'TotalWorkingYears': 26, 'TrainingTimesLastYear':\
+  \ 2, 'WorkLifeBalance': 4, 'YearsAtCompany': 20, 'YearsSinceLastPromotion': 5, 'YearsWithCurrManager':\
+  \ 6.0, 'YearsInCurrentRole': 17}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+  \ You have complete access to it:\nload it with pandas, profile it, plot it, run\
+  \ whatever analysis helps. It is a\nthrowaway copy -- nothing you do to it has any\
+  \ effect outside this workspace.\n\n# Verifying your constraints\n\nYou can execute\
+  \ PyDeequ constraint code against the staged table and read back\nthe result of\
+  \ every check:\n\n```\npython deequ_check.py --table observed_data --constraints\
+  \ <your_constraints_file>\n```\n\nwhere the constraints file is plain text with\
+  \ one PyDeequ `Check` call per line,\nfor example:\n\n```\n.isComplete(\"age\")\n\
+  .isNonNegative(\"age\")\n.isContainedIn(\"status\", [\"active\", \"closed\"])\n\
+  ```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`, and a failure prints the\
+  \ reason,\nincluding compilation errors. Use it as often as you like.\n\n# Output\
+  \ format\n\nWrite `constraints.json` in the current folder, containing the union\
+  \ of what you\nsettled on for every column:\n\n{\n    \"constraints\": [\n     \
+  \   {\n            \"column_name\": \"some_column\",\n            \"code_for_constraint\"\
+  : \".isComplete('some_column')\"\n        },\n        {\n            \"column_name\"\
+  : \"another_column\",\n            \"code_for_constraint\": \".isPositive('another_column')\"\
+  \n        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+  \ Each\nentry names the single column it constrains; for a constraint spanning several\n\
+  columns, name the one it is primarily about.\n\n# Workspace boundary\n\nYour workspace\
+  \ is the current folder, and for this task nothing else exists.\n\n- Read, list,\
+  \ search and write only inside this folder: `./data`, `./code`,\n  `deequ_check.py`,\
+  \ `task.txt`, and whatever you create here.\n- Do not touch anything outside it.\
+  \ That means no parent directory (`..`), no\n  other folder under /tmp, no home\
+  \ directory (`~`, $HOME), and no absolute path\n  anywhere else on the filesystem.\n\
+  - Do not search the wider filesystem -- no `rg`, `grep`, `find`, `ls` or\n  `python`\
+  \ over `/`, `/tmp`, `..`, `~` or any path outside this folder -- for\n  related\
+  \ data, prompts, examples, other runs, or previous answers. There is\n  nothing\
+  \ out there you are allowed to use, and a run that looks is discarded.\n- Running\
+  \ `python`, `deequ_check.py` and the tools on your PATH is fine; the\n  boundary\
+  \ is about what you read and write, not which interpreter runs.\n\nEverything you\
+  \ need is here. Work only from it.\n"
+reasoning_effort: medium
+isolation: audit
+staged_code_path: code/general_task_37.py
+replicate: 3
+token_accounting: &id002
+  input_tokens: 239266
+  cached_input_tokens: 211589
+  output_tokens: 4397
+  reasoning_tokens: 1275
+  total_tokens: null
+  turns: 1
+  cache_hit_rate: 0.8843
+  raw_turns:
+  - &id001
+    input_tokens: 239266
+    cached_input_tokens: 211589
+    cache_write_input_tokens: 26929
+    output_tokens: 4397
+    reasoning_output_tokens: 1275
+  agent_messages: 5
+  command_executions: 6
+  file_changes: 0
+  item_counts:
+    error: 1
+    agent_message: 5
+    command_execution: 6
+    reasoning: 5
+    todo_list: 1
+  llm_calls: 11
+  llm_calls_source: rollout token_count events
+  llm_calls_estimate: 11
+  calls:
+  - input_tokens: 12698
+    cached_input_tokens: 0
+    cache_write_input_tokens: 12630
+    output_tokens: 112
+    reasoning_output_tokens: 18
+    total_tokens: 12810
+  - input_tokens: 15654
+    cached_input_tokens: 12630
+    cache_write_input_tokens: 2956
+    output_tokens: 103
+    reasoning_output_tokens: 8
+    total_tokens: 15757
+  - input_tokens: 18836
+    cached_input_tokens: 15586
+    cache_write_input_tokens: 3182
+    output_tokens: 62
+    reasoning_output_tokens: 10
+    total_tokens: 18898
+  - input_tokens: 20492
+    cached_input_tokens: 18768
+    cache_write_input_tokens: 1656
+    output_tokens: 88
+    reasoning_output_tokens: 28
+    total_tokens: 20580
+  - input_tokens: 20593
+    cached_input_tokens: 20424
+    cache_write_input_tokens: 101
+    output_tokens: 771
+    reasoning_output_tokens: 23
+    total_tokens: 21364
+  - input_tokens: 22739
+    cached_input_tokens: 20525
+    cache_write_input_tokens: 2146
+    output_tokens: 527
+    reasoning_output_tokens: 445
+    total_tokens: 23266
+  - input_tokens: 23279
+    cached_input_tokens: 22671
+    cache_write_input_tokens: 540
+    output_tokens: 2218
+    reasoning_output_tokens: 498
+    total_tokens: 25497
+  - input_tokens: 25554
+    cached_input_tokens: 23211
+    cache_write_input_tokens: 2275
+    output_tokens: 124
+    reasoning_output_tokens: 64
+    total_tokens: 25678
+  - input_tokens: 25691
+    cached_input_tokens: 25486
+    cache_write_input_tokens: 137
+    output_tokens: 90
+    reasoning_output_tokens: 7
+    total_tokens: 25781
+  - input_tokens: 26733
+    cached_input_tokens: 25623
+    cache_write_input_tokens: 1042
+    output_tokens: 251
+    reasoning_output_tokens: 174
+    total_tokens: 26984
+  - input_tokens: 26997
+    cached_input_tokens: 26665
+    cache_write_input_tokens: 264
+    output_tokens: 51
+    reasoning_output_tokens: 0
+    total_tokens: 27048
+  rollout_path: /home/hach13/.codex-eidbench/sessions/2026/09/28/rollout-2026-09-28T14-30-00-01a0e7fe-5656-7e42-8ab6-607547e54357.jsonl
+cost: &id003
+  usd: 0.141642
+  priced: true
+  rates:
+    model: gpt-6-sol
+    provider: openai
+    input: 2.0
+    cached_input: 0.2
+    output: 10.0
+    source: developers.openai.com/api/docs/models/gpt-6-sol
+    as_of: '2026-09-27'
+    note: ''
+  source: developers.openai.com/api/docs/models/gpt-6-sol (as of 2026-09-27)
+cost_without_cache_usd: 0.522502
+failed_attempts: []
+cost_all_attempts:
+  attempts: 1
+  usd: 0.141642
+  usd_without_cache: 0.522502
+  failed_usd: 0
+  failed_usd_without_cache: 0
+wall_clock_seconds: 107.756
+attempts: 1
+deequ_tool_health: &id004
+  invocations: 2
+  verdict_lines: 33
+  usable: true
+  failure_tail: null
+raw_constraints:
+- column_name: EmpID
+  code_for_constraint: .isComplete('EmpID')
+- column_name: EmpID
+  code_for_constraint: .isUnique('EmpID')
+- column_name: EmployeeNumber
+  code_for_constraint: .isComplete('EmployeeNumber')
+- column_name: EmployeeNumber
+  code_for_constraint: .isUnique('EmployeeNumber')
+- column_name: EmployeeNumber
+  code_for_constraint: .isPositive('EmployeeNumber')
+- column_name: AgeGroup
+  code_for_constraint: .isComplete('AgeGroup')
+- column_name: AgeGroup
+  code_for_constraint: .isContainedIn('AgeGroup', ['18-25', '26-35', '36-45', '46-55',
+    '55+'])
+- column_name: AgeGroup
+  code_for_constraint: .satisfies("(AgeGroup = '18-25' AND Age BETWEEN 18 AND 25)
+    OR (AgeGroup = '26-35' AND Age BETWEEN 26 AND 35) OR (AgeGroup = '36-45' AND Age
+    BETWEEN 36 AND 45) OR (AgeGroup = '46-55' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+    = '55+' AND Age > 55)", 'age matches career stage')
+- column_name: YearsAtCompany
+  code_for_constraint: .isComplete('YearsAtCompany')
+- column_name: YearsAtCompany
+  code_for_constraint: .isNonNegative('YearsAtCompany')
+- column_name: YearsInCurrentRole
+  code_for_constraint: .isComplete('YearsInCurrentRole')
+- column_name: YearsInCurrentRole
+  code_for_constraint: .isNonNegative('YearsInCurrentRole')
+- column_name: YearsInCurrentRole
+  code_for_constraint: .satisfies('YearsInCurrentRole <= YearsAtCompany', 'role tenure
+    within company tenure')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .isComplete('YearsSinceLastPromotion')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .isNonNegative('YearsSinceLastPromotion')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .satisfies('YearsSinceLastPromotion <= YearsAtCompany', 'promotion
+    tenure within company tenure')
+- column_name: Department
+  code_for_constraint: .isComplete('Department')
+- column_name: Department
+  code_for_constraint: .isContainedIn('Department', ['Sales', 'Research & Development',
+    'Human Resources'])
+- column_name: JobRole
+  code_for_constraint: .isComplete('JobRole')
+- column_name: JobRole
+  code_for_constraint: .satisfies("(Department = 'Sales' AND JobRole IN ('Sales Executive',
+    'Sales Representative', 'Manager')) OR (Department = 'Human Resources' AND JobRole
+    IN ('Human Resources', 'Manager')) OR (Department = 'Research & Development' AND
+    JobRole IN ('Healthcare Representative', 'Laboratory Technician', 'Manufacturing
+    Director', 'Research Director', 'Research Scientist', 'Manager'))", 'department
+    matches job role')
+- column_name: SalarySlab
+  code_for_constraint: .isComplete('SalarySlab')
+- column_name: SalarySlab
+  code_for_constraint: .isContainedIn('SalarySlab', ['Upto 5k', '5k-10k', '10k-15k',
+    '15k+'])
+- column_name: MonthlyIncome
+  code_for_constraint: .isComplete('MonthlyIncome')
+- column_name: MonthlyIncome
+  code_for_constraint: .isPositive('MonthlyIncome')
+- column_name: SalarySlab
+  code_for_constraint: .satisfies("(SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND
+    MonthlyIncome <= 5000) OR (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND
+    MonthlyIncome <= 10000) OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND
+    MonthlyIncome <= 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)", 'salary
+    matches slab bounds')
+- column_name: PerformanceRating
+  code_for_constraint: .isComplete('PerformanceRating')
+- column_name: PerformanceRating
+  code_for_constraint: .satisfies('PerformanceRating BETWEEN 1 AND 4', 'valid performance
+    rating')
+- column_name: JobLevel
+  code_for_constraint: .isComplete('JobLevel')
+- column_name: JobLevel
+  code_for_constraint: .satisfies('JobLevel BETWEEN 1 AND 5', 'valid job level')
+- column_name: Attrition
+  code_for_constraint: .isComplete('Attrition')
+- column_name: Attrition
+  code_for_constraint: .satisfies("upper(Attrition) IN ('YES', 'NO')", 'valid attrition
+    flag')
+constraint_normalization:
+  entries: 31
+  plain_strings: 0
+  column_inferred: 0
+  dropped_no_column: 0
+  dropped_no_code: 0
+raw_constraints_as_written:
+- column_name: EmpID
+  code_for_constraint: .isComplete('EmpID')
+- column_name: EmpID
+  code_for_constraint: .isUnique('EmpID')
+- column_name: EmployeeNumber
+  code_for_constraint: .isComplete('EmployeeNumber')
+- column_name: EmployeeNumber
+  code_for_constraint: .isUnique('EmployeeNumber')
+- column_name: EmployeeNumber
+  code_for_constraint: .isPositive('EmployeeNumber')
+- column_name: AgeGroup
+  code_for_constraint: .isComplete('AgeGroup')
+- column_name: AgeGroup
+  code_for_constraint: .isContainedIn('AgeGroup', ['18-25', '26-35', '36-45', '46-55',
+    '55+'])
+- column_name: AgeGroup
+  code_for_constraint: .satisfies("(AgeGroup = '18-25' AND Age BETWEEN 18 AND 25)
+    OR (AgeGroup = '26-35' AND Age BETWEEN 26 AND 35) OR (AgeGroup = '36-45' AND Age
+    BETWEEN 36 AND 45) OR (AgeGroup = '46-55' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+    = '55+' AND Age > 55)", 'age matches career stage')
+- column_name: YearsAtCompany
+  code_for_constraint: .isComplete('YearsAtCompany')
+- column_name: YearsAtCompany
+  code_for_constraint: .isNonNegative('YearsAtCompany')
+- column_name: YearsInCurrentRole
+  code_for_constraint: .isComplete('YearsInCurrentRole')
+- column_name: YearsInCurrentRole
+  code_for_constraint: .isNonNegative('YearsInCurrentRole')
+- column_name: YearsInCurrentRole
+  code_for_constraint: .satisfies('YearsInCurrentRole <= YearsAtCompany', 'role tenure
+    within company tenure')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .isComplete('YearsSinceLastPromotion')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .isNonNegative('YearsSinceLastPromotion')
+- column_name: YearsSinceLastPromotion
+  code_for_constraint: .satisfies('YearsSinceLastPromotion <= YearsAtCompany', 'promotion
+    tenure within company tenure')
+- column_name: Department
+  code_for_constraint: .isComplete('Department')
+- column_name: Department
+  code_for_constraint: .isContainedIn('Department', ['Sales', 'Research & Development',
+    'Human Resources'])
+- column_name: JobRole
+  code_for_constraint: .isComplete('JobRole')
+- column_name: JobRole
+  code_for_constraint: .satisfies("(Department = 'Sales' AND JobRole IN ('Sales Executive',
+    'Sales Representative', 'Manager')) OR (Department = 'Human Resources' AND JobRole
+    IN ('Human Resources', 'Manager')) OR (Department = 'Research & Development' AND
+    JobRole IN ('Healthcare Representative', 'Laboratory Technician', 'Manufacturing
+    Director', 'Research Director', 'Research Scientist', 'Manager'))", 'department
+    matches job role')
+- column_name: SalarySlab
+  code_for_constraint: .isComplete('SalarySlab')
+- column_name: SalarySlab
+  code_for_constraint: .isContainedIn('SalarySlab', ['Upto 5k', '5k-10k', '10k-15k',
+    '15k+'])
+- column_name: MonthlyIncome
+  code_for_constraint: .isComplete('MonthlyIncome')
+- column_name: MonthlyIncome
+  code_for_constraint: .isPositive('MonthlyIncome')
+- column_name: SalarySlab
+  code_for_constraint: .satisfies("(SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND
+    MonthlyIncome <= 5000) OR (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND
+    MonthlyIncome <= 10000) OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND
+    MonthlyIncome <= 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)", 'salary
+    matches slab bounds')
+- column_name: PerformanceRating
+  code_for_constraint: .isComplete('PerformanceRating')
+- column_name: PerformanceRating
+  code_for_constraint: .satisfies('PerformanceRating BETWEEN 1 AND 4', 'valid performance
+    rating')
+- column_name: JobLevel
+  code_for_constraint: .isComplete('JobLevel')
+- column_name: JobLevel
+  code_for_constraint: .satisfies('JobLevel BETWEEN 1 AND 5', 'valid job level')
+- column_name: Attrition
+  code_for_constraint: .isComplete('Attrition')
+- column_name: Attrition
+  code_for_constraint: .satisfies("upper(Attrition) IN ('YES', 'NO')", 'valid attrition
+    flag')
+trajectory:
+  codex_version: codex-cli 0.147.0
+  model: gpt-6-sol
+  reasoning_effort: medium
+  command:
+  - codex
+  - exec
+  - --model
+  - gpt-6-sol
+  - -C
+  - /tmp/codex_synth_raqqp646
+  - --sandbox
+  - workspace-write
+  - --skip-git-repo-check
+  - --ignore-user-config
+  - --color
+  - never
+  - --json
+  - -c
+  - sandbox_workspace_write.network_access=true
+  - -c
+  - model_reasoning_effort="medium"
+  - Solve the task specified in task.txt.
+  usage: *id001
+  token_accounting: *id002
+  cost: *id003
+  cost_without_cache_usd: 0.522502
+  failed_attempts: []
+  wall_clock_seconds: 107.756
+  wall_clock_seconds_including_retries: 107.756
+  attempts: 1
+  timeout_seconds: 1800
+  returncode: 0
+  isolation: audit
+  workspace_escapes: []
+  outside_workspace: []
+  deequ_tool_health: *id004
+  events:
+  - type: thread.started
+    thread_id: 01a0e7fe-5656-7e42-8ab6-607547e54357
+  - type: item.completed
+    item:
+      id: item_0
+      type: error
+      message: Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata;
+        this can degrade performance and cause issues.
+  - type: turn.started
+  - type: item.completed
+    item:
+      id: item_1
+      type: agent_message
+      text: I’ll read the task and inspect the workspace files first.
+  - type: item.started
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; ls -la; cat task.txt; rg --files data code
+        2>/dev/null; sed -n '1,240p' deequ_check.py"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_2
+      type: command_execution
+      command: /usr/bin/bash -lc "pwd; ls -la; cat task.txt; rg --files data code
+        2>/dev/null; sed -n '1,240p' deequ_check.py"
+      aggregated_output: "/tmp/codex_synth_raqqp646\ntotal 36\ndrwx------  7 hach13\
+        \ posix-nogroup   188 Sep 28 14:30 .\ndrwx------ 35 hach13 nobody        \
+        \ 4096 Sep 28 14:30 ..\ndr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 28 14:30\
+        \ .agents\ndr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 28 14:30 .codex\n\
+        dr-xr-xr-x  2 hach13 posix-nogroup    40 Sep 28 14:30 .git\n-rw-r--r--  1\
+        \ hach13 posix-nogroup   937 Sep 28 14:30 AGENTS.md\ndrwxr-xr-x  2 hach13\
+        \ posix-nogroup    40 Sep 28 14:30 code\ndrwxr-xr-x  3 hach13 posix-nogroup\
+        \    28 Sep 28 14:30 data\n-rw-r--r--  1 hach13 posix-nogroup  4817 Sep 28\
+        \ 14:30 deequ_check.py\n-rw-r--r--  1 hach13 posix-nogroup  1337 Sep 28 14:30\
+        \ deequ_jars.txt\n-rw-r--r--  1 hach13 posix-nogroup 10363 Sep 28 14:30 task.txt\n\
+        # Task\n\nYou are writing a **data unit test**: a set of PyDeequ constraints\
+        \ describing what\nthe program below assumes about its input data. If new\
+        \ data arrived that violated\none of your constraints, the program should\
+        \ be expected to misbehave -- crash,\nsilently produce a wrong number, or\
+        \ drop records it should have kept.\n\nYour output is a single file, `constraints.json`,\
+        \ in the current folder.\n\n# The program\n\nThis program consumes the dataset.\n\
+        \n```python\nimport argparse\nimport os\n\nimport numpy as np\nimport pandas\
+        \ as pd\n\nparser = argparse.ArgumentParser()\nparser.add_argument('--input',\
+        \ type=str, required=True)\nparser.add_argument('--output', type=str, required=True)\n\
+        args = parser.parse_args()\n\nos.makedirs(args.output, exist_ok=True)\n\n\
+        input_file = os.path.join(args.input, 'new_data.csv')\ndf = pd.read_csv(input_file)\n\
+        \n# Derive fields used by downstream eligibility/compensation logic\nagegroup_to_stage\
+        \ = {\n    '18-25': 'early',\n    '26-35': 'early',\n    '36-45': 'mid',\n\
+        \    '46-55': 'senior',\n    '55+': 'late'\n}\ndf['CareerStage'] = df['AgeGroup'].map(agegroup_to_stage).fillna('unknown')\n\
+        # Tenure relationship checks before computing ratios and derived features\n\
+        # Ratios and derived tenure features\nratio_in_role = df['YearsInCurrentRole']\
+        \ / df['YearsAtCompany']\nratio_in_role = ratio_in_role.replace([np.inf, -np.inf],\
+        \ np.nan).fillna(0.0)\nstagnation_years = df['YearsAtCompany'] - df['YearsSinceLastPromotion']\n\
+        sqrt_stagnation = np.sqrt(stagnation_years.clip(lower=0))\n\n# Department\
+        \ and JobRole alignment checks before budget multipliers\n# Budget multipliers\
+        \ by department\nbudget_multipliers = {\n    'Sales': 1.00,\n    'Research\
+        \ & Development': 1.05,\n    'Human Resources': 0.95\n}\ndf['BudgetMultiplier']\
+        \ = df['Department'].map(budget_multipliers).fillna(1.00)\n\n# Salary slab\
+        \ alignment and medians before compa ratios and caps\nslab_order = ['Upto\
+        \ 5k', '5k-10k', '10k-15k', '15k+']\nslab_bounds = {\n    'Upto 5k': (0, 5000),\
+        \  # (0, 5000]\n    '5k-10k': (5000, 10000),  # (5000, 10000]\n    '10k-15k':\
+        \ (10000, 15000),  # (10000, 15000]\n    '15k+': (15000, np.inf)  # (15000,\
+        \ inf)\n}\nslab_caps = {\n    'Upto 5k': 0.15,\n    '5k-10k': 0.12,\n    '10k-15k':\
+        \ 0.10,\n    '15k+': 0.08\n}\n\nslab_medians = df.groupby('SalarySlab')['MonthlyIncome'].median()\n\
+        # Compa-ratio relative to slab median\ndf['SlabMedian'] = df['SalarySlab'].map(slab_medians.to_dict())\n\
+        df['CompaRatio'] = (df['MonthlyIncome'] / df['SlabMedian']).replace([np.inf,\
+        \ -np.inf], np.nan).fillna(1.0)\n\n# Base raise by performance\nbase_raise\
+        \ = np.where(df['PerformanceRating'] >= 4, 0.08, 0.03)\n# Adjust for stagnation\
+        \ and time in role; diminish if already above slab median\nstagnation_adj\
+        \ = 1.0 + 0.02 * sqrt_stagnation.clip(upper=5)\nrole_time_adj = 1.0 + 0.03\
+        \ * ratio_in_role.clip(upper=1)\nmarket_adj = 1.0 + 0.02 * (1 - df['CompaRatio'].clip(upper=1))\n\
+        budget_adj = df['BudgetMultiplier']\n\nrecommended_raise = base_raise * stagnation_adj\
+        \ * role_time_adj * market_adj * budget_adj\n\n# Cap by slab policy\ncap_series\
+        \ = df['SalarySlab'].map(slab_caps)\nrecommended_raise = np.minimum(recommended_raise,\
+        \ cap_series)\nrecommended_raise = recommended_raise.clip(lower=0.0)\n\nnew_income\
+        \ = (df['MonthlyIncome'] * (1.0 + recommended_raise)).round(2)\n\n# Promotion\
+        \ eligibility rules using career stage thresholds\nrequired_years_by_stage\
+        \ = {\n    'early': 2,\n    'mid': 2,\n    'senior': 1,\n    'late': 1\n}\n\
+        required_years = df['CareerStage'].map(required_years_by_stage).fillna(2)\n\
+        \neligible_promo = (\n        (df['PerformanceRating'] >= 4) &\n        (df['YearsInCurrentRole']\
+        \ >= required_years) &\n        (df['YearsSinceLastPromotion'] >= 1) &\n \
+        \       (df['JobLevel'] < 5) &\n        (df['Attrition'].str.upper() == 'NO')\n\
+        )\n\n# Output datasets for downstream engine\ncomp_out = df[['EmpID', 'EmployeeNumber',\
+        \ 'Department', 'JobRole', 'SalarySlab', 'MonthlyIncome']].copy()\ncomp_out['RecommendedRaisePct']\
+        \ = recommended_raise.round(4)\ncomp_out['NewMonthlyIncome'] = new_income\n\
+        comp_out['CompaRatio'] = df['CompaRatio'].round(4)\n\npromo_out = df[\n  \
+        \  ['EmpID', 'EmployeeNumber', 'Department', 'JobRole', 'JobLevel', 'PerformanceRating',\
+        \ 'YearsInCurrentRole',\n     'YearsSinceLastPromotion', 'CareerStage']].copy()\n\
+        promo_out['EligibleForPromotion'] = eligible_promo\n\ncomp_out.to_csv(os.path.join(args.output,\
+        \ 'compensation_recommendations.csv'), index=False)\npromo_out.to_csv(os.path.join(args.output,\
+        \ 'promotion_eligibility.csv'), index=False)\n\n# A filtered pre-validated\
+        \ subset that meets eligibility or high performers for downstream engine\n\
+        downstream_feed = df.loc[\n    (eligible_promo) | (df['PerformanceRating']\
+        \ >= 4), ['EmpID', 'EmployeeNumber', 'Department', 'JobRole', 'JobLevel',\n\
+        \                                                        'PerformanceRating',\
+        \ 'MonthlyIncome', 'SalarySlab',\n                                       \
+        \                 'CareerStage']].copy()\ndownstream_feed['RecommendedRaisePct']\
+        \ = recommended_raise.round(4)\ndownstream_feed['NewMonthlyIncome'] = new_income\n\
+        \ndownstream_feed.to_csv(os.path.join(args.output, 'prevalidated_feed.csv'),\
+        \ index=False)\n\n```\n\nThe same program is on disk at `./code/general_task_37.py`,\
+        \ so you can run it against the\nstaged table, step through it, or search\
+        \ it, rather than working from the\nlisting alone.\n\n# The data\n\nThree\
+        \ rows sampled from the dataset the program consumes:\n\n[{'id': 771, 'EmpID':\
+        \ 'RM777', 'Age': 20, 'AgeGroup': '18-25', 'Attrition': 'Yes', 'BusinessTravel':\
+        \ 'Travel_Frequently', 'DailyRate': 769, 'Department': 'Sales', 'DistanceFromHome':\
+        \ 9, 'Education': 3, 'EducationField': 'Marketing', 'EmployeeCount': 1, 'EmployeeNumber':\
+        \ 1077, 'EnvironmentSatisfaction': 4, 'Gender': 'Female', 'HourlyRate': 54,\
+        \ 'JobInvolvement': 3, 'JobLevel': 1, 'JobRole': 'Sales Representative', 'JobSatisfaction':\
+        \ 4, 'MaritalStatus': 'Single', 'MonthlyIncome': 2323, 'SalarySlab': 'Upto\
+        \ 5k', 'MonthlyRate': 17205, 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime':\
+        \ 'Yes', 'PercentSalaryHike': 14, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+        \ 2, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 2, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 2, 'YearsSinceLastPromotion':\
+        \ 0, 'YearsWithCurrManager': 2.0, 'YearsInCurrentRole': 2}, {'id': 322, 'EmpID':\
+        \ 'RM146', 'Age': 30, 'AgeGroup': '26-35', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 201, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 5, 'Education': 3, 'EducationField': 'Technical Degree',\
+        \ 'EmployeeCount': 1, 'EmployeeNumber': 197, 'EnvironmentSatisfaction': 4,\
+        \ 'Gender': 'Female', 'HourlyRate': 84, 'JobInvolvement': 3, 'JobLevel': 1,\
+        \ 'JobRole': 'Research Scientist', 'JobSatisfaction': 1, 'MaritalStatus':\
+        \ 'Divorced', 'MonthlyIncome': 3204, 'SalarySlab': 'Upto 5k', 'MonthlyRate':\
+        \ 10415, 'NumCompaniesWorked': 5, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike':\
+        \ 14, 'PerformanceRating': 3, 'RelationshipSatisfaction': 4, 'StandardHours':\
+        \ 80, 'StockOptionLevel': 1, 'TotalWorkingYears': 8, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 3, 'YearsSinceLastPromotion':\
+        \ 2, 'YearsWithCurrManager': nan, 'YearsInCurrentRole': 2}, {'id': 337, 'EmpID':\
+        \ 'RM1025', 'Age': 47, 'AgeGroup': '46-55', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 359, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 2, 'Education': 4, 'EducationField': 'Medical', 'EmployeeCount':\
+        \ 1, 'EmployeeNumber': 1443, 'EnvironmentSatisfaction': 1, 'Gender': 'Female',\
+        \ 'HourlyRate': 82, 'JobInvolvement': 3, 'JobLevel': 4, 'JobRole': 'Research\
+        \ Director', 'JobSatisfaction': 3, 'MaritalStatus': 'Married', 'MonthlyIncome':\
+        \ 17169, 'SalarySlab': '15k+', 'MonthlyRate': 26703, 'NumCompaniesWorked':\
+        \ 3, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike': 19, 'PerformanceRating':\
+        \ 3, 'RelationshipSatisfaction': 2, 'StandardHours': 80, 'StockOptionLevel':\
+        \ 2, 'TotalWorkingYears': 26, 'TrainingTimesLastYear': 2, 'WorkLifeBalance':\
+        \ 4, 'YearsAtCompany': 20, 'YearsSinceLastPromotion': 5, 'YearsWithCurrManager':\
+        \ 6.0, 'YearsInCurrentRole': 17}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\ncode/general_task_37.py\ndata/tables/observed_data.csv\n\"\
+        \"\"Run PyDeequ constraint code against the example tables and report results.\"\
+        \"\"\nimport argparse\nimport json\nimport os\nimport sys\nfrom pathlib import\
+        \ Path\n\nimport prismadv  # noqa: F401\n\nos.environ.pop(\"OPENAI_API_KEY\"\
+        , None)\n\nimport pandas as pd  # noqa: E402\nfrom prismadv.dq_manager import\
+        \ DeequDataQualityManager  # noqa: E402\n\nHERE = Path(__file__).resolve().parent\n\
+        TABLES_DIR = HERE / \"data\" / \"tables\"\nJARS_FILE = HERE / \"deequ_jars.txt\"\
+        \n\n\ndef build_spark():\n    \"\"\"A Spark session whose Deequ classpath\
+        \ is pinned to already-resolved jars.\n\n    The default session config asks\
+        \ Spark to fetch `spark.jars.packages` through\n    Ivy. That cannot work\
+        \ here: Ivy writes its resolution cache under $HOME, and\n    inside the agent's\
+        \ sandbox only the workspace is writable, so resolution dies\n    before the\
+        \ JVM starts and every check reports FAILS for a reason that has\n    nothing\
+        \ to do with the constraint. The jars were resolved once by the driver\n \
+        \   that staged this file; naming them directly removes the resolution step,\
+        \ and\n    with it the network and $HOME-write dependencies.\n    \"\"\"\n\
+        \    from pyspark.sql import SparkSession\n\n    jars = [line.strip() for\
+        \ line in JARS_FILE.read_text(encoding=\"utf-8\").split() if line.strip()]\n\
+        \    if not jars:\n        raise RuntimeError(f\"{JARS_FILE.name} is empty;\
+        \ the Deequ classpath cannot be pinned\")\n    # `spark.jars` takes URIs;\
+        \ the driver classpath takes plain filesystem paths.\n    local = [jar[len(\"\
+        file://\"):] if jar.startswith(\"file://\") else jar for jar in jars]\n  \
+        \  return (\n        SparkSession.builder.appName(\"deequ-local\")\n     \
+        \   .master(\"local[2]\")\n        .config(\"spark.driver.memory\", \"4g\"\
+        )\n        .config(\"spark.jars\", \",\".join(jars))\n        .config(\"spark.driver.extraClassPath\"\
+        , \":\".join(local))\n        .config(\"spark.executor.extraClassPath\", \"\
+        :\".join(local))\n        .config(\"spark.driver.host\", \"localhost\")\n\
+        \        .config(\"spark.ui.enabled\", \"false\")\n        .config(\"spark.sql.execution.arrow.pyspark.enabled\"\
+        , \"true\")\n        .getOrCreate()\n    )\n\n\ndef load_codes(path: Path)\
+        \ -> list[str]:\n    \"\"\"Accept JSON, or one constraint per line so quoting\
+        \ never blocks a check.\"\"\"\n    text = path.read_text(encoding=\"utf-8\"\
+        ).strip()\n    if not text:\n        return []\n    if text.lstrip()[0] in\
+        \ \"[{\":\n        try:\n            payload = json.loads(text)\n        except\
+        \ json.JSONDecodeError as exc:\n            print(f\"warning: {path.name}\
+        \ is not valid JSON ({exc}); \"\n                  f\"falling back to one-constraint-per-line\
+        \ parsing.\")\n            payload = None\n        if payload is not None:\n\
+        \            if isinstance(payload, dict):\n                payload = payload.get(\"\
+        constraints\", [])\n            codes = []\n            for item in payload:\n\
+        \                if isinstance(item, str):\n                    codes.append(item)\n\
+        \                else:\n                    codes.append(item.get(\"code_for_constraint\"\
+        ) or item.get(\"suggestion\"))\n            return [code for code in codes\
+        \ if code]\n    codes = []\n    for line in text.splitlines():\n        line\
+        \ = line.strip()\n        if not line or line.startswith(\"#\"):\n       \
+        \     continue\n        codes.append(line)\n    return codes\n\n\ndef main()\
+        \ -> int:\n    parser = argparse.ArgumentParser(description=__doc__)\n   \
+        \ parser.add_argument(\"--table\", required=True, help=\"Table name (file\
+        \ stem under data/tables).\")\n    parser.add_argument(\"--constraints\",\
+        \ required=True,\n                        help='JSON: [\"<code>\", ...] or\
+        \ {\"constraints\": [{\"code_for_constraint\": ...}]}')\n    args = parser.parse_args()\n\
+        \n    csv_path = TABLES_DIR / f\"{args.table}.csv\"\n    if not csv_path.exists():\n\
+        \        available = sorted(p.stem for p in TABLES_DIR.glob(\"*.csv\"))\n\
+        \        print(f\"no such table: {args.table}. available: {available}\")\n\
+        \        return 2\n\n    codes = load_codes(Path(args.constraints))\n    if\
+        \ not codes:\n        print(\"no constraint code found in the given file\"\
+        )\n        return 2\n\n    dataframe = pd.read_csv(csv_path)\n    manager\
+        \ = DeequDataQualityManager()\n    spark_df, spark = manager.spark_df_from_pandas_df(dataframe,\
+        \ spark_session=build_spark())\n    results = manager.validate_constraints_with_reasons(spark,\
+        \ spark_df, codes, isolated_check=True)\n\n    held = 0\n    for code, (is_valid,\
+        \ reason) in zip(codes, results):\n        held += int(bool(is_valid))\n \
+        \       print(f\"[{'HOLDS' if is_valid else 'FAILS'}] {code}\")\n        if\
+        \ not is_valid:\n            print(f\"          reason: {reason}\")\n    print(f\"\
+        \\n{held}/{len(codes)} constraint(s) hold on table '{args.table}' \"\n   \
+        \       f\"({len(dataframe)} rows).\")\n\n    try:\n        spark.sparkContext._gateway.shutdown_callback_server()\n\
+        \    except Exception:\n        pass\n    try:\n        spark.stop()\n   \
+        \ except Exception:\n        pass\n    return 0\n\n\nif __name__ == \"__main__\"\
+        :\n    code = main()\n    sys.stdout.flush()\n    os._exit(code)\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_3
+      type: command_execution
+      command: /usr/bin/bash -lc "cat task.txt; sed -n '1,260p' code/general_task_37.py;
+        sed -n '1,8p' data/tables/observed_data.csv; wc -l data/tables/observed_data.csv;
+        cat AGENTS.md"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_3
+      type: command_execution
+      command: /usr/bin/bash -lc "cat task.txt; sed -n '1,260p' code/general_task_37.py;
+        sed -n '1,8p' data/tables/observed_data.csv; wc -l data/tables/observed_data.csv;
+        cat AGENTS.md"
+      aggregated_output: "# Task\n\nYou are writing a **data unit test**: a set of\
+        \ PyDeequ constraints describing what\nthe program below assumes about its\
+        \ input data. If new data arrived that violated\none of your constraints,\
+        \ the program should be expected to misbehave -- crash,\nsilently produce\
+        \ a wrong number, or drop records it should have kept.\n\nYour output is a\
+        \ single file, `constraints.json`, in the current folder.\n\n# The program\n\
+        \nThis program consumes the dataset.\n\n```python\nimport argparse\nimport\
+        \ os\n\nimport numpy as np\nimport pandas as pd\n\nparser = argparse.ArgumentParser()\n\
+        parser.add_argument('--input', type=str, required=True)\nparser.add_argument('--output',\
+        \ type=str, required=True)\nargs = parser.parse_args()\n\nos.makedirs(args.output,\
+        \ exist_ok=True)\n\ninput_file = os.path.join(args.input, 'new_data.csv')\n\
+        df = pd.read_csv(input_file)\n\n# Derive fields used by downstream eligibility/compensation\
+        \ logic\nagegroup_to_stage = {\n    '18-25': 'early',\n    '26-35': 'early',\n\
+        \    '36-45': 'mid',\n    '46-55': 'senior',\n    '55+': 'late'\n}\ndf['CareerStage']\
+        \ = df['AgeGroup'].map(agegroup_to_stage).fillna('unknown')\n# Tenure relationship\
+        \ checks before computing ratios and derived features\n# Ratios and derived\
+        \ tenure features\nratio_in_role = df['YearsInCurrentRole'] / df['YearsAtCompany']\n\
+        ratio_in_role = ratio_in_role.replace([np.inf, -np.inf], np.nan).fillna(0.0)\n\
+        stagnation_years = df['YearsAtCompany'] - df['YearsSinceLastPromotion']\n\
+        sqrt_stagnation = np.sqrt(stagnation_years.clip(lower=0))\n\n# Department\
+        \ and JobRole alignment checks before budget multipliers\n# Budget multipliers\
+        \ by department\nbudget_multipliers = {\n    'Sales': 1.00,\n    'Research\
+        \ & Development': 1.05,\n    'Human Resources': 0.95\n}\ndf['BudgetMultiplier']\
+        \ = df['Department'].map(budget_multipliers).fillna(1.00)\n\n# Salary slab\
+        \ alignment and medians before compa ratios and caps\nslab_order = ['Upto\
+        \ 5k', '5k-10k', '10k-15k', '15k+']\nslab_bounds = {\n    'Upto 5k': (0, 5000),\
+        \  # (0, 5000]\n    '5k-10k': (5000, 10000),  # (5000, 10000]\n    '10k-15k':\
+        \ (10000, 15000),  # (10000, 15000]\n    '15k+': (15000, np.inf)  # (15000,\
+        \ inf)\n}\nslab_caps = {\n    'Upto 5k': 0.15,\n    '5k-10k': 0.12,\n    '10k-15k':\
+        \ 0.10,\n    '15k+': 0.08\n}\n\nslab_medians = df.groupby('SalarySlab')['MonthlyIncome'].median()\n\
+        # Compa-ratio relative to slab median\ndf['SlabMedian'] = df['SalarySlab'].map(slab_medians.to_dict())\n\
+        df['CompaRatio'] = (df['MonthlyIncome'] / df['SlabMedian']).replace([np.inf,\
+        \ -np.inf], np.nan).fillna(1.0)\n\n# Base raise by performance\nbase_raise\
+        \ = np.where(df['PerformanceRating'] >= 4, 0.08, 0.03)\n# Adjust for stagnation\
+        \ and time in role; diminish if already above slab median\nstagnation_adj\
+        \ = 1.0 + 0.02 * sqrt_stagnation.clip(upper=5)\nrole_time_adj = 1.0 + 0.03\
+        \ * ratio_in_role.clip(upper=1)\nmarket_adj = 1.0 + 0.02 * (1 - df['CompaRatio'].clip(upper=1))\n\
+        budget_adj = df['BudgetMultiplier']\n\nrecommended_raise = base_raise * stagnation_adj\
+        \ * role_time_adj * market_adj * budget_adj\n\n# Cap by slab policy\ncap_series\
+        \ = df['SalarySlab'].map(slab_caps)\nrecommended_raise = np.minimum(recommended_raise,\
+        \ cap_series)\nrecommended_raise = recommended_raise.clip(lower=0.0)\n\nnew_income\
+        \ = (df['MonthlyIncome'] * (1.0 + recommended_raise)).round(2)\n\n# Promotion\
+        \ eligibility rules using career stage thresholds\nrequired_years_by_stage\
+        \ = {\n    'early': 2,\n    'mid': 2,\n    'senior': 1,\n    'late': 1\n}\n\
+        required_years = df['CareerStage'].map(required_years_by_stage).fillna(2)\n\
+        \neligible_promo = (\n        (df['PerformanceRating'] >= 4) &\n        (df['YearsInCurrentRole']\
+        \ >= required_years) &\n        (df['YearsSinceLastPromotion'] >= 1) &\n \
+        \       (df['JobLevel'] < 5) &\n        (df['Attrition'].str.upper() == 'NO')\n\
+        )\n\n# Output datasets for downstream engine\ncomp_out = df[['EmpID', 'EmployeeNumber',\
+        \ 'Department', 'JobRole', 'SalarySlab', 'MonthlyIncome']].copy()\ncomp_out['RecommendedRaisePct']\
+        \ = recommended_raise.round(4)\ncomp_out['NewMonthlyIncome'] = new_income\n\
+        comp_out['CompaRatio'] = df['CompaRatio'].round(4)\n\npromo_out = df[\n  \
+        \  ['EmpID', 'EmployeeNumber', 'Department', 'JobRole', 'JobLevel', 'PerformanceRating',\
+        \ 'YearsInCurrentRole',\n     'YearsSinceLastPromotion', 'CareerStage']].copy()\n\
+        promo_out['EligibleForPromotion'] = eligible_promo\n\ncomp_out.to_csv(os.path.join(args.output,\
+        \ 'compensation_recommendations.csv'), index=False)\npromo_out.to_csv(os.path.join(args.output,\
+        \ 'promotion_eligibility.csv'), index=False)\n\n# A filtered pre-validated\
+        \ subset that meets eligibility or high performers for downstream engine\n\
+        downstream_feed = df.loc[\n    (eligible_promo) | (df['PerformanceRating']\
+        \ >= 4), ['EmpID', 'EmployeeNumber', 'Department', 'JobRole', 'JobLevel',\n\
+        \                                                        'PerformanceRating',\
+        \ 'MonthlyIncome', 'SalarySlab',\n                                       \
+        \                 'CareerStage']].copy()\ndownstream_feed['RecommendedRaisePct']\
+        \ = recommended_raise.round(4)\ndownstream_feed['NewMonthlyIncome'] = new_income\n\
+        \ndownstream_feed.to_csv(os.path.join(args.output, 'prevalidated_feed.csv'),\
+        \ index=False)\n\n```\n\nThe same program is on disk at `./code/general_task_37.py`,\
+        \ so you can run it against the\nstaged table, step through it, or search\
+        \ it, rather than working from the\nlisting alone.\n\n# The data\n\nThree\
+        \ rows sampled from the dataset the program consumes:\n\n[{'id': 771, 'EmpID':\
+        \ 'RM777', 'Age': 20, 'AgeGroup': '18-25', 'Attrition': 'Yes', 'BusinessTravel':\
+        \ 'Travel_Frequently', 'DailyRate': 769, 'Department': 'Sales', 'DistanceFromHome':\
+        \ 9, 'Education': 3, 'EducationField': 'Marketing', 'EmployeeCount': 1, 'EmployeeNumber':\
+        \ 1077, 'EnvironmentSatisfaction': 4, 'Gender': 'Female', 'HourlyRate': 54,\
+        \ 'JobInvolvement': 3, 'JobLevel': 1, 'JobRole': 'Sales Representative', 'JobSatisfaction':\
+        \ 4, 'MaritalStatus': 'Single', 'MonthlyIncome': 2323, 'SalarySlab': 'Upto\
+        \ 5k', 'MonthlyRate': 17205, 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime':\
+        \ 'Yes', 'PercentSalaryHike': 14, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+        \ 2, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 2, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 2, 'YearsSinceLastPromotion':\
+        \ 0, 'YearsWithCurrManager': 2.0, 'YearsInCurrentRole': 2}, {'id': 322, 'EmpID':\
+        \ 'RM146', 'Age': 30, 'AgeGroup': '26-35', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 201, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 5, 'Education': 3, 'EducationField': 'Technical Degree',\
+        \ 'EmployeeCount': 1, 'EmployeeNumber': 197, 'EnvironmentSatisfaction': 4,\
+        \ 'Gender': 'Female', 'HourlyRate': 84, 'JobInvolvement': 3, 'JobLevel': 1,\
+        \ 'JobRole': 'Research Scientist', 'JobSatisfaction': 1, 'MaritalStatus':\
+        \ 'Divorced', 'MonthlyIncome': 3204, 'SalarySlab': 'Upto 5k', 'MonthlyRate':\
+        \ 10415, 'NumCompaniesWorked': 5, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike':\
+        \ 14, 'PerformanceRating': 3, 'RelationshipSatisfaction': 4, 'StandardHours':\
+        \ 80, 'StockOptionLevel': 1, 'TotalWorkingYears': 8, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 3, 'YearsSinceLastPromotion':\
+        \ 2, 'YearsWithCurrManager': nan, 'YearsInCurrentRole': 2}, {'id': 337, 'EmpID':\
+        \ 'RM1025', 'Age': 47, 'AgeGroup': '46-55', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 359, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 2, 'Education': 4, 'EducationField': 'Medical', 'EmployeeCount':\
+        \ 1, 'EmployeeNumber': 1443, 'EnvironmentSatisfaction': 1, 'Gender': 'Female',\
+        \ 'HourlyRate': 82, 'JobInvolvement': 3, 'JobLevel': 4, 'JobRole': 'Research\
+        \ Director', 'JobSatisfaction': 3, 'MaritalStatus': 'Married', 'MonthlyIncome':\
+        \ 17169, 'SalarySlab': '15k+', 'MonthlyRate': 26703, 'NumCompaniesWorked':\
+        \ 3, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike': 19, 'PerformanceRating':\
+        \ 3, 'RelationshipSatisfaction': 2, 'StandardHours': 80, 'StockOptionLevel':\
+        \ 2, 'TotalWorkingYears': 26, 'TrainingTimesLastYear': 2, 'WorkLifeBalance':\
+        \ 4, 'YearsAtCompany': 20, 'YearsSinceLastPromotion': 5, 'YearsWithCurrManager':\
+        \ 6.0, 'YearsInCurrentRole': 17}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\nimport argparse\nimport os\n\nimport numpy as np\nimport\
+        \ pandas as pd\n\nparser = argparse.ArgumentParser()\nparser.add_argument('--input',\
+        \ type=str, required=True)\nparser.add_argument('--output', type=str, required=True)\n\
+        args = parser.parse_args()\n\nos.makedirs(args.output, exist_ok=True)\n\n\
+        input_file = os.path.join(args.input, 'new_data.csv')\ndf = pd.read_csv(input_file)\n\
+        \n# Derive fields used by downstream eligibility/compensation logic\nagegroup_to_stage\
+        \ = {\n    '18-25': 'early',\n    '26-35': 'early',\n    '36-45': 'mid',\n\
+        \    '46-55': 'senior',\n    '55+': 'late'\n}\ndf['CareerStage'] = df['AgeGroup'].map(agegroup_to_stage).fillna('unknown')\n\
+        # Tenure relationship checks before computing ratios and derived features\n\
+        # Ratios and derived tenure features\nratio_in_role = df['YearsInCurrentRole']\
+        \ / df['YearsAtCompany']\nratio_in_role = ratio_in_role.replace([np.inf, -np.inf],\
+        \ np.nan).fillna(0.0)\nstagnation_years = df['YearsAtCompany'] - df['YearsSinceLastPromotion']\n\
+        sqrt_stagnation = np.sqrt(stagnation_years.clip(lower=0))\n\n# Department\
+        \ and JobRole alignment checks before budget multipliers\n# Budget multipliers\
+        \ by department\nbudget_multipliers = {\n    'Sales': 1.00,\n    'Research\
+        \ & Development': 1.05,\n    'Human Resources': 0.95\n}\ndf['BudgetMultiplier']\
+        \ = df['Department'].map(budget_multipliers).fillna(1.00)\n\n# Salary slab\
+        \ alignment and medians before compa ratios and caps\nslab_order = ['Upto\
+        \ 5k', '5k-10k', '10k-15k', '15k+']\nslab_bounds = {\n    'Upto 5k': (0, 5000),\
+        \  # (0, 5000]\n    '5k-10k': (5000, 10000),  # (5000, 10000]\n    '10k-15k':\
+        \ (10000, 15000),  # (10000, 15000]\n    '15k+': (15000, np.inf)  # (15000,\
+        \ inf)\n}\nslab_caps = {\n    'Upto 5k': 0.15,\n    '5k-10k': 0.12,\n    '10k-15k':\
+        \ 0.10,\n    '15k+': 0.08\n}\n\nslab_medians = df.groupby('SalarySlab')['MonthlyIncome'].median()\n\
+        # Compa-ratio relative to slab median\ndf['SlabMedian'] = df['SalarySlab'].map(slab_medians.to_dict())\n\
+        df['CompaRatio'] = (df['MonthlyIncome'] / df['SlabMedian']).replace([np.inf,\
+        \ -np.inf], np.nan).fillna(1.0)\n\n# Base raise by performance\nbase_raise\
+        \ = np.where(df['PerformanceRating'] >= 4, 0.08, 0.03)\n# Adjust for stagnation\
+        \ and time in role; diminish if already above slab median\nstagnation_adj\
+        \ = 1.0 + 0.02 * sqrt_stagnation.clip(upper=5)\nrole_time_adj = 1.0 + 0.03\
+        \ * ratio_in_role.clip(upper=1)\nmarket_adj = 1.0 + 0.02 * (1 - df['CompaRatio'].clip(upper=1))\n\
+        budget_adj = df['BudgetMultiplier']\n\nrecommended_raise = base_raise * stagnation_adj\
+        \ * role_time_adj * market_adj * budget_adj\n\n# Cap by slab policy\ncap_series\
+        \ = df['SalarySlab'].map(slab_caps)\nrecommended_raise = np.minimum(recommended_raise,\
+        \ cap_series)\nrecommended_raise = recommended_raise.clip(lower=0.0)\n\nnew_income\
+        \ = (df['MonthlyIncome'] * (1.0 + recommended_raise)).round(2)\n\n# Promotion\
+        \ eligibility rules using career stage thresholds\nrequired_years_by_stage\
+        \ = {\n    'early': 2,\n    'mid': 2,\n    'senior': 1,\n    'late': 1\n}\n\
+        required_years = df['CareerStage'].map(required_years_by_stage).fillna(2)\n\
+        \neligible_promo = (\n        (df['PerformanceRating'] >= 4) &\n        (df['YearsInCurrentRole']\
+        \ >= required_years) &\n        (df['YearsSinceLastPromotion'] >= 1) &\n \
+        \       (df['JobLevel'] < 5) &\n        (df['Attrition'].str.upper() == 'NO')\n\
+        )\n\n# Output datasets for downstream engine\ncomp_out = df[['EmpID', 'EmployeeNumber',\
+        \ 'Department', 'JobRole', 'SalarySlab', 'MonthlyIncome']].copy()\ncomp_out['RecommendedRaisePct']\
+        \ = recommended_raise.round(4)\ncomp_out['NewMonthlyIncome'] = new_income\n\
+        comp_out['CompaRatio'] = df['CompaRatio'].round(4)\n\npromo_out = df[\n  \
+        \  ['EmpID', 'EmployeeNumber', 'Department', 'JobRole', 'JobLevel', 'PerformanceRating',\
+        \ 'YearsInCurrentRole',\n     'YearsSinceLastPromotion', 'CareerStage']].copy()\n\
+        promo_out['EligibleForPromotion'] = eligible_promo\n\ncomp_out.to_csv(os.path.join(args.output,\
+        \ 'compensation_recommendations.csv'), index=False)\npromo_out.to_csv(os.path.join(args.output,\
+        \ 'promotion_eligibility.csv'), index=False)\n\n# A filtered pre-validated\
+        \ subset that meets eligibility or high performers for downstream engine\n\
+        downstream_feed = df.loc[\n    (eligible_promo) | (df['PerformanceRating']\
+        \ >= 4), ['EmpID', 'EmployeeNumber', 'Department', 'JobRole', 'JobLevel',\n\
+        \                                                        'PerformanceRating',\
+        \ 'MonthlyIncome', 'SalarySlab',\n                                       \
+        \                 'CareerStage']].copy()\ndownstream_feed['RecommendedRaisePct']\
+        \ = recommended_raise.round(4)\ndownstream_feed['NewMonthlyIncome'] = new_income\n\
+        \ndownstream_feed.to_csv(os.path.join(args.output, 'prevalidated_feed.csv'),\
+        \ index=False)\nid,EmpID,Age,AgeGroup,Attrition,BusinessTravel,DailyRate,Department,DistanceFromHome,Education,EducationField,EmployeeCount,EmployeeNumber,EnvironmentSatisfaction,Gender,HourlyRate,JobInvolvement,JobLevel,JobRole,JobSatisfaction,MaritalStatus,MonthlyIncome,SalarySlab,MonthlyRate,NumCompaniesWorked,Over18,OverTime,PercentSalaryHike,PerformanceRating,RelationshipSatisfaction,StandardHours,StockOptionLevel,TotalWorkingYears,TrainingTimesLastYear,WorkLifeBalance,YearsAtCompany,YearsSinceLastPromotion,YearsWithCurrManager,YearsInCurrentRole\n\
+        0,RM1182,49,46-55,No,Travel_Rarely,465,Research & Development,6,1,Life Sciences,1,1661,3,Female,41,2,4,Healthcare\
+        \ Representative,3,Married,13966,10k-15k,11652,2,Y,Yes,19,3,2,80,1,30,3,3,15,2,12.0,11\n\
+        1,RM1280,44,36-45,Yes,Travel_Frequently,429,Research & Development,1,2,Medical,1,1792,3,Male,99,3,1,Research\
+        \ Scientist,2,Divorced,2342,Upto 5k,11092,1,Y,Yes,12,3,3,80,3,6,2,2,5,2,3.0,3\n\
+        2,RM1303,35,26-35,No,Travel_Rarely,185,Research & Development,23,4,Medical,1,1826,2,Male,91,1,1,Laboratory\
+        \ Technician,3,Married,2705,Upto 5k,9696,0,Y,No,16,3,2,80,1,6,2,4,5,0,3.0,4\n\
+        3,RM753,36,36-45,Yes,Travel_Rarely,885,Research & Development,16,4,Life Sciences,1,1042,3,Female,43,4,1,Laboratory\
+        \ Technician,1,Single,2743,Upto 5k,8269,1,Y,No,16,3,3,80,0,18,1,3,17,15,14.0,13\n\
+        4,RM867,40,36-45,No,Travel_Frequently,1184,Sales,2,4,Medical,1,1212,2,Male,62,3,2,Sales\
+        \ Executive,2,Married,4327,Upto 5k,25440,5,Y,No,12,3,4,80,3,5,2,3,0,0,0.0,0\n\
+        5,RM1423,35,26-35,No,TravelRarely,1490,Research & Development,11,4,Medical,1,2003,4,Male,43,3,1,Laboratory\
+        \ Technician,3,Married,2660,Upto 5k,20232,7,Y,Yes,11,3,3,80,1,5,3,3,2,2,2.0,2\n\
+        6,RM1259,29,26-35,No,Travel_Rarely,590,Research & Development,4,3,Technical\
+        \ Degree,1,1762,4,Female,91,2,1,Research Scientist,1,Divorced,2109,Upto 5k,10007,1,Y,No,13,3,3,80,1,1,2,3,1,0,0.0,0\n\
+        883 data/tables/observed_data.csv\n# Workspace boundary\n\nYour workspace\
+        \ is the current folder, and for this task nothing else exists.\n\n- Read,\
+        \ list, search and write only inside this folder: `./data`, `./code`,\n  `deequ_check.py`,\
+        \ `task.txt`, and whatever you create here.\n- Do not touch anything outside\
+        \ it. That means no parent directory (`..`), no\n  other folder under /tmp,\
+        \ no home directory (`~`, $HOME), and no absolute path\n  anywhere else on\
+        \ the filesystem.\n- Do not search the wider filesystem -- no `rg`, `grep`,\
+        \ `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`, `~` or any path outside\
+        \ this folder -- for\n  related data, prompts, examples, other runs, or previous\
+        \ answers. There is\n  nothing out there you are allowed to use, and a run\
+        \ that looks is discarded.\n- Running `python`, `deequ_check.py` and the tools\
+        \ on your PATH is fine; the\n  boundary is about what you read and write,\
+        \ not which interpreter runs.\n\nEverything you need is here. Work only from\
+        \ it.\n"
+      exit_code: 0
+      status: completed
+  - type: item.started
+    item:
+      id: item_4
+      type: command_execution
+      command: /usr/bin/bash -lc "sed -n '135,260p' task.txt"
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_4
+      type: command_execution
+      command: /usr/bin/bash -lc "sed -n '135,260p' task.txt"
+      aggregated_output: "\nThe same program is on disk at `./code/general_task_37.py`,\
+        \ so you can run it against the\nstaged table, step through it, or search\
+        \ it, rather than working from the\nlisting alone.\n\n# The data\n\nThree\
+        \ rows sampled from the dataset the program consumes:\n\n[{'id': 771, 'EmpID':\
+        \ 'RM777', 'Age': 20, 'AgeGroup': '18-25', 'Attrition': 'Yes', 'BusinessTravel':\
+        \ 'Travel_Frequently', 'DailyRate': 769, 'Department': 'Sales', 'DistanceFromHome':\
+        \ 9, 'Education': 3, 'EducationField': 'Marketing', 'EmployeeCount': 1, 'EmployeeNumber':\
+        \ 1077, 'EnvironmentSatisfaction': 4, 'Gender': 'Female', 'HourlyRate': 54,\
+        \ 'JobInvolvement': 3, 'JobLevel': 1, 'JobRole': 'Sales Representative', 'JobSatisfaction':\
+        \ 4, 'MaritalStatus': 'Single', 'MonthlyIncome': 2323, 'SalarySlab': 'Upto\
+        \ 5k', 'MonthlyRate': 17205, 'NumCompaniesWorked': 1, 'Over18': 'Y', 'OverTime':\
+        \ 'Yes', 'PercentSalaryHike': 14, 'PerformanceRating': 3, 'RelationshipSatisfaction':\
+        \ 2, 'StandardHours': 80, 'StockOptionLevel': 0, 'TotalWorkingYears': 2, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 2, 'YearsSinceLastPromotion':\
+        \ 0, 'YearsWithCurrManager': 2.0, 'YearsInCurrentRole': 2}, {'id': 322, 'EmpID':\
+        \ 'RM146', 'Age': 30, 'AgeGroup': '26-35', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 201, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 5, 'Education': 3, 'EducationField': 'Technical Degree',\
+        \ 'EmployeeCount': 1, 'EmployeeNumber': 197, 'EnvironmentSatisfaction': 4,\
+        \ 'Gender': 'Female', 'HourlyRate': 84, 'JobInvolvement': 3, 'JobLevel': 1,\
+        \ 'JobRole': 'Research Scientist', 'JobSatisfaction': 1, 'MaritalStatus':\
+        \ 'Divorced', 'MonthlyIncome': 3204, 'SalarySlab': 'Upto 5k', 'MonthlyRate':\
+        \ 10415, 'NumCompaniesWorked': 5, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike':\
+        \ 14, 'PerformanceRating': 3, 'RelationshipSatisfaction': 4, 'StandardHours':\
+        \ 80, 'StockOptionLevel': 1, 'TotalWorkingYears': 8, 'TrainingTimesLastYear':\
+        \ 3, 'WorkLifeBalance': 3, 'YearsAtCompany': 3, 'YearsSinceLastPromotion':\
+        \ 2, 'YearsWithCurrManager': nan, 'YearsInCurrentRole': 2}, {'id': 337, 'EmpID':\
+        \ 'RM1025', 'Age': 47, 'AgeGroup': '46-55', 'Attrition': 'No', 'BusinessTravel':\
+        \ 'Travel_Rarely', 'DailyRate': 359, 'Department': 'Research & Development',\
+        \ 'DistanceFromHome': 2, 'Education': 4, 'EducationField': 'Medical', 'EmployeeCount':\
+        \ 1, 'EmployeeNumber': 1443, 'EnvironmentSatisfaction': 1, 'Gender': 'Female',\
+        \ 'HourlyRate': 82, 'JobInvolvement': 3, 'JobLevel': 4, 'JobRole': 'Research\
+        \ Director', 'JobSatisfaction': 3, 'MaritalStatus': 'Married', 'MonthlyIncome':\
+        \ 17169, 'SalarySlab': '15k+', 'MonthlyRate': 26703, 'NumCompaniesWorked':\
+        \ 3, 'Over18': 'Y', 'OverTime': 'No', 'PercentSalaryHike': 19, 'PerformanceRating':\
+        \ 3, 'RelationshipSatisfaction': 2, 'StandardHours': 80, 'StockOptionLevel':\
+        \ 2, 'TotalWorkingYears': 26, 'TrainingTimesLastYear': 2, 'WorkLifeBalance':\
+        \ 4, 'YearsAtCompany': 20, 'YearsSinceLastPromotion': 5, 'YearsWithCurrManager':\
+        \ 6.0, 'YearsInCurrentRole': 17}]\n\nThe full table is on disk at `./data/tables/observed_data.csv`.\
+        \ You have complete access to it:\nload it with pandas, profile it, plot it,\
+        \ run whatever analysis helps. It is a\nthrowaway copy -- nothing you do to\
+        \ it has any effect outside this workspace.\n\n# Verifying your constraints\n\
+        \nYou can execute PyDeequ constraint code against the staged table and read\
+        \ back\nthe result of every check:\n\n```\npython deequ_check.py --table observed_data\
+        \ --constraints <your_constraints_file>\n```\n\nwhere the constraints file\
+        \ is plain text with one PyDeequ `Check` call per line,\nfor example:\n\n\
+        ```\n.isComplete(\"age\")\n.isNonNegative(\"age\")\n.isContainedIn(\"status\"\
+        , [\"active\", \"closed\"])\n```\n\nEach line comes back as `[HOLDS]` or `[FAILS]`,\
+        \ and a failure prints the reason,\nincluding compilation errors. Use it as\
+        \ often as you like.\n\n# Output format\n\nWrite `constraints.json` in the\
+        \ current folder, containing the union of what you\nsettled on for every column:\n\
+        \n{\n    \"constraints\": [\n        {\n            \"column_name\": \"some_column\"\
+        ,\n            \"code_for_constraint\": \".isComplete('some_column')\"\n \
+        \       },\n        {\n            \"column_name\": \"another_column\",\n\
+        \            \"code_for_constraint\": \".isPositive('another_column')\"\n\
+        \        }\n    ]\n}\n\nUse only the PyDeequ `Check` object's methods in `code_for_constraint`.\
+        \ Each\nentry names the single column it constrains; for a constraint spanning\
+        \ several\ncolumns, name the one it is primarily about.\n\n# Workspace boundary\n\
+        \nYour workspace is the current folder, and for this task nothing else exists.\n\
+        \n- Read, list, search and write only inside this folder: `./data`, `./code`,\n\
+        \  `deequ_check.py`, `task.txt`, and whatever you create here.\n- Do not touch\
+        \ anything outside it. That means no parent directory (`..`), no\n  other\
+        \ folder under /tmp, no home directory (`~`, $HOME), and no absolute path\n\
+        \  anywhere else on the filesystem.\n- Do not search the wider filesystem\
+        \ -- no `rg`, `grep`, `find`, `ls` or\n  `python` over `/`, `/tmp`, `..`,\
+        \ `~` or any path outside this folder -- for\n  related data, prompts, examples,\
+        \ other runs, or previous answers. There is\n  nothing out there you are allowed\
+        \ to use, and a run that looks is discarded.\n- Running `python`, `deequ_check.py`\
+        \ and the tools on your PATH is fine; the\n  boundary is about what you read\
+        \ and write, not which interpreter runs.\n\nEverything you need is here. Work\
+        \ only from it.\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_5
+      type: reasoning
+      text: '**Analyzing data constraints**
+
+
+        I need to derive constraints around observed data anomalies. First, I''ll
+        inspect the relevant columns using pandas to check for null values, unique
+        values, outliers, and the relationships between them. It''s important to be
+        thorough in this process since it''s a multi-phase plan. I want to ensure
+        I''m identifying everything critical for understanding the data fully and
+        effectively moving forward.'
+  - type: item.started
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile program inputs and observed anomalies
+        completed: false
+      - text: Design targeted PyDeequ constraints
+        completed: false
+      - text: Validate checks and write constraints.json
+        completed: false
+  - type: item.completed
+    item:
+      id: item_7
+      type: agent_message
+      text: The program’s assumptions are clear; I’ll check which ones hold in the
+        table.
+  - type: item.started
+    item:
+      id: item_8
+      type: command_execution
+      command: "/usr/bin/bash -lc \"python - <<'PY'\nimport pandas as pd\np=pd.read_csv('data/tables/observed_data.csv')\n\
+        print('shape',p.shape)\nfor c in ['EmpID','EmployeeNumber','Age','AgeGroup','Attrition','Department','JobRole','SalarySlab','MonthlyIncome','PerformanceRating','YearsAtCompany','YearsSinceLastPromotion','YearsInCurrentRole','JobLevel']:\n\
+        \ s=p[c];print('\\\\n',c,'type',s.dtype,'null',s.isna().sum(),'distinct',s.nunique(),'range',\
+        \ (s.min(),s.max()) if s.dtype.kind in 'iuf' else '', 'values', s.value_counts(dropna=False).head(30).to_dict()\
+        \ if s.nunique()<30 else '')\nprint('\\\\nDuplicated ID',p.EmpID.duplicated().sum(),p.EmployeeNumber.duplicated().sum())\n\
+        for c in ['AgeGroup','Attrition','Department','JobRole','SalarySlab']:\n print(c,sorted(str(x)\
+        \ for x in p[c].dropna().unique()))\nfor name,bad in {\n 'role > company':p.YearsInCurrentRole>p.YearsAtCompany,\n\
+        \ 'promotion > company':p.YearsSinceLastPromotion>p.YearsAtCompany,\n 'negative\
+        \ company':p.YearsAtCompany<0,\n 'negative role':p.YearsInCurrentRole<0,\n\
+        \ 'negative promo':p.YearsSinceLastPromotion<0,\n 'zero company':p.YearsAtCompany==0,\n\
+        \ 'negative salary':p.MonthlyIncome<=0,\n 'slab mismatch': ~(((p.SalarySlab=='Upto\
+        \ 5k')&(p.MonthlyIncome>0)&(p.MonthlyIncome<=5000))|((p.SalarySlab=='5k-10k')&(p.MonthlyIncome>5000)&(p.MonthlyIncome<=10000))|((p.SalarySlab=='10k-15k')&(p.MonthlyIncome>10000)&(p.MonthlyIncome<=15000))|((p.SalarySlab=='15k+')&(p.MonthlyIncome>15000))),\n\
+        \ 'age mismatch':~(((p.AgeGroup=='18-25')&p.Age.between(18,25))|((p.AgeGroup=='26-35')&p.Age.between(26,35))|((p.AgeGroup=='36-45')&p.Age.between(36,45))|((p.AgeGroup=='46-55')&p.Age.between(46,55))|((p.AgeGroup=='55+')&(p.Age>55)))\n\
+        }.items():\n print(name, bad.sum(),p.loc[bad,['EmpID','Age','AgeGroup','MonthlyIncome','SalarySlab','YearsAtCompany','YearsInCurrentRole','YearsSinceLastPromotion']].head(5).to_dict('records'))\n\
+        print('Department-role cross')\nprint(pd.crosstab(p.Department,p.JobRole).to_string())\n\
+        print('all columns nulls',p.isna().sum()[p.isna().sum()>0].to_dict())\nPY\""
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_8
+      type: command_execution
+      command: "/usr/bin/bash -lc \"python - <<'PY'\nimport pandas as pd\np=pd.read_csv('data/tables/observed_data.csv')\n\
+        print('shape',p.shape)\nfor c in ['EmpID','EmployeeNumber','Age','AgeGroup','Attrition','Department','JobRole','SalarySlab','MonthlyIncome','PerformanceRating','YearsAtCompany','YearsSinceLastPromotion','YearsInCurrentRole','JobLevel']:\n\
+        \ s=p[c];print('\\\\n',c,'type',s.dtype,'null',s.isna().sum(),'distinct',s.nunique(),'range',\
+        \ (s.min(),s.max()) if s.dtype.kind in 'iuf' else '', 'values', s.value_counts(dropna=False).head(30).to_dict()\
+        \ if s.nunique()<30 else '')\nprint('\\\\nDuplicated ID',p.EmpID.duplicated().sum(),p.EmployeeNumber.duplicated().sum())\n\
+        for c in ['AgeGroup','Attrition','Department','JobRole','SalarySlab']:\n print(c,sorted(str(x)\
+        \ for x in p[c].dropna().unique()))\nfor name,bad in {\n 'role > company':p.YearsInCurrentRole>p.YearsAtCompany,\n\
+        \ 'promotion > company':p.YearsSinceLastPromotion>p.YearsAtCompany,\n 'negative\
+        \ company':p.YearsAtCompany<0,\n 'negative role':p.YearsInCurrentRole<0,\n\
+        \ 'negative promo':p.YearsSinceLastPromotion<0,\n 'zero company':p.YearsAtCompany==0,\n\
+        \ 'negative salary':p.MonthlyIncome<=0,\n 'slab mismatch': ~(((p.SalarySlab=='Upto\
+        \ 5k')&(p.MonthlyIncome>0)&(p.MonthlyIncome<=5000))|((p.SalarySlab=='5k-10k')&(p.MonthlyIncome>5000)&(p.MonthlyIncome<=10000))|((p.SalarySlab=='10k-15k')&(p.MonthlyIncome>10000)&(p.MonthlyIncome<=15000))|((p.SalarySlab=='15k+')&(p.MonthlyIncome>15000))),\n\
+        \ 'age mismatch':~(((p.AgeGroup=='18-25')&p.Age.between(18,25))|((p.AgeGroup=='26-35')&p.Age.between(26,35))|((p.AgeGroup=='36-45')&p.Age.between(36,45))|((p.AgeGroup=='46-55')&p.Age.between(46,55))|((p.AgeGroup=='55+')&(p.Age>55)))\n\
+        }.items():\n print(name, bad.sum(),p.loc[bad,['EmpID','Age','AgeGroup','MonthlyIncome','SalarySlab','YearsAtCompany','YearsInCurrentRole','YearsSinceLastPromotion']].head(5).to_dict('records'))\n\
+        print('Department-role cross')\nprint(pd.crosstab(p.Department,p.JobRole).to_string())\n\
+        print('all columns nulls',p.isna().sum()[p.isna().sum()>0].to_dict())\nPY\""
+      aggregated_output: "shape (882, 39)\n\n EmpID type object null 0 distinct 882\
+        \ range  values \n\n EmployeeNumber type int64 null 0 distinct 882 range (1,\
+        \ 2068) values \n\n Age type int64 null 0 distinct 43 range (18, 60) values\
+        \ \n\n AgeGroup type object null 0 distinct 5 range  values {'26-35': 355,\
+        \ '36-45': 289, '46-55': 130, '18-25': 83, '55+': 25}\n\n Attrition type object\
+        \ null 0 distinct 2 range  values {'No': 724, 'Yes': 158}\n\n Department type\
+        \ object null 0 distinct 3 range  values {'Research & Development': 596, 'Sales':\
+        \ 250, 'Human Resources': 36}\n\n JobRole type object null 0 distinct 9 range\
+        \  values {'Research Scientist': 185, 'Sales Executive': 183, 'Laboratory\
+        \ Technician': 175, 'Manufacturing Director': 92, 'Healthcare Representative':\
+        \ 70, 'Manager': 52, 'Sales Representative': 49, 'Research Director': 45,\
+        \ 'Human Resources': 31}\n\n SalarySlab type object null 0 distinct 4 range\
+        \  values {'Upto 5k': 467, '5k-10k': 256, '10k-15k': 88, '15k+': 71}\n\n MonthlyIncome\
+        \ type int64 null 0 distinct 839 range (1009, 19999) values \n\n PerformanceRating\
+        \ type int64 null 0 distinct 2 range (3, 4) values {3: 754, 4: 128}\n\n YearsAtCompany\
+        \ type int64 null 0 distinct 34 range (0, 40) values \n\n YearsSinceLastPromotion\
+        \ type int64 null 0 distinct 16 range (0, 15) values {0: 345, 1: 206, 2: 98,\
+        \ 4: 46, 7: 45, 3: 34, 5: 27, 6: 20, 11: 13, 9: 11, 8: 11, 15: 7, 12: 7, 10:\
+        \ 5, 13: 4, 14: 3}\n\n YearsInCurrentRole type int64 null 0 distinct 19 range\
+        \ (0, 18) values {2: 213, 0: 154, 7: 136, 3: 82, 4: 68, 8: 50, 1: 37, 9: 36,\
+        \ 6: 22, 5: 20, 10: 17, 11: 16, 13: 8, 12: 6, 15: 5, 14: 4, 16: 4, 18: 2,\
+        \ 17: 2}\n\n JobLevel type int64 null 0 distinct 5 range (1, 5) values {1:\
+        \ 343, 2: 305, 3: 142, 4: 50, 5: 42}\n\nDuplicated ID 0 0\nAgeGroup ['18-25',\
+        \ '26-35', '36-45', '46-55', '55+']\nAttrition ['No', 'Yes']\nDepartment ['Human\
+        \ Resources', 'Research & Development', 'Sales']\nJobRole ['Healthcare Representative',\
+        \ 'Human Resources', 'Laboratory Technician', 'Manager', 'Manufacturing Director',\
+        \ 'Research Director', 'Research Scientist', 'Sales Executive', 'Sales Representative']\n\
+        SalarySlab ['10k-15k', '15k+', '5k-10k', 'Upto 5k']\nrole > company 0 []\n\
+        promotion > company 0 []\nnegative company 0 []\nnegative role 0 []\nnegative\
+        \ promo 0 []\nzero company 31 [{'EmpID': 'RM867', 'Age': 40, 'AgeGroup': '36-45',\
+        \ 'MonthlyIncome': 4327, 'SalarySlab': 'Upto 5k', 'YearsAtCompany': 0, 'YearsInCurrentRole':\
+        \ 0, 'YearsSinceLastPromotion': 0}, {'EmpID': 'RM1075', 'Age': 33, 'AgeGroup':\
+        \ '26-35', 'MonthlyIncome': 6388, 'SalarySlab': '5k-10k', 'YearsAtCompany':\
+        \ 0, 'YearsInCurrentRole': 0, 'YearsSinceLastPromotion': 0}, {'EmpID': 'RM078',\
+        \ 'Age': 45, 'AgeGroup': '36-45', 'MonthlyIncome': 13245, 'SalarySlab': '10k-15k',\
+        \ 'YearsAtCompany': 0, 'YearsInCurrentRole': 0, 'YearsSinceLastPromotion':\
+        \ 0}, {'EmpID': 'RM1372', 'Age': 56, 'AgeGroup': '55+', 'MonthlyIncome': 5380,\
+        \ 'SalarySlab': '5k-10k', 'YearsAtCompany': 0, 'YearsInCurrentRole': 0, 'YearsSinceLastPromotion':\
+        \ 0}, {'EmpID': 'RM266', 'Age': 29, 'AgeGroup': '26-35', 'MonthlyIncome':\
+        \ 6644, 'SalarySlab': '5k-10k', 'YearsAtCompany': 0, 'YearsInCurrentRole':\
+        \ 0, 'YearsSinceLastPromotion': 0}]\nnegative salary 0 []\nslab mismatch 0\
+        \ []\nage mismatch 0 []\nDepartment-role cross\nJobRole                 Healthcare\
+        \ Representative  Human Resources  Laboratory Technician  Manager  Manufacturing\
+        \ Director  Research Director  Research Scientist  Sales Executive  Sales\
+        \ Representative\nDepartment                                             \
+        \                                                                        \
+        \                                                                        \
+        \ \nHuman Resources                                 0               31   \
+        \                   0        5                       0                  0\
+        \                   0                0                     0\nResearch & Development\
+        \                         70                0                    175     \
+        \  29                      92                 45                 185     \
+        \           0                     0\nSales                               \
+        \            0                0                      0       18          \
+        \             0                  0                   0              183  \
+        \                  49\nall columns nulls {'YearsWithCurrManager': 41}\n"
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_9
+      type: reasoning
+      text: '**Evaluating program threshold and eligibility**
+
+
+        I''m looking at the program''s parameters that assume a threshold of 4, noting
+        that eligible ratings start at 4. The dataset shows only 3/4 without specific
+        guidelines, so maybe I should use a check for performance ratings within 1
+        to 4 instead of overfitting. For job levels, I see 1-5 as valid, and 0 as
+        invalid. I need to ensure checks on attrition and age are case-insensitive,
+        and confirm alignment checks for ages from 18-60. Time to write and test!'
+  - type: item.updated
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile program inputs and observed anomalies
+        completed: true
+      - text: Design targeted PyDeequ constraints
+        completed: false
+      - text: Validate checks and write constraints.json
+        completed: false
+  - type: item.completed
+    item:
+      id: item_10
+      type: reasoning
+      text: '**Evaluating promotion and salary data**
+
+
+        I''m checking the conditions for promotions and salary data, particularly
+        looking at tenure and the years at the company. I want to ensure the new dataset
+        has valid median salaries and that all values are positive. Any missing performance
+        data should be noted, as these indicate high performers could be dropped.
+        Performance ratings should only come from valid ranges, and the job level
+        must be complete. I''ll prepare a file with around 25 entries for further
+        analysis.'
+  - type: item.completed
+    item:
+      id: item_11
+      type: agent_message
+      text: The table supports the key relationships. I’ll encode them as PyDeequ
+        checks.
+  - type: item.started
+    item:
+      id: item_12
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {
+
+        +      \"column_name\": \"EmpID\",
+
+        +      \"code_for_constraint\": \".isComplete(''EmpID'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmpID\",
+
+        +      \"code_for_constraint\": \".isUnique(''EmpID'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmployeeNumber\",
+
+        +      \"code_for_constraint\": \".isComplete(''EmployeeNumber'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmployeeNumber\",
+
+        +      \"code_for_constraint\": \".isUnique(''EmployeeNumber'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmployeeNumber\",
+
+        +      \"code_for_constraint\": \".isPositive(''EmployeeNumber'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"AgeGroup\",
+
+        +      \"code_for_constraint\": \".isComplete(''AgeGroup'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"AgeGroup\",
+
+        +      \"code_for_constraint\": \".isContainedIn(''AgeGroup'', [''18-25'',
+        ''26-35'', ''36-45'', ''46-55'', ''55+''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"AgeGroup\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"(AgeGroup = ''18-25'' AND
+        Age BETWEEN 18 AND 25) OR (AgeGroup = ''26-35'' AND Age BETWEEN 26 AND 35)
+        OR (AgeGroup = ''36-45'' AND Age BETWEEN 36 AND 45) OR (AgeGroup = ''46-55''
+        AND Age BETWEEN 46 AND 55) OR (AgeGroup = ''55+'' AND Age > 55)\\\", ''age
+        matches career stage'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsAtCompany\",
+
+        +      \"code_for_constraint\": \".isComplete(''YearsAtCompany'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsAtCompany\",
+
+        +      \"code_for_constraint\": \".isNonNegative(''YearsAtCompany'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsInCurrentRole\",
+
+        +      \"code_for_constraint\": \".isComplete(''YearsInCurrentRole'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsInCurrentRole\",
+
+        +      \"code_for_constraint\": \".isNonNegative(''YearsInCurrentRole'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsInCurrentRole\",
+
+        +      \"code_for_constraint\": \".satisfies(''YearsInCurrentRole <= YearsAtCompany'',
+        ''role tenure within company tenure'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsSinceLastPromotion\",
+
+        +      \"code_for_constraint\": \".isComplete(''YearsSinceLastPromotion'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsSinceLastPromotion\",
+
+        +      \"code_for_constraint\": \".isNonNegative(''YearsSinceLastPromotion'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsSinceLastPromotion\",
+
+        +      \"code_for_constraint\": \".satisfies(''YearsSinceLastPromotion <=
+        YearsAtCompany'', ''promotion tenure within company tenure'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Department\",
+
+        +      \"code_for_constraint\": \".isComplete(''Department'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Department\",
+
+        +      \"code_for_constraint\": \".isContainedIn(''Department'', [''Sales'',
+        ''Research & Development'', ''Human Resources''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobRole\",
+
+        +      \"code_for_constraint\": \".isComplete(''JobRole'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobRole\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"(Department = ''Sales'' AND
+        JobRole IN (''Sales Executive'', ''Sales Representative'', ''Manager'')) OR
+        (Department = ''Human Resources'' AND JobRole IN (''Human Resources'', ''Manager''))
+        OR (Department = ''Research & Development'' AND JobRole IN (''Healthcare Representative'',
+        ''Laboratory Technician'', ''Manufacturing Director'', ''Research Director'',
+        ''Research Scientist'', ''Manager''))\\\", ''department matches job role'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"SalarySlab\",
+
+        +      \"code_for_constraint\": \".isComplete(''SalarySlab'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"SalarySlab\",
+
+        +      \"code_for_constraint\": \".isContainedIn(''SalarySlab'', [''Upto 5k'',
+        ''5k-10k'', ''10k-15k'', ''15k+''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"MonthlyIncome\",
+
+        +      \"code_for_constraint\": \".isComplete(''MonthlyIncome'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"MonthlyIncome\",
+
+        +      \"code_for_constraint\": \".isPositive(''MonthlyIncome'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"SalarySlab\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"(SalarySlab = ''Upto 5k''
+        AND MonthlyIncome > 0 AND MonthlyIncome <= 5000) OR (SalarySlab = ''5k-10k''
+        AND MonthlyIncome > 5000 AND MonthlyIncome <= 10000) OR (SalarySlab = ''10k-15k''
+        AND MonthlyIncome > 10000 AND MonthlyIncome <= 15000) OR (SalarySlab = ''15k+''
+        AND MonthlyIncome > 15000)\\\", ''salary matches slab bounds'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"PerformanceRating\",
+
+        +      \"code_for_constraint\": \".isComplete(''PerformanceRating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"PerformanceRating\",
+
+        +      \"code_for_constraint\": \".satisfies(''PerformanceRating BETWEEN 1
+        AND 4'', ''valid performance rating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobLevel\",
+
+        +      \"code_for_constraint\": \".isComplete(''JobLevel'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobLevel\",
+
+        +      \"code_for_constraint\": \".satisfies(''JobLevel BETWEEN 1 AND 5'',
+        ''valid job level'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Attrition\",
+
+        +      \"code_for_constraint\": \".isComplete(''Attrition'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Attrition\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"upper(Attrition) IN (''YES'',
+        ''NO'')\\\", ''valid attrition flag'')\"
+
+        +    }
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python -m json.tool constraints.json >/dev/null"'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_12
+      type: command_execution
+      command: '/usr/bin/bash -lc "apply_patch <<''PATCH''
+
+        *** Begin Patch
+
+        *** Add File: constraints.json
+
+        +{
+
+        +  \"constraints\": [
+
+        +    {
+
+        +      \"column_name\": \"EmpID\",
+
+        +      \"code_for_constraint\": \".isComplete(''EmpID'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmpID\",
+
+        +      \"code_for_constraint\": \".isUnique(''EmpID'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmployeeNumber\",
+
+        +      \"code_for_constraint\": \".isComplete(''EmployeeNumber'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmployeeNumber\",
+
+        +      \"code_for_constraint\": \".isUnique(''EmployeeNumber'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"EmployeeNumber\",
+
+        +      \"code_for_constraint\": \".isPositive(''EmployeeNumber'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"AgeGroup\",
+
+        +      \"code_for_constraint\": \".isComplete(''AgeGroup'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"AgeGroup\",
+
+        +      \"code_for_constraint\": \".isContainedIn(''AgeGroup'', [''18-25'',
+        ''26-35'', ''36-45'', ''46-55'', ''55+''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"AgeGroup\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"(AgeGroup = ''18-25'' AND
+        Age BETWEEN 18 AND 25) OR (AgeGroup = ''26-35'' AND Age BETWEEN 26 AND 35)
+        OR (AgeGroup = ''36-45'' AND Age BETWEEN 36 AND 45) OR (AgeGroup = ''46-55''
+        AND Age BETWEEN 46 AND 55) OR (AgeGroup = ''55+'' AND Age > 55)\\\", ''age
+        matches career stage'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsAtCompany\",
+
+        +      \"code_for_constraint\": \".isComplete(''YearsAtCompany'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsAtCompany\",
+
+        +      \"code_for_constraint\": \".isNonNegative(''YearsAtCompany'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsInCurrentRole\",
+
+        +      \"code_for_constraint\": \".isComplete(''YearsInCurrentRole'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsInCurrentRole\",
+
+        +      \"code_for_constraint\": \".isNonNegative(''YearsInCurrentRole'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsInCurrentRole\",
+
+        +      \"code_for_constraint\": \".satisfies(''YearsInCurrentRole <= YearsAtCompany'',
+        ''role tenure within company tenure'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsSinceLastPromotion\",
+
+        +      \"code_for_constraint\": \".isComplete(''YearsSinceLastPromotion'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsSinceLastPromotion\",
+
+        +      \"code_for_constraint\": \".isNonNegative(''YearsSinceLastPromotion'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"YearsSinceLastPromotion\",
+
+        +      \"code_for_constraint\": \".satisfies(''YearsSinceLastPromotion <=
+        YearsAtCompany'', ''promotion tenure within company tenure'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Department\",
+
+        +      \"code_for_constraint\": \".isComplete(''Department'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Department\",
+
+        +      \"code_for_constraint\": \".isContainedIn(''Department'', [''Sales'',
+        ''Research & Development'', ''Human Resources''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobRole\",
+
+        +      \"code_for_constraint\": \".isComplete(''JobRole'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobRole\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"(Department = ''Sales'' AND
+        JobRole IN (''Sales Executive'', ''Sales Representative'', ''Manager'')) OR
+        (Department = ''Human Resources'' AND JobRole IN (''Human Resources'', ''Manager''))
+        OR (Department = ''Research & Development'' AND JobRole IN (''Healthcare Representative'',
+        ''Laboratory Technician'', ''Manufacturing Director'', ''Research Director'',
+        ''Research Scientist'', ''Manager''))\\\", ''department matches job role'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"SalarySlab\",
+
+        +      \"code_for_constraint\": \".isComplete(''SalarySlab'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"SalarySlab\",
+
+        +      \"code_for_constraint\": \".isContainedIn(''SalarySlab'', [''Upto 5k'',
+        ''5k-10k'', ''10k-15k'', ''15k+''])\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"MonthlyIncome\",
+
+        +      \"code_for_constraint\": \".isComplete(''MonthlyIncome'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"MonthlyIncome\",
+
+        +      \"code_for_constraint\": \".isPositive(''MonthlyIncome'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"SalarySlab\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"(SalarySlab = ''Upto 5k''
+        AND MonthlyIncome > 0 AND MonthlyIncome <= 5000) OR (SalarySlab = ''5k-10k''
+        AND MonthlyIncome > 5000 AND MonthlyIncome <= 10000) OR (SalarySlab = ''10k-15k''
+        AND MonthlyIncome > 10000 AND MonthlyIncome <= 15000) OR (SalarySlab = ''15k+''
+        AND MonthlyIncome > 15000)\\\", ''salary matches slab bounds'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"PerformanceRating\",
+
+        +      \"code_for_constraint\": \".isComplete(''PerformanceRating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"PerformanceRating\",
+
+        +      \"code_for_constraint\": \".satisfies(''PerformanceRating BETWEEN 1
+        AND 4'', ''valid performance rating'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobLevel\",
+
+        +      \"code_for_constraint\": \".isComplete(''JobLevel'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"JobLevel\",
+
+        +      \"code_for_constraint\": \".satisfies(''JobLevel BETWEEN 1 AND 5'',
+        ''valid job level'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Attrition\",
+
+        +      \"code_for_constraint\": \".isComplete(''Attrition'')\"
+
+        +    },
+
+        +    {
+
+        +      \"column_name\": \"Attrition\",
+
+        +      \"code_for_constraint\": \".satisfies(\\\"upper(Attrition) IN (''YES'',
+        ''NO'')\\\", ''valid attrition flag'')\"
+
+        +    }
+
+        +  ]
+
+        +}
+
+        *** End Patch
+
+        PATCH
+
+        python -m json.tool constraints.json >/dev/null"'
+      aggregated_output: ''
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_13
+      type: reasoning
+      text: '**Verifying validation execution**
+
+
+        I need to run a validation locally. I should note the external path of the
+        deequ checker jar from the file. The user mentioned not to touch anything
+        outside the specified boundaries while executing the deequ_check, which will
+        access jars outside the folder. However, the user expressly indicated that
+        running the deequ_check is allowed, and it''s all clear for staging. I can
+        proceed to run the deequ_check with Python.'
+  - type: item.updated
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile program inputs and observed anomalies
+        completed: true
+      - text: Design targeted PyDeequ constraints
+        completed: true
+      - text: Validate checks and write constraints.json
+        completed: false
+  - type: item.completed
+    item:
+      id: item_14
+      type: agent_message
+      text: The constraints file is ready. I’ll run every check against the table.
+  - type: item.started
+    item:
+      id: item_15
+      type: command_execution
+      command: /usr/bin/bash -lc 'python deequ_check.py --table observed_data --constraints
+        constraints.json'
+      aggregated_output: ''
+      exit_code: null
+      status: in_progress
+  - type: item.completed
+    item:
+      id: item_15
+      type: command_execution
+      command: /usr/bin/bash -lc 'python deequ_check.py --table observed_data --constraints
+        constraints.json'
+      aggregated_output: 'SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+
+        SLF4J: Defaulting to no-operation (NOP) logger implementation
+
+        SLF4J: See http://www.slf4j.org/codes.html#StaticLoggerBinder for further
+        details.
+
+        SLF4J: Failed to load class "org.slf4j.impl.StaticMDCBinder".
+
+        SLF4J: Defaulting to no-operation MDCAdapter implementation.
+
+        SLF4J: See http://www.slf4j.org/codes.html#no_static_mdc_binder for further
+        details.
+
+        Python Callback server started!
+
+        [HOLDS] .isComplete(''EmpID'')
+
+        [HOLDS] .isUnique(''EmpID'')
+
+        [HOLDS] .isComplete(''EmployeeNumber'')
+
+        [HOLDS] .isUnique(''EmployeeNumber'')
+
+        [HOLDS] .isPositive(''EmployeeNumber'')
+
+        [HOLDS] .isComplete(''AgeGroup'')
+
+        [HOLDS] .isContainedIn(''AgeGroup'', [''18-25'', ''26-35'', ''36-45'', ''46-55'',
+        ''55+''])
+
+        [HOLDS] .satisfies("(AgeGroup = ''18-25'' AND Age BETWEEN 18 AND 25) OR (AgeGroup
+        = ''26-35'' AND Age BETWEEN 26 AND 35) OR (AgeGroup = ''36-45'' AND Age BETWEEN
+        36 AND 45) OR (AgeGroup = ''46-55'' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+        = ''55+'' AND Age > 55)", ''age matches career stage'')
+
+        [HOLDS] .isComplete(''YearsAtCompany'')
+
+        [HOLDS] .isNonNegative(''YearsAtCompany'')
+
+        [HOLDS] .isComplete(''YearsInCurrentRole'')
+
+        [HOLDS] .isNonNegative(''YearsInCurrentRole'')
+
+        [HOLDS] .satisfies(''YearsInCurrentRole <= YearsAtCompany'', ''role tenure
+        within company tenure'')
+
+        [HOLDS] .isComplete(''YearsSinceLastPromotion'')
+
+        [HOLDS] .isNonNegative(''YearsSinceLastPromotion'')
+
+        [HOLDS] .satisfies(''YearsSinceLastPromotion <= YearsAtCompany'', ''promotion
+        tenure within company tenure'')
+
+        [HOLDS] .isComplete(''Department'')
+
+        [HOLDS] .isContainedIn(''Department'', [''Sales'', ''Research & Development'',
+        ''Human Resources''])
+
+        [HOLDS] .isComplete(''JobRole'')
+
+        [HOLDS] .satisfies("(Department = ''Sales'' AND JobRole IN (''Sales Executive'',
+        ''Sales Representative'', ''Manager'')) OR (Department = ''Human Resources''
+        AND JobRole IN (''Human Resources'', ''Manager'')) OR (Department = ''Research
+        & Development'' AND JobRole IN (''Healthcare Representative'', ''Laboratory
+        Technician'', ''Manufacturing Director'', ''Research Director'', ''Research
+        Scientist'', ''Manager''))", ''department matches job role'')
+
+        [HOLDS] .isComplete(''SalarySlab'')
+
+        [HOLDS] .isContainedIn(''SalarySlab'', [''Upto 5k'', ''5k-10k'', ''10k-15k'',
+        ''15k+''])
+
+        [HOLDS] .isComplete(''MonthlyIncome'')
+
+        [HOLDS] .isPositive(''MonthlyIncome'')
+
+        [HOLDS] .satisfies("(SalarySlab = ''Upto 5k'' AND MonthlyIncome > 0 AND MonthlyIncome
+        <= 5000) OR (SalarySlab = ''5k-10k'' AND MonthlyIncome > 5000 AND MonthlyIncome
+        <= 10000) OR (SalarySlab = ''10k-15k'' AND MonthlyIncome > 10000 AND MonthlyIncome
+        <= 15000) OR (SalarySlab = ''15k+'' AND MonthlyIncome > 15000)", ''salary
+        matches slab bounds'')
+
+        [HOLDS] .isComplete(''PerformanceRating'')
+
+        [HOLDS] .satisfies(''PerformanceRating BETWEEN 1 AND 4'', ''valid performance
+        rating'')
+
+        [HOLDS] .isComplete(''JobLevel'')
+
+        [HOLDS] .satisfies(''JobLevel BETWEEN 1 AND 5'', ''valid job level'')
+
+        [HOLDS] .isComplete(''Attrition'')
+
+        [HOLDS] .satisfies("upper(Attrition) IN (''YES'', ''NO'')", ''valid attrition
+        flag'')
+
+
+        31/31 constraint(s) hold on table ''observed_data'' (882 rows).
+
+        '
+      exit_code: 0
+      status: completed
+  - type: item.completed
+    item:
+      id: item_16
+      type: reasoning
+      text: '**Evaluating data completeness**
+
+
+        I need to mark certain tasks as completed, and I''m wondering if the program
+        is using the actual age from the Age column correctly. Age group alignment
+        is crucial for accuracy. Performance ratings range from 1-4, so I should limit
+        the expected to 4. I need to ensure that null semantics are satisfied for
+        age groups, but it''s unclear if Deequ treats missing ages as failures. Overall,
+        I need a solid plan for checking completeness across departments and job roles.'
+  - type: item.updated
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile program inputs and observed anomalies
+        completed: true
+      - text: Design targeted PyDeequ constraints
+        completed: true
+      - text: Validate checks and write constraints.json
+        completed: true
+  - type: item.completed
+    item:
+      id: item_17
+      type: agent_message
+      text: Created `constraints.json` with 31 PyDeequ checks covering required fields,
+        identifiers, career stages, tenure, department-role alignment, salary slabs,
+        and promotion inputs. All 31 checks hold on the 882-row observed table.
+  - type: item.completed
+    item:
+      id: item_6
+      type: todo_list
+      items:
+      - text: Profile program inputs and observed anomalies
+        completed: true
+      - text: Design targeted PyDeequ constraints
+        completed: true
+      - text: Validate checks and write constraints.json
+        completed: true
+  - type: turn.completed
+    usage: *id001
+  stderr_tail: 'Reading additional input from stdin...
+
+    '
+constraints:
+  constraints:
+    AgeGroup:
+      code:
+      - - .isComplete('AgeGroup')
+        - Valid
+      - - .isContainedIn('AgeGroup', ['18-25', '26-35', '36-45', '46-55', '55+'])
+        - Valid
+      - - .satisfies("(AgeGroup = '18-25' AND Age BETWEEN 18 AND 25) OR (AgeGroup
+          = '26-35' AND Age BETWEEN 26 AND 35) OR (AgeGroup = '36-45' AND Age BETWEEN
+          36 AND 45) OR (AgeGroup = '46-55' AND Age BETWEEN 46 AND 55) OR (AgeGroup
+          = '55+' AND Age > 55)", 'age matches career stage')
+        - Valid
+      assumptions: []
+      column_name: AgeGroup
+    Attrition:
+      code:
+      - - .isComplete('Attrition')
+        - Valid
+      - - .satisfies("upper(Attrition) IN ('YES', 'NO')", 'valid attrition flag')
+        - Valid
+      assumptions: []
+      column_name: Attrition
+    Department:
+      code:
+      - - .isComplete('Department')
+        - Valid
+      - - .isContainedIn('Department', ['Sales', 'Research & Development', 'Human
+          Resources'])
+        - Valid
+      assumptions: []
+      column_name: Department
+    EmpID:
+      code:
+      - - .isComplete('EmpID')
+        - Valid
+      - - .isUnique('EmpID')
+        - Valid
+      assumptions: []
+      column_name: EmpID
+    EmployeeNumber:
+      code:
+      - - .isComplete('EmployeeNumber')
+        - Valid
+      - - .isPositive('EmployeeNumber')
+        - Valid
+      - - .isUnique('EmployeeNumber')
+        - Valid
+      assumptions: []
+      column_name: EmployeeNumber
+    JobLevel:
+      code:
+      - - .isComplete('JobLevel')
+        - Valid
+      - - .satisfies('JobLevel BETWEEN 1 AND 5', 'valid job level')
+        - Valid
+      assumptions: []
+      column_name: JobLevel
+    JobRole:
+      code:
+      - - .isComplete('JobRole')
+        - Valid
+      - - .satisfies("(Department = 'Sales' AND JobRole IN ('Sales Executive', 'Sales
+          Representative', 'Manager')) OR (Department = 'Human Resources' AND JobRole
+          IN ('Human Resources', 'Manager')) OR (Department = 'Research & Development'
+          AND JobRole IN ('Healthcare Representative', 'Laboratory Technician', 'Manufacturing
+          Director', 'Research Director', 'Research Scientist', 'Manager'))", 'department
+          matches job role')
+        - Valid
+      assumptions: []
+      column_name: JobRole
+    MonthlyIncome:
+      code:
+      - - .isComplete('MonthlyIncome')
+        - Valid
+      - - .isPositive('MonthlyIncome')
+        - Valid
+      assumptions: []
+      column_name: MonthlyIncome
+    PerformanceRating:
+      code:
+      - - .isComplete('PerformanceRating')
+        - Valid
+      - - .satisfies('PerformanceRating BETWEEN 1 AND 4', 'valid performance rating')
+        - Valid
+      assumptions: []
+      column_name: PerformanceRating
+    SalarySlab:
+      code:
+      - - .isComplete('SalarySlab')
+        - Valid
+      - - .isContainedIn('SalarySlab', ['Upto 5k', '5k-10k', '10k-15k', '15k+'])
+        - Valid
+      - - .satisfies("(SalarySlab = 'Upto 5k' AND MonthlyIncome > 0 AND MonthlyIncome
+          <= 5000) OR (SalarySlab = '5k-10k' AND MonthlyIncome > 5000 AND MonthlyIncome
+          <= 10000) OR (SalarySlab = '10k-15k' AND MonthlyIncome > 10000 AND MonthlyIncome
+          <= 15000) OR (SalarySlab = '15k+' AND MonthlyIncome > 15000)", 'salary matches
+          slab bounds')
+        - Valid
+      assumptions: []
+      column_name: SalarySlab
+    YearsAtCompany:
+      code:
+      - - .isComplete('YearsAtCompany')
+        - Valid
+      - - .isNonNegative('YearsAtCompany')
+        - Valid
+      assumptions: []
+      column_name: YearsAtCompany
+    YearsInCurrentRole:
+      code:
+      - - .isComplete('YearsInCurrentRole')
+        - Valid
+      - - .isNonNegative('YearsInCurrentRole')
+        - Valid
+      - - .satisfies('YearsInCurrentRole <= YearsAtCompany', 'role tenure within company
+          tenure')
+        - Valid
+      assumptions: []
+      column_name: YearsInCurrentRole
+    YearsSinceLastPromotion:
+      code:
+      - - .isComplete('YearsSinceLastPromotion')
+        - Valid
+      - - .isNonNegative('YearsSinceLastPromotion')
+        - Valid
+      - - .satisfies('YearsSinceLastPromotion <= YearsAtCompany', 'promotion tenure
+          within company tenure')
+        - Valid
+      assumptions: []
+      column_name: YearsSinceLastPromotion
