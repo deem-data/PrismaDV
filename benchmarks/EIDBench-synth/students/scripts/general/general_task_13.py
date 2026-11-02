@@ -51,6 +51,10 @@ def main():
     assert set(df[target_col].unique()).issubset(allowed_targets)
     assert 0 < p_dropout < 1
     # ASSERTION_END
+    # ASSERTION_START
+    # The weekly risk table lists each student once, and the priors count each student once
+    assert not df.duplicated().any()
+    # ASSERTION_END
     # Use priors to calibrate an intercept term for risk normalization
     # The transform relies on proportions being bounded away from {0,1}
     prior_dropout_logit = math.log(p_dropout / max(1e-12, (1.0 - p_dropout)))
@@ -133,6 +137,10 @@ def main():
     both_valid_ne1 = ne1.notna() & e1.notna()
     assert (ne1[both_valid_ne1] <= e1[both_valid_ne1]).all()
     # ASSERTION_END
+    # ASSERTION_START
+    # The semester grade is the average of the approved units; grade_gap1 and pass_rate1 both enter academic_gap
+    assert ((g1 > 0) == (a1 > 0)).all()
+    # ASSERTION_END
     e1_safe = e1.replace(0, np.nan)
     pass_rate1 = (a1 / e1_safe).clip(0.0, 1.0).fillna(0.0)
     no_eval_ratio1 = (ne1 / e1_safe).clip(0.0, 1.0).fillna(0.0)
@@ -160,6 +168,10 @@ def main():
     # Similarly for 'without evaluations'.
     both_valid_ne2 = ne2.notna() & e2.notna()
     assert (ne2[both_valid_ne2] <= e2[both_valid_ne2]).all()
+    # ASSERTION_END
+    # ASSERTION_START
+    # The semester grade is the average of the approved units; grade_gap2 and pass_rate2 both enter academic_gap
+    assert ((g2 > 0) == (a2 > 0)).all()
     # ASSERTION_END
     e2_safe = e2.replace(0, np.nan)
     pass_rate2 = (a2 / e2_safe).clip(0.0, 1.0).fillna(0.0)

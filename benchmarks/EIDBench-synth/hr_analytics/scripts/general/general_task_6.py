@@ -24,9 +24,8 @@ cond_range = (hike >= 10) & (hike <= 25)
 cond_int = (hike % 1 == 0)
 mean_3 = hike[pr == 3].mean()
 mean_4 = hike[pr == 4].mean()
-share_pr3 = (pr == 3).mean()
 assert cond_allowed.all() and cond_range.all() and cond_int.all() and not np.isnan(mean_3) and not np.isnan(
-    mean_4) and (mean_4 >= mean_3) and (share_pr3 >= 0.80)
+    mean_4) and (mean_4 >= mean_3)
 # ASSERTION_END
 
 rating_bonus_map = {3: 0.0, 4: 2.0}
@@ -38,9 +37,7 @@ mi = df['MonthlyIncome']
 slab = df['SalarySlab']
 allowed_slabs = ['Upto 5k', '5k-10k', '10k-15k', '15k+']
 expected_slab = pd.cut(mi, bins=[0, 5000, 10000, 15000, np.inf], labels=allowed_slabs, right=True, include_lowest=False)
-share_low = (slab == 'Upto 5k').mean()
-assert (mi > 0).all() and slab.isin(allowed_slabs).all() and (slab == expected_slab.astype(str)).all() and (
-            share_low >= 0.45)
+assert (mi > 0).all() and slab.isin(allowed_slabs).all() and (slab == expected_slab.astype(str)).all()
 # ASSERTION_END
 
 cap_map = {'Upto 5k': 20.0, '5k-10k': 15.0, '10k-15k': 12.0, '15k+': 10.0}
@@ -142,8 +139,7 @@ mgr_penalty = np.where(mgr_tenure < 1.0, 0.2, 0.0)
 attr = df['Attrition']
 cond_notnull = attr.notna().all()
 cond_values = attr.isin(['Yes', 'No']).all()
-share_no = (attr == 'No').mean()
-assert cond_notnull and cond_values and (share_no >= 0.70)
+assert cond_notnull and cond_values
 # ASSERTION_END
 
 yes_rate = (df['Attrition'] == 'Yes').mean()

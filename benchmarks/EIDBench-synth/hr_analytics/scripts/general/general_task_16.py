@@ -194,5 +194,6 @@ def main():
     output_csv = os.path.join(args.output, 'attrition_risk_scores.csv')
     result_df.to_csv(output_csv, index=False)
 
-    if __name__ == '__main__':
-        main()
+
+if __name__ == '__main__':
+    main()

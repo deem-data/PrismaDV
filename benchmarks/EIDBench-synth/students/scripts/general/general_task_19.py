@@ -46,7 +46,15 @@ assert (df[AP1] >= 0).all()
 assert (df[AP1] <= df[EV1]).all()
 # ASSERTION_END
 # ASSERTION_START
+# The standing and eligibility table lists each student once
+assert not df.duplicated().any()
+# ASSERTION_END
+# ASSERTION_START
 assert ((df[GR1] >= 0) & (df[GR1] <= 20)).all()
+# ASSERTION_END
+# ASSERTION_START
+# The semester grade is the average of the approved units; grade_norm_1 and approved_rate_1 both enter term1_score
+assert ((df[GR1] > 0) == (df[AP1] > 0)).all()
 # ASSERTION_END
 grade_norm_1 = df[GR1] / 20.0
 approved_rate_1 = df[AP1] / df[EV1].replace({0: np.nan})
@@ -62,6 +70,10 @@ assert (df[AP2] <= df[EV2]).all()
 # ASSERTION_END
 # ASSERTION_START
 assert ((df[GR2] >= 0) & (df[GR2] <= 20)).all()
+# ASSERTION_END
+# ASSERTION_START
+# The semester grade is the average of the approved units; grade_norm_2 and approved_rate_2 both enter term2_score
+assert ((df[GR2] > 0) == (df[AP2] > 0)).all()
 # ASSERTION_END
 grade_norm_2 = df[GR2] / 20.0
 approved_rate_2 = df[AP2] / df[EV2].replace({0: np.nan})

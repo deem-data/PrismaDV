@@ -48,6 +48,10 @@ def main():
     assert (without_evals >= 0).all()
     assert (without_evals <= enrolled).all()
     # ASSERTION_END
+    # ASSERTION_START
+    # The early-warning table lists each student once, and the rates count each student once
+    assert not df.duplicated().any()
+    # ASSERTION_END
     attended = enrolled - without_evals
     with np.errstate(divide='ignore', invalid='ignore'):
         evaluation_rate = np.where(enrolled > 0, attended / enrolled, 0.0)
@@ -71,6 +75,10 @@ def main():
         credit_ratio = np.where(enrolled > 0, credited / enrolled, 0.0)
     # ASSERTION_START
     assert (grade >= 0.0).all() and (grade <= 20.0).all()
+    # ASSERTION_END
+    # ASSERTION_START
+    # The semester grade is the average of the approved units; grade_norm and pass_rate both enter base_risk
+    assert ((grade > 0) == (approved > 0)).all()
     # ASSERTION_END
     grade_norm = grade / 20.0
 

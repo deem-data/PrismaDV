@@ -84,7 +84,31 @@ def _load_drug_analysis() -> Any:
 
 # ---- Spark session -------------------------------------------------------
 
+def java_major_version() -> int | None:
+    """Major version of the `java` on PATH (JAVA_HOME first), or None."""
+    java = os.environ.get("JAVA_HOME")
+    java = str(Path(java) / "bin" / "java") if java else (shutil.which("java") or "java")
+    try:
+        proc = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r'version "(\d+)(?:\.(\d+))?', proc.stderr or proc.stdout or "")
+    if not match:
+        return None
+    major = int(match.group(1))
+    return int(match.group(2) or 0) if major == 1 else major
+
+
 def ensure_local_java_compat() -> None:
+    """Allow Spark's SecurityManager use on JDK 18+.
+
+    `-Djava.security.manager=allow` is only understood from JDK 12 on; JDK 11
+    reads `allow` as a class name and the JVM dies at start-up, taking every
+    run down with "Java gateway process exited before sending its port number".
+    """
+    major = java_major_version()
+    if major is not None and major < 12:
+        return
     compat_flag = "-Djava.security.manager=allow"
     current = os.environ.get("SPARK_SUBMIT_OPTS", "").strip()
     if compat_flag not in current.split():
@@ -277,13 +301,28 @@ def export_omop_tables_to_sqlite(spark: Any, sqlite_path: Path,
     return counts
 
 
-def run_chf_cohort(input_dir: Path, output_dir: Path) -> dict[str, Any]:
-    if not PIXI_BIN.exists():
+def rscript_command(script: Path, *args: str) -> list[str]:
+    """`Rscript` through the example's pixi environment, or from PATH.
+
+    The pixi environment pins the R packages the CHF script needs. Without
+    pixi, an `Rscript` on PATH (e.g. a cluster module with the packages
+    installed) is used instead of failing before the pipeline has run.
+    """
+    if PIXI_BIN.exists():
+        return [str(PIXI_BIN), "run", "--manifest-path", str(EXAMPLE_DIR / "pixi.toml"),
+                "--", "Rscript", str(script), *args]
+    rscript = shutil.which("Rscript")
+    if rscript is None:
         raise FileNotFoundError(
-            f"pixi binary not found at {PIXI_BIN}; install with "
+            f"pixi binary not found at {PIXI_BIN} and no Rscript on PATH; install pixi with "
             "`curl -fsSL https://pixi.sh/install.sh | bash` and run `pixi install` "
             "in this example directory."
         )
+    return [rscript, str(script), *args]
+
+
+def run_chf_cohort(input_dir: Path, output_dir: Path) -> dict[str, Any]:
+    r_command = rscript_command(CHF_R_SCRIPT)  # fail early if no R runtime exists
     spark = create_spark("omop_cdm_databricks_chf_cohort", output_dir)
     try:
         pipeline = _build_omop_dataset(spark, input_dir)
@@ -294,8 +333,7 @@ def run_chf_cohort(input_dir: Path, output_dir: Path) -> dict[str, Any]:
 
     cohort_json_path = output_dir / "chf_cohort_summary.json"
     proc = subprocess.run(
-        [str(PIXI_BIN), "run", "--manifest-path", str(EXAMPLE_DIR / "pixi.toml"),
-         "--", "Rscript", str(CHF_R_SCRIPT), str(sqlite_path), str(cohort_json_path)],
+        [*r_command, str(sqlite_path), str(cohort_json_path)],
         capture_output=True,
         text=True,
         cwd=str(EXAMPLE_DIR),
@@ -335,3 +373,26 @@ def run_script(script_id: str, input_dir: Path, output_dir: Path) -> None:
     else:
         raise AssertionError(script_id)
     write_summary(output_dir, summary)
+    # The summary is written first so the failure is inspectable, then the
+    # run is failed, so a SQL statement that did not execute or an R script
+    # that crashed never counts as a passed run.
+    problems = pipeline_failures(summary)
+    if problems:
+        raise RuntimeError(f"{script_id} failed: " + "; ".join(problems))
+
+
+def pipeline_failures(summary: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    pipeline = summary.get("pipeline", summary)
+    for stage in ("cdm_setup", "etl"):
+        failures = pipeline.get(stage, {}).get("failures") or []
+        if failures:
+            first = failures[0]
+            problems.append(
+                f"{len(failures)} SQL statement(s) failed in {stage} "
+                f"(first: {first.get('statement_head', '')!r}: {first.get('error', '')})"
+            )
+    if summary.get("status") == "rscript_failed":
+        tail = summary.get("rscript_stderr_tail") or []
+        problems.append(f"Rscript exited {summary.get('rscript_returncode')}: {' | '.join(tail[-3:])}")
+    return problems

@@ -77,11 +77,6 @@ assert (df.loc[mask_hr, "Department"] == "Human Resources").all()
 
 # Department share check prior to department-weighted metrics
 rd_share = (df["Department"] == "Research & Development").mean()
-
-# ASSERTION_START
-assert rd_share >= 0.60
-# ASSERTION_END
-
 # ---- Age and AgeGroup integrity used for risk segmentation ----
 # ASSERTION_START
 assert df["Age"].between(18, 65).all()
@@ -110,10 +105,6 @@ assert ((~m_55p) | (age >= 55)).all()
 # ASSERTION_END
 
 major_groups = df["AgeGroup"].isin(["26-35", "36-45"]).mean()
-# ASSERTION_START
-assert major_groups >= 0.70
-# ASSERTION_END
-
 # ---- Tenure logical constraints and coverage ----
 # ASSERTION_START
 assert (df["YearsSinceLastPromotion"] <= df["YearsAtCompany"]).all()
@@ -134,10 +125,6 @@ assert (df["YearsAtCompany"] <= df["TotalWorkingYears"]).all()
 
 # ASSERTION_START
 assert (df["TotalWorkingYears"] <= (df["Age"] - 15)).all()
-# ASSERTION_END
-
-# ASSERTION_START
-assert df["YearsWithCurrManager"].notna().mean() >= 0.95
 # ASSERTION_END
 
 # Features derived from tenure that depend on constraints above
@@ -166,11 +153,6 @@ mean4 = float(mean_hike_by_rating.get(4, np.nan))
 assert mean4 >= mean3
 # ASSERTION_END
 
-# ASSERTION_START
-pct_pr3 = (df["PerformanceRating"] == 3).mean()
-assert pct_pr3 >= 0.80
-# ASSERTION_END
-
 # Performance factors for risk scoring
 perf_adj = np.where(df["PerformanceRating"] == 4, 0.95, 1.05)
 comp_change_norm = (25 - df["PercentSalaryHike"]) / 14.0
@@ -190,17 +172,8 @@ ot_yes = (df["OverTime"] == "Yes")
 
 overall_attr_rate = attr.mean()
 ot_yes_prop = ot_yes.mean()
-# ASSERTION_START
-assert (overall_attr_rate >= 0.10) and (overall_attr_rate <= 0.25)
-assert (ot_yes_prop >= 0.20) and (ot_yes_prop <= 0.40)
-# ASSERTION_END
-
 rate_yes = np.where(ot_yes.sum() > 0, attr[ot_yes].mean(), np.nan)
 rate_no = np.where((~ot_yes).sum() > 0, attr[~ot_yes].mean(), np.nan)
-# ASSERTION_START
-assert rate_yes >= 1.2 * rate_no
-# ASSERTION_END
-
 # Calibrate OT multiplier from observed rates
 ot_multiplier = np.where(ot_yes, np.log((rate_yes + 1e-6) / (rate_no + 1e-6)), 0.0)
 

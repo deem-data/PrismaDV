@@ -52,6 +52,10 @@ assert mac_gdp.std(ddof=0) > 0
 assert mac_unemp.std(ddof=0) > 0
 assert mac_infl.std(ddof=0) > 0
 # ASSERTION_END
+# ASSERTION_START
+# The risk scores and the advisor queue list each student once
+assert not df.duplicated().any()
+# ASSERTION_END
 # Macro stress feature (higher = worse environment)
 zg = (mac_gdp - mac_gdp.mean()) / mac_gdp.std(ddof=0)
 zu = (mac_unemp - mac_unemp.mean()) / mac_unemp.std(ddof=0)
@@ -103,6 +107,10 @@ assert (gr1[mask_en1_zero] == 0).all()
 # Check for non-zero standard deviation to prevent division by zero or NaN in slope calculation.
 assert en1.std(ddof=0) > 0
 # ASSERTION_END
+# ASSERTION_START
+# The semester grade is the average of the approved units; grade_norm1 and pass_rate1 both enter the risk
+assert ((gr1 > 0) == (ap1 > 0)).all()
+# ASSERTION_END
 pass_rate1 = np.where(en1 > 0, ap1 / en1.replace(0, np.nan), 1.0)
 grade_norm1 = gr1 / 20.0
 noeval_ratio1 = np.where(en1 > 0, wo1 / en1.replace(0, np.nan), 0.0)
@@ -136,6 +144,10 @@ mask_en2_zero = (en2 == 0)
 assert (gr2[mask_en2_zero] == 0).all()
 # Check for non-zero standard deviation to prevent division by zero or NaN in slope calculation.
 assert en2.std(ddof=0) > 0
+# ASSERTION_END
+# ASSERTION_START
+# The semester grade is the average of the approved units; grade_norm2 and pass_rate2 both enter the risk
+assert ((gr2 > 0) == (ap2 > 0)).all()
 # ASSERTION_END
 pass_rate2 = np.where(en2 > 0, ap2 / en2.replace(0, np.nan), 1.0)
 grade_norm2 = gr2 / 20.0

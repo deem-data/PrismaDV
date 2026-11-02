@@ -47,6 +47,10 @@ def main():
     assert x.ge(0).all()
     # ASSERTION_END
     # ASSERTION_START
+    # The risk table and the queues list each student once
+    assert not df.duplicated().any()
+    # ASSERTION_END
+    # ASSERTION_START
     a = s1_eval
     b = s1_enrolled
     we = s1_without
@@ -72,6 +76,10 @@ def main():
     # ASSERTION_START
     assert g1.notna().all()
     assert (g1.ge(0.0) & g1.le(20.0)).all()
+    # ASSERTION_END
+    # ASSERTION_START
+    # The semester grade is the average of the approved units; avg_grade and approved_ratio both enter the risk
+    assert ((g1 > 0) == (s1_approved > 0)).all()
     # ASSERTION_END
     # ASSERTION_START
     g_2 = g2
@@ -113,6 +121,10 @@ def main():
     # ASSERTION_START
     ao = app_order
     assert ao.notna().all()
+    # ASSERTION_END
+    # ASSERTION_START
+    # app_adj gives the first choice a bonus and orders 0 and 9 a penalty: order is 0 to 9
+    assert app_order.between(0, 9).all()
     # ASSERTION_END
     # Risk components
     lack_eval_flag = (s1_without > 0).astype(int)

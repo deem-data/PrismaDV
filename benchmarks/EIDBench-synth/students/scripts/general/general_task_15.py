@@ -56,6 +56,10 @@ def main():
     assert df[col_target].isin(allowed_targets).all()
     # ASSERTION_END
     # ASSERTION_START
+    # The model trains and scores on one row per student, and the predictions list each student once
+    assert not df.duplicated().any()
+    # ASSERTION_END
+    # ASSERTION_START
     # Application order integrity and distribution
     # Financial consistency
     # Admissions and prior grades range and presence

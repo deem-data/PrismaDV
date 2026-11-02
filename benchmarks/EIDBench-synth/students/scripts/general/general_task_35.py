@@ -40,6 +40,10 @@ def main():
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
+    # ASSERTION_START
+    # The risk scores and the advisor queue list each student once
+    assert not df.duplicated().any()
+    # ASSERTION_END
 
     # ASSERTION_START
     # Academic progress - 1st semester
@@ -69,6 +73,10 @@ def main():
     c1_grade = 'Curricular units 1st sem (grade)'
     # Grade normalization requires a non-null grade on the 0-20 scale.
     assert ((df[c1_grade] >= 0) & (df[c1_grade] <= 20)).all()
+    # ASSERTION_END
+    # ASSERTION_START
+    # The semester grade is the average of the approved units; grade_risk and pass_rate_1 both enter risk_score
+    assert ((df[c1_grade] > 0) == (df[c1_approved] > 0)).all()
     # ASSERTION_END
     grade_norm_1 = df[c1_grade] / 20.0
     grade_risk = 1.0 - grade_norm_1

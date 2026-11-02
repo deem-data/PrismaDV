@@ -20,7 +20,7 @@ def map_income_to_slab(income_series: pd.Series) -> pd.Series:
         (s > 15000)
     ]
     choices = ['Upto 5k', '5k-10k', '10k-15k', '15k+']
-    return np.select(conditions, choices, default=np.nan)
+    return np.select(conditions, choices, default=None)
 
 
 def main():
@@ -78,7 +78,7 @@ def main():
     role_to_dept = {
         'Sales Executive': 'Sales',
         'Sales Representative': 'Sales',
-        'Healthcare Representative': 'Sales',
+        'Healthcare Representative': 'Research & Development',
         'Research Scientist': 'Research & Development',
         'Laboratory Technician': 'Research & Development',
         'Research Director': 'Research & Development',
@@ -159,5 +159,6 @@ def main():
     )
     manager_stability.to_csv(os.path.join(args.output, 'manager_stability_by_department.csv'), index=False)
 
-    if __name__ == '__main__':
-        main()
+
+if __name__ == '__main__':
+    main()

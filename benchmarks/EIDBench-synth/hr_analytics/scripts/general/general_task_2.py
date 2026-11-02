@@ -123,8 +123,7 @@ def main():
     m4 = (df.loc[mask_d, 'YearsSinceLastPromotion'] <= df.loc[mask_d, 'YearsAtCompany']).all()
     mask_e = df['TotalWorkingYears'].notna() & df['Age'].notna()
     m5 = (df.loc[mask_e, 'TotalWorkingYears'] <= df.loc[mask_e, 'Age'] - 18).all()
-    pct_nonnull_mgr = df['YearsWithCurrManager'].notna().mean()
-    assert nonneg_ok and m1 and m2 and m3 and m4 and m5 and (pct_nonnull_mgr >= 0.95)
+    assert nonneg_ok and m1 and m2 and m3 and m4 and m5
     # ASSERTION_END
 
     # Compensation modeling components

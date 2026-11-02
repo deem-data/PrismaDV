@@ -69,6 +69,10 @@ numeric_cols = [
 ]
 for col in numeric_cols:
     df[col] = pd.to_numeric(df[col], errors='coerce')
+# ASSERTION_START
+# The risk scores and the outreach queue list each student once
+assert not df.duplicated().any()
+# ASSERTION_END
 
 # ASSERTION_START
 # Guard Target assumptions before filtering
@@ -137,6 +141,22 @@ assert (df[c_prev_grade] >= 0).all()
 assert (df[c_unemp] >= 0).all()
 assert df[c_gdp].notna().all()
 assert df[c_infl].notna().all()
+# ASSERTION_END
+# ASSERTION_START
+# The semester grade is the average of the approved units; grade_norm and approval_rate both enter academic_perf
+assert ((df[c1_grade] > 0) == (df[c1_app] > 0)).all()
+assert ((df[c2_grade] > 0) == (df[c2_app] > 0)).all()
+# ASSERTION_END
+# ASSERTION_START
+# age_norm divides by (70 - 16) and app_risk by 8: age at most 70, application order 1 to 9
+assert (df[c_age] <= 70).all()
+assert df[c_app_order].between(1, 9).all()
+# ASSERTION_END
+# ASSERTION_START
+# The macro normalisation assumes unemployment 5 to 20, inflation -2 to 5 and GDP -5 to 5
+assert df[c_unemp].between(5, 20).all()
+assert df[c_infl].between(-2, 5).all()
+assert df[c_gdp].between(-5, 5).all()
 # ASSERTION_END
 # Build features needed for risk scoring
 approval_rate_1 = robust_divide(df[c1_app], df[c1_enr], default=1.0)

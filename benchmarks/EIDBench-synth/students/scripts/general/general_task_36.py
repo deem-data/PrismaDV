@@ -45,6 +45,10 @@ eligible1 = df[c1_en] - df[c1_wo]
 assert (eligible1 >= 0).all()
 assert (df[c1_ap] >= 0).all()
 # ASSERTION_END
+# ASSERTION_START
+# The risk scores and the outreach queue list each student once
+assert not df.duplicated().any()
+# ASSERTION_END
 pass_rate1 = np.where(eligible1 > 0, df[c1_ap] / eligible1, 0.0)
 
 eligible2 = df[c2_en] - df[c2_wo]
@@ -65,6 +69,11 @@ assert (df[c1_en] >= 0).all()
 assert (df[c2_en] >= 0).all()
 assert df[c1_gr].notna().all()
 assert df[c2_gr].notna().all()
+# ASSERTION_END
+# ASSERTION_START
+# The semester grade is the average of the approved units; weighted_avg_grade and pass_rate both enter the score
+assert ((df[c1_gr] > 0) == (df[c1_ap] > 0)).all()
+assert ((df[c2_gr] > 0) == (df[c2_ap] > 0)).all()
 # ASSERTION_END
 enrolled_total = df[c1_en] + df[c2_en]
 weighted_avg_grade = np.where(enrolled_total > 0,

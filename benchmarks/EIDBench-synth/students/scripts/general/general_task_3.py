@@ -46,6 +46,10 @@ def main():
     for col in num_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
+    # ASSERTION_START
+    # The risk scores and the alerts list each student once, and the alert budget counts each student once
+    assert not df.duplicated().any()
+    # ASSERTION_END
 
     # ASSERTION_START
     # Finance integrity checks before computing financial risk
@@ -112,6 +116,11 @@ def main():
     assert df[c2_grade].notna().all()
     assert df[c2_grade].between(0, 20).all()
     # ASSERTION_END
+    # ASSERTION_START
+    # The semester grade is the average of the approved units; grade_risk and fail_rate both enter academic_risk
+    assert ((df[c1_grade] > 0) == (df[c1_app] > 0)).all()
+    assert ((df[c2_grade] > 0) == (df[c2_app] > 0)).all()
+    # ASSERTION_END
     grade_risk_1 = 1.0 - (df[c1_grade] / 20.0)
     grade_risk_2 = 1.0 - (df[c2_grade] / 20.0)
 
@@ -120,6 +129,11 @@ def main():
     # ASSERTION_START
     assert df[g_admission].notna().all()
     assert df[g_prev].notna().all()
+    # ASSERTION_END
+    # ASSERTION_START
+    # prep_risk divides the sum of both grades by 400 and their gap by 50: both grades are on the 0 to 200 scale
+    assert df[g_admission].between(0, 200).all()
+    assert df[g_prev].between(0, 200).all()
     # ASSERTION_END
     prep_risk = 0.5 * np.clip(diff_ap / 50.0, 0.0, 1.0) + 0.5 * np.clip(1.0 - ((df[g_admission] + df[g_prev]) / 400.0),
                                                                         0.0, 1.0)

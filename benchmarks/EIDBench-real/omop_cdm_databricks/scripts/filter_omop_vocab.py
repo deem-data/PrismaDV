@@ -1,26 +1,4 @@
-"""Filter the Athena OMOP vocab dump to only the concepts referenced by our Synthea sample.
-
-One-shot offline preprocessing step. Run from the example root once:
-
-    uv run python scripts/filter_omop_vocab.py
-
-It expects the full Athena dump under ``/tmp/omop_vocab_full/`` (download with
-``curl https://hls-eng-data-public.s3.amazonaws.com/data/rwe/omop-vocabs/<table>.csv.gz``)
-and writes the filtered subset to ``files/clean/tables/vocab/``.
-
-Strategy:
-1. Collect distinct source codes from the 4 Synthea code-bearing tables, paired with the
-   vocabulary that the ETL maps them through (see 4-omop531-etl-synthea.sql joins):
-     - conditions.CODE    → SNOMED
-     - medications.CODE   → RxNorm
-     - procedures.CODE    → SNOMED  (Synthea uses SNOMED for procedure codes)
-     - observations.CODE  → LOINC
-2. Filter CONCEPT to rows where (vocabulary_id, concept_code) matches a source pair.
-3. Follow "Maps to" relationships in CONCEPT_RELATIONSHIP from those source concepts.
-4. Keep the source concepts and the Maps-to targets in CONCEPT.
-5. Keep CONCEPT_RELATIONSHIP rows whose "maps to" both endpoints live in the keep set.
-6. Ship VOCABULARY / DOMAIN / CONCEPT_CLASS / RELATIONSHIP verbatim (all tiny).
-"""
+"""Filter the Athena OMOP vocab dump to only the concepts referenced by our Synthea sample."""
 from __future__ import annotations
 
 import shutil
